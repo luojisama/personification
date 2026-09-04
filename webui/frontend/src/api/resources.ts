@@ -1,4 +1,4 @@
-import { api } from "./client";
+import { api, API_BASE, rawApiRequest } from "./client";
 import type {
   AgentRuntimeSnapshot,
   BotIdentity,
@@ -15,6 +15,7 @@ import type {
   GroupSwitchPage,
   StickerPage,
   CatalogItem,
+  CapabilityName,
   CursorPage,
   MultimodalRouteSnapshot,
   RecoveryItem,
@@ -137,6 +138,9 @@ export const resources = {
   metrics(window: "24h" | "7d" | "30d" | "all", botId = "", signal?: AbortSignal): Promise<TokenSummary> {
     return api.get("/metrics/summary", { window, bot_id: botId }, signal);
   },
+  subscriptionQuotas(force = false, signal?: AbortSignal): Promise<import("./types").SubscriptionQuotaResponse> {
+    return api.get("/metrics/subscription-quotas", { force }, signal);
+  },
   agentRuntime(botId = "", signal?: AbortSignal): Promise<AgentRuntimeSnapshot> {
     return api.get("/runtime/agent", { bot_id: botId }, signal);
   },
@@ -158,10 +162,29 @@ export const resources = {
   routes(page = 1, pageSize = 20, search = "", signal?: AbortSignal): Promise<Page<RouteCapabilityItem>> {
     return api.get("/routes/capabilities", { page, page_size: pageSize, search }, signal);
   },
-  queueRouteProbe(routeFingerprint: string): Promise<OperationDiagnostic> {
+  queueRouteProbe(routeFingerprint: string, capability: CapabilityName, confirmed = true): Promise<OperationDiagnostic> {
     return api.post(`/routes/capabilities/${encodeURIComponent(routeFingerprint)}/probes`, {
-      mode: "all",
+      capability,
+      confirmed,
     });
+  },
+  uploadRouteMediaProbe(
+    routeFingerprint: string,
+    capability: Extract<CapabilityName, "audio_input" | "video_input">,
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<OperationDiagnostic> {
+    const query = new URLSearchParams({ capability, confirmed: "true" });
+    return rawApiRequest<OperationDiagnostic>(
+      API_BASE,
+      `/routes/capabilities/${encodeURIComponent(routeFingerprint)}/probes/media?${query.toString()}`,
+      file,
+      {
+        "Content-Type": file.type || "application/octet-stream",
+        "X-Personification-Media-Filename": file.name,
+      },
+      signal,
+    );
   },
   traces(page = 1, pageSize = 20, search = "", signal?: AbortSignal): Promise<Page<TraceListItem>> {
     return api.get("/traces", { page, page_size: pageSize, search }, signal);

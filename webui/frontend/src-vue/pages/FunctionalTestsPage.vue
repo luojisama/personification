@@ -3,14 +3,14 @@
     <PageHeader
       index="04"
       title="功能体检"
-      description="18 类体检按本地只读、外部读取、外部写入分级。模型与媒体探针会明确确认；公网 HTTP 下外部写测试会被服务端拒绝。"
+      description="区分本地只读检查、Provider 外部读取探针与真实 rules→buffer→model→review→ledger→send QQ canary。源码与自动测试绝不发送真实 QQ。"
     />
 
     <!-- 结构化诊断告警面板 -->
     <section v-if="activeDiagnostic" class="panel diagnostic-alert-panel" role="region" aria-label="诊断详情">
       <header class="panel-heading">
         <div class="panel-heading-copy">
-          <div class="panel-eyebrow">DIAGNOSTIC ERROR</div>
+          <div class="panel-eyebrow">体检诊断</div>
           <h2 class="panel-title">{{ activeDiagnostic.title }} ({{ activeDiagnostic.code }})</h2>
         </div>
         <div class="panel-actions">
@@ -31,72 +31,100 @@
     <QueryBoundary :pending="catalogQuery.isPending.value" :error="catalogQuery.error.value">
       <template v-if="catalogQuery.data.value">
         <Panel eyebrow="RISK-GRADED TESTS" title="体检项目">
-          <div class="health-test-grid">
-            <article
-              v-for="test in catalogQuery.data.value.tests"
-              :key="test.id"
-              class="health-test-card"
-            >
-              <header class="test-card-header">
-                <div>
-                  <strong>{{ test.label }}</strong>
-                  <small class="test-category">{{ test.category }}</small>
-                </div>
-                <StateBadge
-                  :tone="test.risk === 'external_write' ? 'warn' : test.risk === 'external_read' ? 'warn' : 'ok'"
-                >
-                  {{ RISK_LABELS[test.risk] }}
-                </StateBadge>
-              </header>
-
-              <div v-if="test.risk === 'external_write'" class="test-target-field">
-                <label :for="'target-' + test.id">目标复核摘要</label>
-                <input
-                  :id="'target-' + test.id"
-                  v-model="targets[test.id]"
-                  type="text"
-                  :placeholder="'Bot、目标 QQ/群或动态 ID'"
-                  :aria-invalid="false"
-                  :aria-describedby="'hint-' + test.id"
-                />
-                <small :id="'hint-' + test.id" class="target-field-hint">
-                  公网 HTTP 模式下外部写操作受服务端强制防护
-                </small>
+          <p class="test-category">
+            本页只运行受控体检。QQ 与 QZone 外部写入不会在此页面执行；真实单目标 canary 需在专用入口经管理员确认并留下可对账的 Trace。
+          </p>
+          <section v-for="group in testGroups" :key="group.name" class="health-test-group">
+            <header class="test-card-header">
+              <div>
+                <strong>{{ group.name }}</strong>
+                <small class="test-category">{{ group.tests.length }} 个体检项目</small>
               </div>
-
-              <div class="test-card-actions">
-                <button
-                  type="button"
-                  class="button button-secondary"
-                  :disabled="isTestBusy(test.id)"
-                  @click="handleRunRequest(test)"
-                >
-                  {{ isTestBusy(test.id) ? "运行中…" : test.risk === "local_read" ? "运行本地检查" : "准备并确认" }}
-                </button>
-              </div>
-
-              <!-- 结构化测试运行结果 -->
-              <template v-for="run in [runs[test.id]]" :key="`run:${test.id}`">
-                <div v-if="run" class="test-run-result">
-                  <div class="result-status-row">
-                    <StateBadge :tone="getRunTone(run.state)" :raw="run.state">
-                      {{ run.state }}
-                    </StateBadge>
-                    <code class="diagnostic-code-pill">{{ run.diagnostic_code }}</code>
-                    <span class="result-time-meta">
-                      {{ formatDuration(run.duration_ms) }} · {{ formatDateTime(run.finished_at) }}
-                    </span>
+            </header>
+            <div class="health-test-grid">
+              <article
+                v-for="test in group.tests"
+                :key="test.id"
+                class="health-test-card"
+              >
+                <header class="test-card-header">
+                  <div>
+                    <strong>{{ test.label }}</strong>
+                    <small class="test-category">{{ test.category }}</small>
                   </div>
-                  <dl v-if="hasSummaryEntries(run)" class="structured-summary-list">
-                    <div v-for="(val, key) in run.result_summary" :key="key" class="summary-kv-pair">
-                      <dt>{{ key }}</dt>
-                      <dd>{{ formatSummaryValue(val) }}</dd>
-                    </div>
-                  </dl>
+                  <div>
+                    <StateBadge
+                      :tone="test.risk === 'external_write' ? 'warn' : test.risk === 'external_read' ? 'warn' : 'ok'"
+                    >
+                      {{ RISK_LABELS[test.risk] }}
+                    </StateBadge>
+                    <StateBadge tone="unknown" :raw="test.execution_kind">
+                      {{ EXECUTION_LABELS[test.execution_kind] }}
+                    </StateBadge>
+                  </div>
+                </header>
+                <p class="test-category">{{ timeoutBoundaryLabel(test) }}</p>
+
+                <div v-if="test.risk === 'external_write'" class="test-target-field">
+                  <TextField
+                    :id="'target-' + test.id"
+                    v-model="targets[test.id]"
+                    label="目标复核摘要"
+                    type="text"
+                    :placeholder="'Bot、目标 QQ/群或动态 ID'"
+                    description="本页不会发送 QQ 或写入 QZone；公网 HTTP 模式也会由服务端强制拒绝外部写操作。"
+                  />
                 </div>
-              </template>
-            </article>
-          </div>
+
+                <div class="test-card-actions">
+                  <button
+                    type="button"
+                    class="button button-secondary"
+                    :disabled="isTestBusy(test.id)"
+                    @click="handleRunRequest(test)"
+                  >
+                    {{ runButtonLabel(test) }}
+                  </button>
+                </div>
+
+                <template v-for="run in [runs[test.id]]" :key="`run:${test.id}`">
+                  <div v-if="run" class="test-run-result">
+                    <div class="result-status-row">
+                      <StateBadge :tone="getRunTone(run.state)" :raw="run.state">
+                        {{ RUN_STATE_LABELS[run.state] }}
+                      </StateBadge>
+                      <code class="diagnostic-code-pill">{{ run.diagnostic_code }}</code>
+                      <span class="result-time-meta">
+                        {{ formatDuration(run.duration_ms) }} · {{ formatDateTime(run.finished_at) }}
+                      </span>
+                    </div>
+                    <dl class="structured-summary-list">
+                      <div class="summary-kv-pair"><dt>执行方式</dt><dd>{{ EXECUTION_LABELS[run.execution_kind] || run.execution_kind }}</dd></div>
+                      <div class="summary-kv-pair"><dt>开始</dt><dd>{{ formatDateTime(run.started_at) }}</dd></div>
+                      <div class="summary-kv-pair"><dt>结束</dt><dd>{{ formatDateTime(run.finished_at) }}</dd></div>
+                      <div class="summary-kv-pair"><dt>耗时</dt><dd>{{ formatDuration(run.duration_ms) }}</dd></div>
+                      <div v-if="run.trace_id" class="summary-kv-pair"><dt>Trace</dt><dd><code>{{ run.trace_id }}</code></dd></div>
+                      <div class="summary-kv-pair"><dt>交付</dt><dd>{{ DELIVERY_LABELS[run.delivery_status] || run.delivery_status }}</dd></div>
+                    </dl>
+                    <section v-if="run.diagnostic" class="diagnostic-suggestion">
+                      <strong>{{ run.diagnostic.title }}：</strong>{{ run.diagnostic.message }}
+                    </section>
+                    <ol v-if="run.steps.length" class="structured-summary-list">
+                      <li v-for="step in run.steps" :key="step.key">
+                        <strong>{{ step.label }}</strong>：{{ stepStatusLabel(step.status) }}<template v-if="step.message"> · {{ step.message }}</template>
+                      </li>
+                    </ol>
+                    <dl v-if="hasSummaryEntries(run)" class="structured-summary-list">
+                      <div v-for="(val, key) in run.result_summary" :key="key" class="summary-kv-pair">
+                        <dt>{{ key }}</dt>
+                        <dd>{{ formatSummaryValue(val) }}</dd>
+                      </div>
+                    </dl>
+                  </div>
+                </template>
+              </article>
+            </div>
+          </section>
         </Panel>
 
         <div v-if="!catalogQuery.data.value.cached" class="empty-state-notice">
@@ -119,12 +147,37 @@ import PageHeader from "@vue-app/components/PageHeader.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
+import TextField from "@vue-app/components/forms/TextField.vue";
 
 const RISK_LABELS = {
   local_read: "本地只读",
   external_read: "外部读取",
   external_write: "外部写入",
 } as const;
+
+const GROUP_ORDER = ["核心运行", "模型与媒体", "存储与记忆", "QQ 与群聊", "QZone", "后台任务与权限"] as const;
+
+const EXECUTION_LABELS = {
+  local_readonly: "本地只读检查",
+  provider_probe: "Provider 外部读取探针",
+  qq_canary: "真实 QQ canary（专用入口）",
+  qzone_canary: "QZone canary（专用入口）",
+} as const;
+
+const RUN_STATE_LABELS = {
+  prepared: "已准备",
+  awaiting_confirmation: "等待确认",
+  running: "运行中",
+  succeeded: "已完成",
+  failed: "未通过",
+  unknown: "结果未知",
+} as const;
+
+const DELIVERY_LABELS: Record<string, string> = {
+  not_applicable: "不适用（本次未交付）",
+  not_started: "未开始",
+  dedicated_canary_required: "需要专用 canary",
+};
 
 const catalogQuery = useQuery({
   queryKey: ["functional-health"],
@@ -138,6 +191,14 @@ const currentError = ref<unknown>(null);
 const activeDiagnostic = computed<OperationDiagnostic | null>(() => {
   if (currentError.value == null) return null;
   return diagnosticFromError(currentError.value);
+});
+
+const testGroups = computed(() => {
+  const tests = catalogQuery.data.value?.tests ?? [];
+  return GROUP_ORDER.map((name) => ({
+    name,
+    tests: tests.filter((test) => test.group === name),
+  })).filter((group) => group.tests.length > 0);
 });
 
 function clearError() {
@@ -184,12 +245,41 @@ function isTestBusy(testId: string): boolean {
   return r?.state === "prepared" || r?.state === "running";
 }
 
+function runButtonLabel(test: FunctionalTestDefinition): string {
+  if (isTestBusy(test.id)) return "运行中…";
+  if (test.risk === "local_read") return "运行本地检查";
+  if (test.execution_kind === "qq_canary" || test.execution_kind === "qzone_canary") return "查看专用 canary 要求";
+  return "准备并确认";
+}
+
+function timeoutBoundaryLabel(test: FunctionalTestDefinition): string {
+  if (test.execution_kind === "provider_probe") {
+    return "超时边界：Provider 探针受诊断安全时限控制；超时只会标记为结果未知。";
+  }
+  if (test.execution_kind === "qq_canary" || test.execution_kind === "qzone_canary") {
+    return "超时边界：本页不启动真实 canary；专用入口必须记录超时与 Trace。";
+  }
+  return "超时边界：本地只读检查仅记录实际耗时，不发送 QQ。";
+}
+
 function getRunTone(state: FunctionalTestRun["state"]): "ok" | "warn" | "error" | "running" | "unknown" {
   if (state === "succeeded") return "ok";
   if (state === "failed") return "error";
   if (state === "prepared" || state === "running") return "running";
-  if (state === "unknown") return "warn";
+  if (state === "unknown") return "unknown";
   return "unknown";
+}
+
+function stepStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    pending: "等待中",
+    ok: "完成",
+    warn: "有告警",
+    error: "失败",
+    skipped: "已跳过",
+    unknown: "结果未知",
+  };
+  return labels[status] || "结果未知";
 }
 
 function hasSummaryEntries(run: FunctionalTestRun): boolean {

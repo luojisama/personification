@@ -57,6 +57,7 @@ def test_unverified_capability_is_unknown_not_unsupported() -> None:
     assert record.source == capabilities.CapabilitySource.HEURISTIC
     assert record.checked_at is None
     assert record.detail_code == "capability_unverified"
+    assert record.verification_state.value == "not_run"
 
 
 def test_module_exposes_a_shared_registry_for_runtime_integration() -> None:
@@ -67,21 +68,22 @@ def test_module_exposes_a_shared_registry_for_runtime_integration() -> None:
 
 
 @pytest.mark.parametrize(
-    ("observation", "expected_state"),
+    ("observation", "expected_state", "expected_verification"),
     [
-        ("success", "supported"),
-        ("explicit_unsupported", "unsupported"),
-        ("timeout", "unknown"),
-        ("network_error", "unknown"),
-        ("server_error", "unknown"),
-        ("parse_error", "unknown"),
-        ("provider_rejected", "unknown"),
-        ("empty_response", "unknown"),
+        ("success", "supported", "verified"),
+        ("explicit_unsupported", "unsupported", "verified"),
+        ("timeout", "unknown", "inconclusive"),
+        ("network_error", "unknown", "inconclusive"),
+        ("server_error", "unknown", "inconclusive"),
+        ("parse_error", "unknown", "inconclusive"),
+        ("provider_rejected", "unknown", "inconclusive"),
+        ("empty_response", "unknown", "inconclusive"),
     ],
 )
 def test_probe_observations_preserve_three_state_contract(
     observation: str,
     expected_state: str,
+    expected_verification: str,
 ) -> None:
     registry = capabilities.RouteCapabilityRegistry(clock=lambda: 100.0)
     key = _route()
@@ -90,6 +92,34 @@ def test_probe_observations_preserve_three_state_contract(
 
     assert record.state.value == expected_state
     assert record.source.value == "probe"
+    assert record.verification_state.value == expected_verification
+
+
+def test_probe_unavailable_keeps_capability_unknown_without_claiming_unsupported() -> None:
+    registry = capabilities.RouteCapabilityRegistry(clock=lambda: 100.0)
+
+    record = registry.record_observation(_route(), "audio_input", "probe_unavailable")
+
+    assert record.state.value == "unknown"
+    assert record.verification_state.value == "probe_unavailable"
+
+
+def test_expired_evidence_is_reported_as_stale_unknown_not_reset_to_never_run() -> None:
+    registry = capabilities.RouteCapabilityRegistry(clock=lambda: 100.0)
+    key = _route()
+    registry.record_observation(
+        key,
+        "function_call",
+        "success",
+        checked_at=10,
+        ttl_seconds=5,
+    )
+
+    record = registry.get(key, "function_call", now=20)
+
+    assert record.state.value == "unknown"
+    assert record.verification_state.value == "stale"
+    assert record.checked_at == 10
 
 
 def test_evidence_priority_is_manual_runtime_probe_catalog_model_heuristic() -> None:
@@ -217,7 +247,8 @@ def test_capability_matrix_contains_all_contract_fields() -> None:
     assert tuple(matrix) == capabilities.CAPABILITY_NAMES
     assert matrix["audio_input"]["state"] == "supported"
     assert all(
-        set(value) == {"state", "source", "checked_at", "expires_at", "detail_code"}
+        set(value)
+        == {"state", "verification_state", "source", "checked_at", "expires_at", "detail_code"}
         for value in matrix.values()
     )
 

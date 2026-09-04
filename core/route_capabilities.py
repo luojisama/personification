@@ -28,6 +28,21 @@ class CapabilityState(str, Enum):
     UNKNOWN = "unknown"
 
 
+class VerificationState(str, Enum):
+    """Freshness and outcome of the evidence behind a capability state.
+
+    ``state`` deliberately stays a three-state compatibility contract.  This
+    secondary field prevents a stale, absent, or inconclusive probe from being
+    rendered as a successful capability check.
+    """
+
+    VERIFIED = "verified"
+    NOT_RUN = "not_run"
+    PROBE_UNAVAILABLE = "probe_unavailable"
+    INCONCLUSIVE = "inconclusive"
+    STALE = "stale"
+
+
 class CapabilitySource(str, Enum):
     MANUAL = "manual"
     RUNTIME_SUCCESS = "runtime_success"
@@ -40,6 +55,7 @@ class CapabilitySource(str, Enum):
 class CapabilityObservation(str, Enum):
     SUCCESS = "success"
     EXPLICIT_UNSUPPORTED = "explicit_unsupported"
+    PROBE_UNAVAILABLE = "probe_unavailable"
     TIMEOUT = "timeout"
     NETWORK_ERROR = "network_error"
     SERVER_ERROR = "server_error"
@@ -69,12 +85,25 @@ _DEFAULT_TTL_SECONDS: dict[CapabilitySource, float | None] = {
 _OBSERVATION_STATE = {
     CapabilityObservation.SUCCESS: CapabilityState.SUPPORTED,
     CapabilityObservation.EXPLICIT_UNSUPPORTED: CapabilityState.UNSUPPORTED,
+    CapabilityObservation.PROBE_UNAVAILABLE: CapabilityState.UNKNOWN,
     CapabilityObservation.TIMEOUT: CapabilityState.UNKNOWN,
     CapabilityObservation.NETWORK_ERROR: CapabilityState.UNKNOWN,
     CapabilityObservation.SERVER_ERROR: CapabilityState.UNKNOWN,
     CapabilityObservation.PARSE_ERROR: CapabilityState.UNKNOWN,
     CapabilityObservation.PROVIDER_REJECTED: CapabilityState.UNKNOWN,
     CapabilityObservation.EMPTY_RESPONSE: CapabilityState.UNKNOWN,
+}
+
+_OBSERVATION_VERIFICATION_STATE = {
+    CapabilityObservation.SUCCESS: VerificationState.VERIFIED,
+    CapabilityObservation.EXPLICIT_UNSUPPORTED: VerificationState.VERIFIED,
+    CapabilityObservation.PROBE_UNAVAILABLE: VerificationState.PROBE_UNAVAILABLE,
+    CapabilityObservation.TIMEOUT: VerificationState.INCONCLUSIVE,
+    CapabilityObservation.NETWORK_ERROR: VerificationState.INCONCLUSIVE,
+    CapabilityObservation.SERVER_ERROR: VerificationState.INCONCLUSIVE,
+    CapabilityObservation.PARSE_ERROR: VerificationState.INCONCLUSIVE,
+    CapabilityObservation.PROVIDER_REJECTED: VerificationState.INCONCLUSIVE,
+    CapabilityObservation.EMPTY_RESPONSE: VerificationState.INCONCLUSIVE,
 }
 
 _DETAIL_CODE_RE = re.compile(r"[^a-z0-9_.:-]+")
@@ -176,6 +205,7 @@ class RouteCapability:
     checked_at: float | None
     expires_at: float | None
     detail_code: str
+    verification_state: VerificationState = VerificationState.NOT_RUN
 
     def is_expired(self, now: float | None = None) -> bool:
         return self.expires_at is not None and self.expires_at <= (
@@ -185,6 +215,7 @@ class RouteCapability:
     def to_dict(self) -> dict[str, Any]:
         return {
             "state": self.state.value,
+            "verification_state": self.verification_state.value,
             "source": self.source.value,
             "checked_at": self.checked_at,
             "expires_at": self.expires_at,
@@ -199,6 +230,36 @@ def _unknown_capability() -> RouteCapability:
         checked_at=None,
         expires_at=None,
         detail_code="capability_unverified",
+        verification_state=VerificationState.NOT_RUN,
+    )
+
+
+def _default_verification_state(
+    *,
+    state: CapabilityState,
+    source: CapabilitySource,
+) -> VerificationState:
+    if source == CapabilitySource.RUNTIME_SUCCESS:
+        return VerificationState.VERIFIED
+    if source == CapabilitySource.PROBE:
+        return (
+            VerificationState.VERIFIED
+            if state in {CapabilityState.SUPPORTED, CapabilityState.UNSUPPORTED}
+            else VerificationState.INCONCLUSIVE
+        )
+    return VerificationState.NOT_RUN
+
+
+def _stale_capability(record: RouteCapability) -> RouteCapability:
+    """Keep a safe historical hint while declining to assert current support."""
+
+    return RouteCapability(
+        state=CapabilityState.UNKNOWN,
+        source=record.source,
+        checked_at=record.checked_at,
+        expires_at=record.expires_at,
+        detail_code=record.detail_code,
+        verification_state=VerificationState.STALE,
     )
 
 
@@ -299,10 +360,20 @@ class RouteCapabilityRegistry:
         checked_at: float | None = None,
         expires_at: float | None = None,
         ttl_seconds: float | None = None,
+        verification_state: VerificationState | str | None = None,
     ) -> RouteCapability:
         name = self._capability_name(capability)
         resolved_state = state if isinstance(state, CapabilityState) else CapabilityState(str(state))
         resolved_source = source if isinstance(source, CapabilitySource) else CapabilitySource(str(source))
+        resolved_verification_state = (
+            _default_verification_state(state=resolved_state, source=resolved_source)
+            if verification_state is None
+            else (
+                verification_state
+                if isinstance(verification_state, VerificationState)
+                else VerificationState(str(verification_state))
+            )
+        )
         if resolved_source == CapabilitySource.RUNTIME_SUCCESS and resolved_state != CapabilityState.SUPPORTED:
             raise ValueError("runtime_success evidence must be supported")
         now = float(self._clock() if checked_at is None else checked_at)
@@ -322,6 +393,7 @@ class RouteCapabilityRegistry:
                 detail_code,
                 fallback=f"{resolved_source.value}_{resolved_state.value}",
             ),
+            verification_state=resolved_verification_state,
         )
         with self._lock:
             self._evidence[(route_key, name, resolved_source)] = record
@@ -355,6 +427,7 @@ class RouteCapabilityRegistry:
             detail_code=detail_code or f"capability_{resolved_observation.value}",
             checked_at=checked_at,
             ttl_seconds=ttl_seconds,
+            verification_state=_OBSERVATION_VERIFICATION_STATE[resolved_observation],
         )
 
     def record_runtime_success(
@@ -402,18 +475,26 @@ class RouteCapabilityRegistry:
         name = self._capability_name(capability)
         current = float(self._clock() if now is None else now)
         candidates: list[RouteCapability] = []
-        expired_keys: list[tuple[RouteKey, str, CapabilitySource]] = []
+        expired_candidates: list[RouteCapability] = []
         with self._lock:
             for key, record in self._evidence.items():
                 if key[0] != route_key or key[1] != name:
                     continue
                 if record.is_expired(current):
-                    expired_keys.append(key)
+                    expired_candidates.append(record)
                     continue
                 candidates.append(record)
-            for key in expired_keys:
-                self._evidence.pop(key, None)
         if not candidates:
+            if expired_candidates:
+                return _stale_capability(
+                    max(
+                        expired_candidates,
+                        key=lambda item: (
+                            _SOURCE_PRIORITY[item.source],
+                            float(item.checked_at or 0.0),
+                        ),
+                    )
+                )
             return _unknown_capability()
         return max(
             candidates,
@@ -485,6 +566,7 @@ __all__ = [
     "CapabilityObservation",
     "CapabilitySource",
     "CapabilityState",
+    "VerificationState",
     "DEFAULT_ROUTE_CAPABILITY_REGISTRY",
     "RouteCapabilities",
     "RouteCapability",

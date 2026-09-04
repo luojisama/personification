@@ -17,11 +17,14 @@ from starlette.concurrency import run_in_threadpool
 from ...core.pagination import build_page, normalize_pagination, resolve_sort
 from ...core.reply_recovery_queue import ReplyRecoveryQueue, RecoveryItem
 from ...core import reply_turn_trace
-from ...core.route_capabilities import DEFAULT_ROUTE_CAPABILITY_REGISTRY
+from ...core.operation_diagnostics import diagnostic as operation_diagnostic
+from ...core.operation_diagnostics import step as operation_step
+from ...core.route_capabilities import CAPABILITY_NAMES, DEFAULT_ROUTE_CAPABILITY_REGISTRY
 from ...core.route_capabilities import CapabilityObservation, RouteKey
 from ...core.qzone_capability_matrix import DEFAULT_QZONE_CAPABILITY_MATRIX
 from ...core.runtime_events import get_runtime_event_bus
 from ...core.runtime_events import publish_runtime_event
+from ...core.subscription_quota import query_subscription_quotas
 from ...core import proactive_diagnostics, webui_audit_log
 from ...core.visible_output import guard_visible_text
 from ..deps import AdminIdentity, get_client_ip, require_admin
@@ -36,32 +39,148 @@ from ..v2_services import (
 from .metrics_routes import build_metrics_summary
 
 
-_ROUTE_PROBE_TASKS: dict[str, dict[str, Any]] = {}
+_ROUTE_PROBE_TASKS: dict[tuple[str, str], dict[str, Any]] = {}
 _STICKER_INDEX_TASKS: dict[str, dict[str, Any]] = {}
 _FUNCTIONAL_TEST_RUNS: dict[str, dict[str, Any]] = {}
 _ADMIN_INDEX_TASKS: dict[str, dict[str, Any]] = {}
 _CONFIG_SNAPSHOT_CACHE: dict[str, list[dict[str, Any]]] = {}
 
-_FUNCTIONAL_TEST_CATALOG: tuple[dict[str, str], ...] = (
-    {"id": "core", "label": "核心运行", "category": "核心", "risk": "local_read"},
-    {"id": "model", "label": "主模型", "category": "模型", "risk": "external_read"},
-    {"id": "submodels", "label": "子模型", "category": "子模型", "risk": "external_read"},
-    {"id": "vision", "label": "图片理解", "category": "视觉", "risk": "external_read"},
-    {"id": "video", "label": "视频理解", "category": "视频理解", "risk": "external_read"},
-    {"id": "storage", "label": "存储", "category": "存储", "risk": "local_read"},
-    {"id": "memory", "label": "记忆", "category": "记忆", "risk": "local_read"},
-    {"id": "personas", "label": "画像", "category": "画像", "risk": "local_read"},
-    {"id": "groups", "label": "群聊", "category": "群聊", "risk": "local_read"},
-    {"id": "stickers", "label": "表情包", "category": "表情包", "risk": "local_read"},
-    {"id": "tts", "label": "TTS", "category": "TTS", "risk": "external_read"},
-    {"id": "qzone", "label": "QQ 空间", "category": "QQ 空间", "risk": "external_write"},
-    {"id": "web_search", "label": "联网搜索", "category": "联网搜索", "risk": "external_read"},
-    {"id": "skills", "label": "Skill", "category": "Skill", "risk": "local_read"},
-    {"id": "proactive", "label": "主动社交", "category": "主动社交", "risk": "external_write"},
-    {"id": "persona", "label": "人设", "category": "人设", "risk": "local_read"},
-    {"id": "protocol", "label": "协议端", "category": "协议端", "risk": "external_read"},
-    {"id": "webui_security", "label": "WebUI 安全", "category": "WebUI 安全", "risk": "local_read"},
+_FUNCTIONAL_TEST_CATALOG: tuple[dict[str, Any], ...] = (
+    {"id": "core", "label": "核心运行", "category": "核心", "group": "核心运行", "risk": "local_read", "execution_kind": "local_readonly"},
+    {"id": "model", "label": "主模型", "category": "模型调用", "group": "模型与媒体", "risk": "external_read", "execution_kind": "provider_probe"},
+    {"id": "submodels", "label": "子模型", "category": "LLM 子模型", "group": "模型与媒体", "risk": "external_read", "execution_kind": "provider_probe"},
+    {"id": "vision", "label": "图片理解", "category": "视觉能力", "group": "模型与媒体", "risk": "external_read", "execution_kind": "provider_probe"},
+    {"id": "video", "label": "视频理解", "category": "视频理解", "group": "模型与媒体", "risk": "external_read", "execution_kind": "provider_probe"},
+    {"id": "storage", "label": "存储", "category": "存储", "group": "存储与记忆", "risk": "local_read", "execution_kind": "local_readonly"},
+    {"id": "memory", "label": "记忆", "category": "记忆", "group": "存储与记忆", "risk": "local_read", "execution_kind": "local_readonly"},
+    {"id": "personas", "label": "画像", "category": "用户画像", "group": "存储与记忆", "risk": "local_read", "execution_kind": "local_readonly"},
+    {"id": "groups", "label": "群聊", "category": "群聊", "group": "QQ 与群聊", "risk": "local_read", "execution_kind": "local_readonly"},
+    {"id": "stickers", "label": "表情包", "category": "表情包", "group": "QQ 与群聊", "risk": "local_read", "execution_kind": "local_readonly"},
+    {"id": "tts", "label": "TTS", "category": "TTS 语音", "group": "模型与媒体", "risk": "external_read", "execution_kind": "provider_probe"},
+    {"id": "qzone", "label": "QQ 空间", "category": "QQ 空间", "group": "QZone", "risk": "external_write", "execution_kind": "qzone_canary"},
+    {"id": "web_search", "label": "联网搜索", "category": "联网搜索", "group": "模型与媒体", "risk": "external_read", "execution_kind": "provider_probe"},
+    {"id": "skills", "label": "Skill", "category": "Skill 扩展", "group": "后台任务与权限", "risk": "local_read", "execution_kind": "local_readonly"},
+    {"id": "proactive", "label": "主动社交", "category": "主动社交", "group": "QQ 与群聊", "risk": "external_write", "execution_kind": "qq_canary"},
+    {"id": "persona", "label": "人设", "category": "人设", "group": "存储与记忆", "risk": "local_read", "execution_kind": "local_readonly"},
+    {"id": "protocol", "label": "协议端", "category": "协议端", "group": "QQ 与群聊", "risk": "external_read", "execution_kind": "provider_probe"},
+    {"id": "webui_security", "label": "WebUI 安全", "category": "WebUI 安全", "group": "后台任务与权限", "risk": "local_read", "execution_kind": "local_readonly"},
 )
+
+
+_ROUTE_MEDIA_PROBE_SPECS: dict[str, dict[str, Any]] = {
+    "audio_input": {
+        "probe_id": "audio_upload",
+        "accepted_mime_types": (
+            "audio/wav",
+            "audio/x-wav",
+            "audio/mpeg",
+            "audio/mp4",
+            "audio/aac",
+            "audio/ogg",
+            "audio/opus",
+            "audio/flac",
+            "audio/x-flac",
+            "audio/amr",
+        ),
+        "mime_suffixes": {
+            "audio/wav": (".wav",),
+            "audio/x-wav": (".wav",),
+            "audio/mpeg": (".mp3",),
+            "audio/mp4": (".m4a",),
+            "audio/aac": (".aac",),
+            "audio/ogg": (".ogg", ".opus"),
+            "audio/opus": (".opus",),
+            "audio/flac": (".flac",),
+            "audio/x-flac": (".flac",),
+            "audio/amr": (".amr",),
+        },
+        # This is intentionally a small administrative sample rather than a
+        # general media-upload facility.  It is copied to the existing
+        # health-probe root and removed once this one probe finishes.
+        "max_upload_bytes": 12 * 1024 * 1024,
+    },
+    "video_input": {
+        "probe_id": "video_upload",
+        "accepted_mime_types": (
+            "video/mp4",
+            "video/quicktime",
+            "video/webm",
+            "video/x-matroska",
+            "video/x-msvideo",
+            "video/avi",
+            "video/x-m4v",
+        ),
+        "mime_suffixes": {
+            "video/mp4": (".mp4", ".m4v"),
+            "video/quicktime": (".mov",),
+            "video/webm": (".webm",),
+            "video/x-matroska": (".mkv",),
+            "video/x-msvideo": (".avi",),
+            "video/avi": (".avi",),
+            "video/x-m4v": (".m4v",),
+        },
+        "max_upload_bytes": 32 * 1024 * 1024,
+    },
+}
+
+
+_ROUTE_PROBE_CATALOG: dict[str, dict[str, Any]] = {
+    "image_input": {
+        "probe_id": "vision",
+        "available": True,
+        "risk": "external_read",
+        "confirmation_required": True,
+        "reason_code": "vision_probe_available",
+    },
+    "function_call": {
+        "probe_id": "function_call_noop",
+        "available": True,
+        "risk": "external_read",
+        "confirmation_required": True,
+        "reason_code": "function_call_noop_probe_available",
+    },
+    "audio_input": {
+        "probe_id": _ROUTE_MEDIA_PROBE_SPECS["audio_input"]["probe_id"],
+        "available": True,
+        "risk": "external_read",
+        "confirmation_required": True,
+        "reason_code": "audio_probe_upload_available",
+        "input_kind": "media_upload",
+        "accepted_mime_types": _ROUTE_MEDIA_PROBE_SPECS["audio_input"]["accepted_mime_types"],
+        "max_upload_bytes": _ROUTE_MEDIA_PROBE_SPECS["audio_input"]["max_upload_bytes"],
+    },
+    "video_input": {
+        "probe_id": _ROUTE_MEDIA_PROBE_SPECS["video_input"]["probe_id"],
+        "available": True,
+        "risk": "external_read",
+        "confirmation_required": True,
+        "reason_code": "video_probe_upload_available",
+        "input_kind": "media_upload",
+        "accepted_mime_types": _ROUTE_MEDIA_PROBE_SPECS["video_input"]["accepted_mime_types"],
+        "max_upload_bytes": _ROUTE_MEDIA_PROBE_SPECS["video_input"]["max_upload_bytes"],
+    },
+    "reasoning": {
+        "probe_id": "reasoning_minimal",
+        "available": True,
+        "risk": "external_read",
+        "confirmation_required": True,
+        "reason_code": "reasoning_minimal_probe_available",
+    },
+    "native_web_search": {
+        "probe_id": "native_search_readonly",
+        "available": True,
+        "risk": "external_read",
+        "confirmation_required": True,
+        "reason_code": "native_search_readonly_probe_available",
+    },
+    "external_network_access": {
+        "probe_id": "none",
+        "available": False,
+        "risk": "external_read",
+        "confirmation_required": True,
+        "reason_code": "external_network_probe_unavailable",
+    },
+}
 
 
 def _iso(value: Any) -> str | None:
@@ -487,6 +606,15 @@ def _config_rows(runtime: Any, *, search: str, group: str) -> list[dict[str, Any
     group_filter = str(group or "").strip()
     rows: list[dict[str, Any]] = []
     for entry in config_registry.get_config_entries():
+        if entry.field_name in {
+            "personification_quota_anthropic_monthly_tokens",
+            "personification_quota_openai_monthly_tokens",
+            "personification_quota_gemini_cli_monthly_tokens",
+            "personification_quota_codex_monthly_tokens",
+        }:
+            # One-release compatibility fields remain readable by the legacy
+            # configuration API but are not editable in the Vue console.
+            continue
         if group_filter and entry.group != group_filter:
             continue
         haystack = " ".join(
@@ -534,6 +662,7 @@ def _config_rows(runtime: Any, *, search: str, group: str) -> list[dict[str, Any
                 "choices": list(entry.choices),
                 "min_value": entry.min_value,
                 "max_value": entry.max_value,
+                "ui_schema": dict(getattr(entry, "ui_schema", None) or {}),
             }
         )
     rows.sort(key=lambda item: (str(item["group"]), str(item["display_name"]), str(item["field_name"])))
@@ -580,6 +709,340 @@ def _binary_dependency(name: str) -> dict[str, Any]:
         return {"available": False, "version": "", "diagnostic_code": f"{name}_check_failed:{type(exc).__name__}"}
 
 
+def _route_probe_catalog() -> dict[str, dict[str, Any]]:
+    """Return stable, non-sensitive capability probe metadata for the WebUI."""
+
+    return {
+        capability: dict(
+            _ROUTE_PROBE_CATALOG.get(
+                capability,
+                {
+                    "probe_id": "none",
+                    "available": False,
+                    "risk": "external_read",
+                    "confirmation_required": False,
+                    "reason_code": "probe_unavailable",
+                },
+            )
+        )
+        for capability in CAPABILITY_NAMES
+    }
+
+
+def _route_probe_task_key(route_fingerprint: str, capability: str) -> tuple[str, str]:
+    return str(route_fingerprint or ""), str(capability or "")
+
+
+def _route_key_for_fingerprint(route_fingerprint: str) -> tuple[str, RouteKey] | None:
+    target_fingerprint = str(route_fingerprint or "")
+    for item in DEFAULT_ROUTE_CAPABILITY_REGISTRY.snapshot():
+        if str(item.get("route_fingerprint") or "") != target_fingerprint:
+            continue
+        route_name = str(item.get("route_name") or "")
+        route_key = DEFAULT_ROUTE_CAPABILITY_REGISTRY.route_key(route_name)
+        if route_name and route_key is not None:
+            return route_name, route_key
+    return None
+
+
+def _route_probe_statuses(route_fingerprint: str) -> dict[str, str]:
+    return {
+        capability: str(
+            _ROUTE_PROBE_TASKS.get(
+                _route_probe_task_key(route_fingerprint, capability), {}
+            ).get("status")
+            or "idle"
+        )
+        for capability in CAPABILITY_NAMES
+    }
+
+
+def _route_probe_status(route_fingerprint: str) -> str:
+    statuses = set(_route_probe_statuses(route_fingerprint).values())
+    for state in ("running", "queued", "failed", "finished"):
+        if state in statuses:
+            return state
+    return "idle"
+
+
+def _route_probe_timeout_seconds(runtime: Any) -> float:
+    raw = getattr(
+        getattr(runtime, "plugin_config", None),
+        "personification_visual_probe_timeout_seconds",
+        45.0,
+    )
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        timeout = 45.0
+    return max(5.0, min(120.0, timeout))
+
+
+def _route_probe_observation_from_error(exc: BaseException) -> CapabilityObservation:
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return CapabilityObservation.TIMEOUT
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    try:
+        if int(status_code) >= 500:
+            return CapabilityObservation.SERVER_ERROR
+    except (TypeError, ValueError):
+        pass
+    name = type(exc).__name__.lower()
+    if any(token in name for token in ("connect", "network", "transport", "socket")):
+        return CapabilityObservation.NETWORK_ERROR
+    return CapabilityObservation.PROVIDER_REJECTED
+
+
+def _error_explicitly_rejects_function_calling(exc: BaseException) -> bool:
+    """Recognize only unambiguous tool/function capability refusals.
+
+    The text is used solely for local classification and is never retained or
+    returned, so an upstream error body cannot become a WebUI diagnostic.
+    """
+
+    values = (
+        str(getattr(exc, "code", "") or ""),
+        str(getattr(exc, "type", "") or ""),
+        str(exc or ""),
+    )
+    normalized = " ".join(values).casefold().replace("_", " ").replace("-", " ")
+    phrases = (
+        "function calling is not supported",
+        "function call is not supported",
+        "tool calling is not supported",
+        "tool calls are not supported",
+        "tools are not supported",
+        "tool use is not supported",
+        "does not support function calling",
+        "does not support tool calling",
+        "does not support tool calls",
+        "does not support tools",
+    )
+    if any(phrase in normalized for phrase in phrases):
+        return True
+    capability_terms = ("function calling", "function call", "tool calling", "tool calls", "tool use", "tools")
+    return any(term in normalized for term in capability_terms) and (
+        "not supported" in normalized or "unsupported" in normalized
+    )
+
+
+def _error_explicitly_rejects_native_search(exc: BaseException) -> bool:
+    """Classify only an unambiguous native-search capability refusal locally."""
+
+    values = (
+        str(getattr(exc, "code", "") or ""),
+        str(getattr(exc, "type", "") or ""),
+        str(exc or ""),
+    )
+    normalized = " ".join(values).casefold().replace("_", " ").replace("-", " ")
+    phrases = (
+        "web search is not supported",
+        "web search tool is not supported",
+        "native search is not supported",
+        "browsing is not supported",
+        "does not support web search",
+        "does not support browsing",
+        "web search unavailable",
+        "browsing unavailable",
+    )
+    return any(phrase in normalized for phrase in phrases)
+
+
+def _error_explicitly_rejects_reasoning(exc: BaseException) -> bool:
+    """Classify only an explicit official thinking/reasoning parameter refusal."""
+
+    values = (
+        str(getattr(exc, "code", "") or ""),
+        str(getattr(exc, "type", "") or ""),
+        str(exc or ""),
+    )
+    normalized = " ".join(values).casefold().replace("_", " ").replace("-", " ")
+    phrases = (
+        "reasoning is not supported",
+        "thinking is not supported",
+        "does not support reasoning",
+        "does not support thinking",
+        "reasoning config is not supported",
+        "thinking config is not supported",
+        "reasoning effort is not supported",
+        "thinking budget is not supported",
+        "unexpected keyword argument reasoning",
+        "unexpected keyword argument thinking",
+    )
+    return any(phrase in normalized for phrase in phrases)
+
+
+def _error_explicitly_rejects_media_input(capability: str, exc: BaseException) -> bool:
+    """Classify a media-input refusal without retaining the upstream body."""
+
+    values = (
+        str(getattr(exc, "code", "") or ""),
+        str(getattr(exc, "type", "") or ""),
+        str(exc or ""),
+    )
+    normalized = " ".join(values).casefold().replace("_", " ").replace("-", " ")
+    kind = "audio" if capability == "audio_input" else "video"
+    phrases = (
+        f"{kind} input is not supported",
+        f"{kind} is not supported",
+        f"does not support {kind}",
+        f"unsupported {kind} input",
+        f"unsupported {kind}",
+    )
+    return any(phrase in normalized for phrase in phrases)
+
+
+def _normalized_route_probe_api_type(value: Any) -> str:
+    """Mirror the caller's public provider families without importing private internals."""
+
+    normalized = str(value or "openai").strip().lower().replace("-", "_")
+    if normalized in {"gemini", "gemini_official"}:
+        return "gemini_official"
+    if normalized in {"gemini_cli", "geminicli"}:
+        return "gemini_cli"
+    if normalized in {"antigravity_cli", "antigravity", "agy", "agy_cli"}:
+        return "antigravity_cli"
+    if normalized == "anthropic":
+        return "anthropic"
+    if normalized in {"openai_codex", "codex"}:
+        return "openai_codex"
+    return "openai"
+
+
+def _route_supports_reasoning_probe(provider: dict[str, Any]) -> bool:
+    """Return whether the existing caller will send a known official parameter.
+
+    A generic OpenAI-compatible route only has a verified parameter path for
+    GPT-5-family models in the existing caller.  Codex intentionally is not
+    used here because its caller requests encrypted reasoning continuation
+    material, which a health probe must neither request nor retain.
+    """
+
+    api_type = _normalized_route_probe_api_type(provider.get("api_type"))
+    if api_type == "openai":
+        return "gpt-5" in str(provider.get("model", "") or "").casefold()
+    return api_type in {"gemini_official", "gemini_cli", "antigravity_cli", "anthropic"}
+
+
+def _route_probe_media_suffix(capability: str, original_name: str, content_type: str) -> str | None:
+    spec = _ROUTE_MEDIA_PROBE_SPECS.get(capability)
+    if spec is None:
+        return None
+    safe_name = Path(str(original_name or "").strip()).name
+    if not safe_name or safe_name != str(original_name or "").strip():
+        return None
+    suffix = Path(safe_name).suffix.casefold()
+    allowed_suffixes = tuple(spec.get("mime_suffixes", {}).get(content_type, ()))
+    return suffix if suffix and suffix in allowed_suffixes else None
+
+
+def _route_probe_media_magic_matches(capability: str, suffix: str, header: bytes) -> bool:
+    """Perform a small, format-specific signature check before any Provider call.
+
+    MIME/filename checks protect routing while this inexpensive signature check
+    rejects obvious arbitrary bytes.  It is deliberately not a media decoder:
+    decoder probing would substantially expand the upload surface and is not
+    needed before the selected provider receives a bounded one-shot sample.
+    """
+
+    prefix = bytes(header or b"")[:32]
+    suffix = str(suffix or "").casefold()
+    if capability == "audio_input":
+        if suffix == ".wav":
+            return len(prefix) >= 12 and prefix[:4] == b"RIFF" and prefix[8:12] == b"WAVE"
+        if suffix == ".mp3":
+            return prefix.startswith(b"ID3") or (
+                len(prefix) >= 2 and prefix[0] == 0xFF and (prefix[1] & 0xE0) == 0xE0
+            )
+        if suffix in {".m4a"}:
+            return len(prefix) >= 8 and prefix[4:8] == b"ftyp"
+        if suffix == ".aac":
+            return len(prefix) >= 2 and prefix[0] == 0xFF and (prefix[1] & 0xF6) == 0xF0
+        if suffix in {".ogg", ".opus"}:
+            return prefix.startswith(b"OggS")
+        if suffix == ".flac":
+            return prefix.startswith(b"fLaC")
+        if suffix == ".amr":
+            return prefix.startswith(b"#!AMR\\n")
+        return False
+    if capability == "video_input":
+        if suffix in {".mp4", ".mov", ".m4v"}:
+            return len(prefix) >= 8 and prefix[4:8] == b"ftyp"
+        if suffix in {".webm", ".mkv"}:
+            return prefix.startswith(b"\x1aE\xdf\xa3")
+        if suffix == ".avi":
+            return len(prefix) >= 12 and prefix[:4] == b"RIFF" and prefix[8:12] == b"AVI "
+    return False
+
+
+def _cleanup_route_probe_upload(probe_dir: Path) -> None:
+    """Remove the generated one-shot media directory without reporting paths."""
+
+    root = probe_dir.parent
+    shutil.rmtree(probe_dir, ignore_errors=True)
+    try:
+        if root.exists() and not any(root.iterdir()):
+            root.rmdir()
+    except Exception:
+        pass
+
+
+class _RouteMediaProbeConfig:
+    """Disable every fallback around one selected native media route."""
+
+    _FALSE_FIELDS = {
+        "personification_gemini_web_enabled",
+        "personification_gemini_web_risk_acknowledged",
+        "personification_mimo_web_asr_enabled",
+        "personification_mimo_web_asr_risk_acknowledged",
+        "personification_fullmodal_provider_enabled",
+        "personification_fallback_enabled",
+        "personification_video_fallback_enabled",
+        "personification_audio_transcription_enabled",
+    }
+
+    def __init__(self, original: Any) -> None:
+        self._original = original
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self._FALSE_FIELDS:
+            return False
+        if name == "personification_video_route_mode":
+            return "primary"
+        if name == "personification_video_storyboard_fallback_enabled":
+            return False
+        if name == "personification_video_understanding_enabled":
+            return True
+        return getattr(self._original, name)
+
+
+class _RouteMediaProbeRuntime:
+    """Expose exactly one provider to the existing media-understanding entrypoint."""
+
+    def __init__(self, runtime: Any, provider: dict[str, Any]) -> None:
+        self.plugin_config = _RouteMediaProbeConfig(getattr(runtime, "plugin_config", None))
+        self.logger = getattr(runtime, "logger", None)
+        self._provider = dict(provider)
+
+    def get_configured_api_providers(self) -> list[dict[str, Any]]:
+        return [dict(self._provider)]
+
+
+def _record_route_probe_observation(
+    route_key: RouteKey,
+    capability: str,
+    observation: CapabilityObservation,
+    detail_code: str,
+) -> None:
+    DEFAULT_ROUTE_CAPABILITY_REGISTRY.record_observation(
+        route_key,
+        capability,
+        observation,
+        detail_code=detail_code,
+    )
+
+
 def _route_probe_target(runtime: Any, route_fingerprint: str) -> tuple[str, RouteKey, dict[str, Any]] | None:
     bundle = getattr(runtime, "runtime_bundle", None)
     getter = getattr(bundle, "get_configured_api_providers", None)
@@ -599,20 +1062,10 @@ def _route_probe_target(runtime: Any, route_fingerprint: str) -> tuple[str, Rout
                 "media_protocol": getattr(config, "personification_media_protocol", "auto"),
             }
         ]
-    snapshots = DEFAULT_ROUTE_CAPABILITY_REGISTRY.snapshot()
-    route_name = next(
-        (
-            str(item.get("route_name", "") or "")
-            for item in snapshots
-            if str(item.get("route_fingerprint", "") or "") == route_fingerprint
-        ),
-        "",
-    )
-    if not route_name:
+    route = _route_key_for_fingerprint(route_fingerprint)
+    if route is None:
         return None
-    route_key = DEFAULT_ROUTE_CAPABILITY_REGISTRY.route_key(route_name)
-    if route_key is None:
-        return None
+    route_name, route_key = route
     for provider in providers:
         if not isinstance(provider, dict):
             continue
@@ -628,9 +1081,27 @@ def _route_probe_target(runtime: Any, route_fingerprint: str) -> tuple[str, Rout
     return None
 
 
+def _record_unavailable_route_probe(
+    route_fingerprint: str,
+    capability: str,
+    detail_code: str = "probe_route_caller_unavailable",
+) -> None:
+    route = _route_key_for_fingerprint(route_fingerprint)
+    if route is None:
+        return
+    _route_name, route_key = route
+    _record_route_probe_observation(
+        route_key,
+        capability,
+        CapabilityObservation.PROBE_UNAVAILABLE,
+        detail_code,
+    )
+
+
 async def _run_route_visual_probe(runtime: Any, route_fingerprint: str) -> tuple[str, str]:
     target = _route_probe_target(runtime, route_fingerprint)
     if target is None:
+        _record_unavailable_route_probe(route_fingerprint, "image_input")
         return "unknown", "probe_route_caller_unavailable"
     route_name, route_key, provider = target
     from ...core.ai_routes import build_single_provider_caller
@@ -638,26 +1109,28 @@ async def _run_route_visual_probe(runtime: Any, route_fingerprint: str) -> tuple
 
     try:
         caller = build_single_provider_caller(runtime.plugin_config, provider)
-    except Exception as exc:
-        DEFAULT_ROUTE_CAPABILITY_REGISTRY.record_observation(
+    except Exception:
+        _record_route_probe_observation(
             route_key,
             "image_input",
             CapabilityObservation.NETWORK_ERROR,
-            detail_code=f"probe_caller_build_failed:{type(exc).__name__}",
+            "probe_caller_build_failed",
         )
         return "unknown", "probe_caller_build_failed"
-    result = await probe_tool_caller_vision(
-        route_name=route_name,
-        caller=caller,
-        api_type=str(provider.get("api_type", "") or ""),
-        model=str(provider.get("model", "") or ""),
-        logger=getattr(runtime, "logger", None) or _SilentProbeLogger(),
-        timeout_seconds=getattr(
-            runtime.plugin_config,
-            "personification_visual_probe_timeout_seconds",
-            45.0,
-        ),
-    )
+    try:
+        result = await probe_tool_caller_vision(
+            route_name=route_name,
+            caller=caller,
+            api_type=str(provider.get("api_type", "") or ""),
+            model=str(provider.get("model", "") or ""),
+            logger=getattr(runtime, "logger", None) or _SilentProbeLogger(),
+            timeout_seconds=_route_probe_timeout_seconds(runtime),
+        )
+    except Exception as exc:
+        observation = _route_probe_observation_from_error(exc)
+        code = f"probe_visual_{observation.value}"
+        _record_route_probe_observation(route_key, "image_input", observation, code)
+        return "unknown", code
     if result is True:
         observation = CapabilityObservation.SUCCESS
         state, code = "supported", "probe_visual_succeeded"
@@ -666,14 +1139,382 @@ async def _run_route_visual_probe(runtime: Any, route_fingerprint: str) -> tuple
         state, code = "unsupported", "probe_visual_explicitly_unsupported"
     else:
         observation = CapabilityObservation.PARSE_ERROR
-        state, code = "unknown", "probe_visual_unknown"
-    DEFAULT_ROUTE_CAPABILITY_REGISTRY.record_observation(
+        state, code = "unknown", "probe_visual_inconclusive"
+    _record_route_probe_observation(
         route_key,
         "image_input",
         observation,
-        detail_code=code,
+        code,
     )
     return state, code
+
+
+_FUNCTION_CALL_NOOP_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "personification_capability_noop",
+        "description": "Capability probe only. This tool has no side effects and must not be executed.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def _has_structured_noop_tool_call(response: Any) -> bool:
+    for tool_call in list(getattr(response, "tool_calls", None) or []):
+        if isinstance(tool_call, dict):
+            name = str(tool_call.get("name") or "")
+            arguments = tool_call.get("arguments")
+            if not name and isinstance(tool_call.get("function"), dict):
+                function = tool_call["function"]
+                name = str(function.get("name") or "")
+                arguments = function.get("arguments", arguments)
+        else:
+            name = str(getattr(tool_call, "name", "") or "")
+            arguments = getattr(tool_call, "arguments", None)
+        if name == "personification_capability_noop" and isinstance(arguments, dict):
+            return True
+    return False
+
+
+async def _run_route_function_call_probe(runtime: Any, route_fingerprint: str) -> tuple[str, str]:
+    target = _route_probe_target(runtime, route_fingerprint)
+    if target is None:
+        _record_unavailable_route_probe(route_fingerprint, "function_call")
+        return "unknown", "probe_route_caller_unavailable"
+    _route_name, route_key, provider = target
+    from ...core.ai_routes import build_single_provider_caller
+
+    try:
+        caller = build_single_provider_caller(runtime.plugin_config, provider)
+    except Exception:
+        _record_route_probe_observation(
+            route_key,
+            "function_call",
+            CapabilityObservation.NETWORK_ERROR,
+            "probe_caller_build_failed",
+        )
+        return "unknown", "probe_caller_build_failed"
+
+    try:
+        response = await asyncio.wait_for(
+            caller.chat_with_tools(
+                [
+                    {
+                        "role": "user",
+                        "content": (
+                            "仅调用提供的 personification_capability_noop 工具。"
+                            "它没有副作用；不要输出解释，也不要执行任何工具。"
+                        ),
+                    }
+                ],
+                [_FUNCTION_CALL_NOOP_TOOL],
+                False,
+            ),
+            timeout=_route_probe_timeout_seconds(runtime),
+        )
+    except Exception as exc:
+        if _error_explicitly_rejects_function_calling(exc):
+            observation = CapabilityObservation.EXPLICIT_UNSUPPORTED
+            code = "function_call_probe_explicitly_unsupported"
+        else:
+            observation = _route_probe_observation_from_error(exc)
+            code = f"function_call_probe_{observation.value}"
+        _record_route_probe_observation(route_key, "function_call", observation, code)
+        return ("unsupported" if observation == CapabilityObservation.EXPLICIT_UNSUPPORTED else "unknown"), code
+
+    if _has_structured_noop_tool_call(response):
+        _record_route_probe_observation(
+            route_key,
+            "function_call",
+            CapabilityObservation.SUCCESS,
+            "function_call_noop_structured_tool_call",
+        )
+        return "supported", "function_call_noop_structured_tool_call"
+
+    _record_route_probe_observation(
+        route_key,
+        "function_call",
+        CapabilityObservation.PARSE_ERROR,
+        "function_call_probe_inconclusive",
+    )
+    return "unknown", "function_call_probe_inconclusive"
+
+
+async def _run_route_native_search_probe(runtime: Any, route_fingerprint: str) -> tuple[str, str]:
+    """Run one confirmed, read-only native-search call against the selected route.
+
+    The response is intentionally never returned, logged, or saved.  Evidence
+    is limited to the caller's structural ``used_builtin_search`` marker and
+    whether there is a non-empty visible answer.
+    """
+
+    target = _route_probe_target(runtime, route_fingerprint)
+    if target is None:
+        _record_unavailable_route_probe(route_fingerprint, "native_web_search")
+        return "unknown", "probe_route_caller_unavailable"
+    _route_name, route_key, provider = target
+    from ...core.ai_routes import build_single_provider_caller
+
+    try:
+        caller = build_single_provider_caller(runtime.plugin_config, provider)
+    except Exception:
+        _record_route_probe_observation(
+            route_key,
+            "native_web_search",
+            CapabilityObservation.NETWORK_ERROR,
+            "probe_caller_build_failed",
+        )
+        return "unknown", "probe_caller_build_failed"
+
+    try:
+        response = await asyncio.wait_for(
+            caller.chat_with_tools(
+                [
+                    {
+                        "role": "user",
+                        "content": (
+                            "请使用当前 Provider 的内置联网搜索完成一个公开、低风险的确定性查询："
+                            "太阳系中离太阳最近的行星是什么？只给出简短可见答案。"
+                        ),
+                    }
+                ],
+                [],
+                True,
+            ),
+            timeout=_route_probe_timeout_seconds(runtime),
+        )
+    except Exception as exc:
+        if _error_explicitly_rejects_native_search(exc):
+            observation = CapabilityObservation.EXPLICIT_UNSUPPORTED
+            code = "native_search_probe_explicitly_unsupported"
+        else:
+            observation = _route_probe_observation_from_error(exc)
+            code = f"native_search_probe_{observation.value}"
+        _record_route_probe_observation(route_key, "native_web_search", observation, code)
+        return ("unsupported" if observation == CapabilityObservation.EXPLICIT_UNSUPPORTED else "unknown"), code
+
+    # Do not retain the content.  Both conditions are required so a provider
+    # that merely answers from memory after a search fallback is not verified.
+    visible_answer = bool(str(getattr(response, "content", "") or "").strip())
+    used_builtin_search = getattr(response, "used_builtin_search", None) is True
+    if visible_answer and used_builtin_search:
+        _record_route_probe_observation(
+            route_key,
+            "native_web_search",
+            CapabilityObservation.SUCCESS,
+            "native_search_readonly_visible_answer",
+        )
+        return "supported", "native_search_readonly_visible_answer"
+
+    _record_route_probe_observation(
+        route_key,
+        "native_web_search",
+        CapabilityObservation.PARSE_ERROR,
+        "native_search_probe_inconclusive",
+    )
+    return "unknown", "native_search_probe_inconclusive"
+
+
+async def _run_route_reasoning_probe(runtime: Any, route_fingerprint: str) -> tuple[str, str]:
+    """Verify an existing official thinking parameter path without observing thought.
+
+    The probe uses a fixed low budget and only checks that the caller completed
+    with a visible answer.  It deliberately never accesses ``raw``, provider
+    history, thought signatures, encrypted reasoning, or response internals.
+    """
+
+    target = _route_probe_target(runtime, route_fingerprint)
+    if target is None:
+        _record_unavailable_route_probe(route_fingerprint, "reasoning")
+        return "unknown", "probe_route_caller_unavailable"
+    _route_name, route_key, provider = target
+    if not _route_supports_reasoning_probe(provider):
+        _record_route_probe_observation(
+            route_key,
+            "reasoning",
+            CapabilityObservation.PROBE_UNAVAILABLE,
+            "reasoning_probe_official_path_unavailable",
+        )
+        return "unknown", "reasoning_probe_official_path_unavailable"
+
+    from ...core.ai_routes import build_single_provider_caller
+
+    try:
+        caller = build_single_provider_caller(
+            runtime.plugin_config,
+            provider,
+            thinking_mode_override="low",
+        )
+    except Exception:
+        _record_route_probe_observation(
+            route_key,
+            "reasoning",
+            CapabilityObservation.NETWORK_ERROR,
+            "probe_caller_build_failed",
+        )
+        return "unknown", "probe_caller_build_failed"
+
+    try:
+        response = await asyncio.wait_for(
+            caller.chat_with_tools(
+                [
+                    {
+                        "role": "user",
+                        "content": "请完成一个确定性短任务：只输出 2 + 2 的十进制结果。不要解释推理过程。",
+                    }
+                ],
+                [],
+                False,
+            ),
+            timeout=_route_probe_timeout_seconds(runtime),
+        )
+    except Exception as exc:
+        if _error_explicitly_rejects_reasoning(exc):
+            observation = CapabilityObservation.EXPLICIT_UNSUPPORTED
+            code = "reasoning_probe_explicitly_unsupported"
+        else:
+            observation = _route_probe_observation_from_error(exc)
+            code = f"reasoning_probe_{observation.value}"
+        _record_route_probe_observation(route_key, "reasoning", observation, code)
+        return ("unsupported" if observation == CapabilityObservation.EXPLICIT_UNSUPPORTED else "unknown"), code
+
+    # OpenAI-compatible callers intentionally retry without ``reasoning`` for
+    # an SDK-level unexpected-keyword refusal.  Treat that explicit fallback
+    # as a refusal instead of claiming a successful reasoning verification.
+    if getattr(caller, "_supports_reasoning", None) is False:
+        _record_route_probe_observation(
+            route_key,
+            "reasoning",
+            CapabilityObservation.EXPLICIT_UNSUPPORTED,
+            "reasoning_probe_explicitly_unsupported",
+        )
+        return "unsupported", "reasoning_probe_explicitly_unsupported"
+
+    if bool(str(getattr(response, "content", "") or "").strip()):
+        _record_route_probe_observation(
+            route_key,
+            "reasoning",
+            CapabilityObservation.SUCCESS,
+            "reasoning_minimal_visible_answer",
+        )
+        return "supported", "reasoning_minimal_visible_answer"
+
+    _record_route_probe_observation(
+        route_key,
+        "reasoning",
+        CapabilityObservation.PARSE_ERROR,
+        "reasoning_probe_inconclusive",
+    )
+    return "unknown", "reasoning_probe_inconclusive"
+
+
+async def _run_route_media_probe(
+    runtime: Any,
+    route_fingerprint: str,
+    capability: str,
+    media_path: Path | None,
+) -> tuple[str, str]:
+    """Run one selected-route native media probe and retain no media output."""
+
+    if capability not in _ROUTE_MEDIA_PROBE_SPECS:
+        return "unknown", "probe_unavailable"
+    target = _route_probe_target(runtime, route_fingerprint)
+    if target is None:
+        _record_unavailable_route_probe(route_fingerprint, capability)
+        return "unknown", "probe_route_caller_unavailable"
+    _route_name, route_key, provider = target
+    if media_path is None or not media_path.is_file():
+        _record_route_probe_observation(
+            route_key,
+            capability,
+            CapabilityObservation.PROBE_UNAVAILABLE,
+            "media_probe_upload_required",
+        )
+        return "unknown", "media_probe_upload_required"
+
+    from ...core.media_provider_adapters import resolve_media_provider_adapter
+
+    adapter = resolve_media_provider_adapter(provider)
+    supported = adapter.supports_audio if capability == "audio_input" else adapter.supports_video
+    if not supported:
+        _record_route_probe_observation(
+            route_key,
+            capability,
+            CapabilityObservation.PROBE_UNAVAILABLE,
+            "media_probe_primary_route_unavailable",
+        )
+        return "unknown", "media_probe_primary_route_unavailable"
+
+    from ...core.media_understanding import (
+        analyze_audios_with_route_or_fallback,
+        analyze_videos_with_route_or_fallback,
+    )
+
+    probe_runtime = _RouteMediaProbeRuntime(runtime, provider)
+    try:
+        if capability == "audio_input":
+            response, _route = await asyncio.wait_for(
+                analyze_audios_with_route_or_fallback(
+                    runtime=probe_runtime,
+                    prompt="请仅回复“已接收”。不要转写、描述、引用或保存音频内容。",
+                    audio_refs=[str(media_path)],
+                ),
+                timeout=_route_probe_timeout_seconds(runtime),
+            )
+        else:
+            response, _route = await asyncio.wait_for(
+                analyze_videos_with_route_or_fallback(
+                    runtime=probe_runtime,
+                    prompt="请仅回复“已接收”。不要转写、描述、引用或保存视频内容。",
+                    video_refs=[str(media_path)],
+                ),
+                timeout=_route_probe_timeout_seconds(runtime),
+            )
+    except Exception as exc:
+        if _error_explicitly_rejects_media_input(capability, exc):
+            observation = CapabilityObservation.EXPLICIT_UNSUPPORTED
+            code = f"{capability}_probe_explicitly_unsupported"
+        else:
+            observation = _route_probe_observation_from_error(exc)
+            code = f"{capability}_probe_{observation.value}"
+        _record_route_probe_observation(route_key, capability, observation, code)
+        return ("unsupported" if observation == CapabilityObservation.EXPLICIT_UNSUPPORTED else "unknown"), code
+
+    # Only the existence of a visible answer is observed; the media-derived
+    # content, local path, route attempts, and any raw provider payload are
+    # never persisted or sent back to the browser.
+    if bool(str(response or "").strip()):
+        code = f"{capability}_native_media_visible_answer"
+        _record_route_probe_observation(route_key, capability, CapabilityObservation.SUCCESS, code)
+        return "supported", code
+
+    code = f"{capability}_probe_inconclusive"
+    _record_route_probe_observation(route_key, capability, CapabilityObservation.PARSE_ERROR, code)
+    return "unknown", code
+
+
+async def _run_route_capability_probe(
+    runtime: Any,
+    route_fingerprint: str,
+    capability: str,
+    *,
+    media_path: Path | None = None,
+) -> tuple[str, str]:
+    if capability == "image_input":
+        return await _run_route_visual_probe(runtime, route_fingerprint)
+    if capability == "function_call":
+        return await _run_route_function_call_probe(runtime, route_fingerprint)
+    if capability == "native_web_search":
+        return await _run_route_native_search_probe(runtime, route_fingerprint)
+    if capability == "reasoning":
+        return await _run_route_reasoning_probe(runtime, route_fingerprint)
+    if capability in _ROUTE_MEDIA_PROBE_SPECS:
+        return await _run_route_media_probe(runtime, route_fingerprint, capability, media_path)
+    return "unknown", "probe_unavailable"
 
 
 class _SilentProbeLogger:
@@ -730,26 +1571,95 @@ class _NoSendCaptureBot:
         return getattr(self._real, name)
 
 
-def _functional_test_definition(test_id: str) -> dict[str, str] | None:
+def _functional_test_definition(test_id: str) -> dict[str, Any] | None:
     normalized = str(test_id or "").strip()
     return next((dict(item) for item in _FUNCTIONAL_TEST_CATALOG if item["id"] == normalized), None)
 
 
+def _functional_step_plan(run: dict[str, Any], *, status: str, message: str) -> tuple[Any, ...]:
+    execution_kind = str(run.get("execution_kind") or "local_readonly")
+    if execution_kind == "qq_canary":
+        stage_status = "skipped" if status == "skipped" else "pending"
+        return (
+            operation_step("rules", "规则判断", stage_status, "专用 canary 才会进入真实规则判断。"),
+            operation_step("buffer", "上下文缓冲", stage_status, "专用 canary 才会构建受控上下文。"),
+            operation_step("model", "模型生成", stage_status, "专用 canary 才会调用已确认的模型路由。"),
+            operation_step("review", "可见输出审核", stage_status, "专用 canary 必须先完成可见输出审核。"),
+            operation_step("ledger", "出站账本", stage_status, "专用 canary 必须建立可对账的出站账本记录。"),
+            operation_step("send", "QQ 发送", "skipped", "本体检页面和自动测试绝不调用 QQ 发送接口。"),
+        )
+    if execution_kind == "provider_probe":
+        label = "Provider 外部读取探针"
+        key = "provider_probe"
+    elif execution_kind == "qzone_canary":
+        label = "QZone canary"
+        key = "qzone_canary"
+    else:
+        label = "本地只读检查"
+        key = "local_readonly"
+    return (
+        operation_step(key, label, status, message),
+        operation_step(
+            "delivery",
+            "QQ 交付",
+            "skipped",
+            "本次体检不会通过 QQ 发送消息。真实 QQ canary 必须在专用页面完成。",
+        ),
+    )
+
+
+def _set_functional_run_diagnostic(
+    run: dict[str, Any],
+    *,
+    ok: bool,
+    code: str,
+    phase: str,
+    title: str,
+    message: str,
+    steps: tuple[Any, ...],
+    suggestion: str = "",
+) -> None:
+    diagnostic = operation_diagnostic(
+        ok=ok,
+        code=code,
+        phase=phase,
+        title=title,
+        message=message,
+        steps=steps,
+        suggestion=suggestion,
+        retryable=False,
+        partial=False,
+        outcome_unknown=False,
+        operation_id=str(run.get("id") or ""),
+        trace_id=str(run.get("trace_id") or ""),
+    )
+    run["diagnostic_code"] = str(diagnostic.get("code") or code)
+    run["diagnostic"] = diagnostic
+    run["steps"] = list(diagnostic.get("steps") or [])
+
+
 def _functional_test_view(run: dict[str, Any]) -> dict[str, Any]:
+    diagnostic = run.get("diagnostic") if isinstance(run.get("diagnostic"), dict) else {}
     return {
         "id": str(run.get("id") or ""),
         "test_id": str(run.get("test_id") or ""),
         "label": str(run.get("label") or ""),
+        "group": str(run.get("group") or "核心运行"),
         "risk": str(run.get("risk") or "local_read"),
+        "execution_kind": str(run.get("execution_kind") or "local_readonly"),
         "state": str(run.get("state") or "prepared"),
         "target_summary": str(run.get("target_summary") or "") or None,
         "route_fingerprint": str(run.get("route_fingerprint") or "") or None,
         "trace_id": str(run.get("trace_id") or "") or None,
         "diagnostic_code": str(run.get("diagnostic_code") or "test_prepared"),
         "created_at": _iso(run.get("created_at")),
+        "started_at": _iso(run.get("started_at")),
         "finished_at": _iso(run.get("finished_at")),
         "duration_ms": run.get("duration_ms") if isinstance(run.get("duration_ms"), int) else None,
+        "steps": list(run.get("steps") or []),
+        "diagnostic": dict(diagnostic),
         "result_summary": run.get("result_summary") if isinstance(run.get("result_summary"), dict) else {},
+        "delivery_status": str(run.get("delivery_status") or "not_applicable"),
     }
 
 
@@ -760,7 +1670,16 @@ async def _execute_functional_test(runtime: Any, operation_id: str) -> None:
     if run is None:
         return
     started = time.monotonic()
-    run.update({"state": "running", "diagnostic_code": "test_running"})
+    run.update({"state": "running", "started_at": time.time()})
+    _set_functional_run_diagnostic(
+        run,
+        ok=True,
+        code="functional_test_running",
+        phase="diagnostic_run",
+        title="功能体检运行中",
+        message="正在执行受控体检步骤；不会发送 QQ 消息。",
+        steps=_functional_step_plan(run, status="running", message="体检检查正在执行。"),
+    )
     publish_runtime_event(
         "test_run.updated",
         payload={"operation_id": operation_id, "state": "running", "test_id": run["test_id"]},
@@ -785,30 +1704,66 @@ async def _execute_functional_test(runtime: Any, operation_id: str) -> None:
             for check in category.get("checks") or []
             if isinstance(check, dict)
         ]
+        trace_id = str(result.get("trace_id") or "") if isinstance(result, dict) else ""
+        if trace_id:
+            run["trace_id"] = trace_id[:128]
+        result_summary = {
+            "overall": status,
+            "check_count": len(checks),
+            "failed_count": sum(
+                1
+                for item in checks
+                if isinstance(item, dict)
+                and str(item.get("status") or "") not in {"ok", "healthy", "passed", "success"}
+            ),
+            "execution_kind": str(run.get("execution_kind") or "local_readonly"),
+            "delivery_status": "not_applicable",
+        }
         run.update(
             {
                 "state": "succeeded" if ok else "failed",
-                "diagnostic_code": (
-                    "functional_test_warning" if status == "warn" else "functional_test_succeeded"
-                ) if ok else "functional_test_failed",
-                "result_summary": {
-                    "overall": status,
-                    "check_count": len(checks),
-                    "failed_count": sum(
-                        1
-                        for item in checks
-                        if isinstance(item, dict) and str(item.get("status") or "") not in {"ok", "healthy", "passed", "success"}
-                    ),
-                },
+                "result_summary": result_summary,
+                "delivery_status": "not_applicable",
             }
         )
-    except Exception as exc:
+        code = "functional_test_warning" if ok and status == "warn" else (
+            "functional_test_succeeded" if ok else "functional_test_failed"
+        )
+        _set_functional_run_diagnostic(
+            run,
+            ok=ok,
+            code=code,
+            phase="diagnostic_complete",
+            title="功能体检完成" if ok else "功能体检未通过",
+            message=(
+                "体检已完成；结果仅覆盖本地检查或已确认的 Provider 外部读取探针。"
+                if ok
+                else "体检没有得到明确成功结果；请查看脱敏阶段信息后再处理。"
+            ),
+            steps=_functional_step_plan(
+                run,
+                status="warn" if ok and status == "warn" else ("ok" if ok else "error"),
+                message="体检步骤已完成。" if ok else "体检步骤未得到明确成功结果。",
+            ),
+            suggestion="真实 QQ 交付需在专用 canary 流程中由管理员确认。",
+        )
+    except Exception:
         run.update(
             {
                 "state": "failed",
-                "diagnostic_code": f"functional_test_exception:{type(exc).__name__}",
                 "result_summary": {},
+                "delivery_status": "not_applicable",
             }
+        )
+        _set_functional_run_diagnostic(
+            run,
+            ok=False,
+            code="functional_test_internal_error",
+            phase="diagnostic_run",
+            title="功能体检未完成",
+            message="体检执行时发生内部异常；未发送 QQ 消息。",
+            steps=_functional_step_plan(run, status="error", message="体检执行异常，请查看脱敏诊断。"),
+            suggestion="根据 Trace ID 或服务端脱敏日志核对异常类型后再重试。",
         )
     finally:
         run["finished_at"] = time.time()
@@ -895,16 +1850,46 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             "test_id": definition["id"],
             "label": definition["label"],
             "category": definition["category"],
+            "group": definition["group"],
             "risk": risk,
+            "execution_kind": definition["execution_kind"],
             "state": "prepared" if risk == "local_read" else "awaiting_confirmation",
             "target_summary": str(body.get("target_summary") or "")[:240],
             "route_fingerprint": str(body.get("route_fingerprint") or "")[:128],
             "trace_id": "",
-            "diagnostic_code": "test_prepared" if risk == "local_read" else "test_confirmation_required",
             "created_at": time.time(),
+            "started_at": 0.0,
             "finished_at": 0.0,
+            "duration_ms": None,
+            "steps": [],
+            "diagnostic": {},
             "result_summary": {},
+            "delivery_status": (
+                "not_started"
+                if definition["execution_kind"] in {"qq_canary", "qzone_canary"}
+                else "not_applicable"
+            ),
         }
+        if risk == "local_read":
+            _set_functional_run_diagnostic(
+                run,
+                ok=True,
+                code="test_prepared",
+                phase="prepared",
+                title="本地只读体检已准备",
+                message="将执行本地只读检查；不会访问 Provider，也不会发送 QQ 消息。",
+                steps=_functional_step_plan(run, status="pending", message="等待本地体检任务开始。"),
+            )
+        else:
+            _set_functional_run_diagnostic(
+                run,
+                ok=True,
+                code="test_confirmation_required",
+                phase="confirmation",
+                title="体检等待管理员确认",
+                message="该项目可能调用外部 Provider 或进入专用 canary 流程，尚未执行。",
+                steps=_functional_step_plan(run, status="pending", message="等待管理员确认外部调用范围。"),
+            )
         _FUNCTIONAL_TEST_RUNS[operation_id] = run
         if risk == "local_read":
             asyncio.create_task(_execute_functional_test(runtime, operation_id))
@@ -947,16 +1932,45 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                     status_code=422,
                     detail={"code": "external_write_target_mismatch", "message": "目标复核文本不匹配，未执行写操作。"},
                 )
+            now = time.time()
             run.update(
                 {
-                    "state": "failed",
-                    "finished_at": time.time(),
-                    "diagnostic_code": "external_write_dedicated_canary_required",
-                    "result_summary": {"message": "请在对应 QQ/QZone 专用页面完成带目标字段的单次 canary。"},
+                    "state": "unknown",
+                    "started_at": now,
+                    "finished_at": now,
+                    "duration_ms": 0,
+                    "result_summary": {
+                        "execution_kind": str(run.get("execution_kind") or ""),
+                        "message": "请在对应 QQ/QZone 专用页面完成带目标字段的单次 canary。",
+                    },
+                    "delivery_status": "dedicated_canary_required",
                 }
             )
+            _set_functional_run_diagnostic(
+                run,
+                ok=False,
+                code="external_write_dedicated_canary_required",
+                phase="delivery_canary",
+                title="真实外部写 canary 需要专用入口",
+                message="本体检页面不会发送 QQ 或写入 QZone；管理员确认后仍需在专用页面完成单目标 canary。",
+                steps=_functional_step_plan(
+                    run,
+                    status="skipped",
+                    message="为避免无目标外部写入，本页没有执行 canary。",
+                ),
+                suggestion="在 QQ 或 QZone 专用页面填写明确目标后，再执行一次可对账的 canary。",
+            )
             return _functional_test_view(run)
-        run.update({"state": "prepared", "diagnostic_code": "test_confirmed"})
+        run.update({"state": "prepared"})
+        _set_functional_run_diagnostic(
+            run,
+            ok=True,
+            code="test_confirmed",
+            phase="confirmation",
+            title="外部读取体检已确认",
+            message="管理员已确认 Provider 外部读取范围；任务即将开始，不会发送 QQ 消息。",
+            steps=_functional_step_plan(run, status="pending", message="等待受控 Provider 探针任务开始。"),
+        )
         asyncio.create_task(_execute_functional_test(runtime, operation_id))
         return _functional_test_view(run)
 
@@ -1744,7 +2758,9 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                 "model": route.get("model", ""),
                 "media_protocol": route.get("media_protocol", ""),
                 "capabilities": item.get("capabilities", {}),
-                "probe_status": _ROUTE_PROBE_TASKS.get(str(item.get("route_fingerprint") or ""), {}).get("status", "idle"),
+                "probe_catalog": _route_probe_catalog(),
+                "probe_statuses": _route_probe_statuses(str(item.get("route_fingerprint") or "")),
+                "probe_status": _route_probe_status(str(item.get("route_fingerprint") or "")),
             }
             haystack = " ".join(str(value) for value in flat.values()).casefold()
             if not needle or needle in haystack:
@@ -1755,56 +2771,315 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             params=params,
         ).to_dict()
 
-    async def _finish_probe(route_fingerprint: str) -> None:
-        task = _ROUTE_PROBE_TASKS.get(route_fingerprint)
+    async def _finish_probe(
+        route_fingerprint: str,
+        capability: str,
+        *,
+        media_path: Path | None = None,
+        cleanup_dir: Path | None = None,
+    ) -> None:
+        task = _ROUTE_PROBE_TASKS.get(_route_probe_task_key(route_fingerprint, capability))
         if task is None:
+            if cleanup_dir is not None:
+                _cleanup_route_probe_upload(cleanup_dir)
             return
-        task.update({"status": "running", "started_at": time.time()})
         try:
-            capability_state, detail_code = await _run_route_visual_probe(runtime, route_fingerprint)
-        except Exception as exc:
-            capability_state = "unknown"
-            detail_code = f"probe_internal_failed:{type(exc).__name__}"
-        task.update(
-            {
-                "status": "finished",
-                "finished_at": time.time(),
-                "capability_state": capability_state,
-                "detail_code": detail_code,
-            }
-        )
-        publish_runtime_event(
-            "provider.status_changed",
-            payload={
-                "route_fingerprint": route_fingerprint,
-                "probe_status": "finished",
-                "capability_state": capability_state,
-                "detail_code": detail_code,
-            },
-        )
+            task.update({"status": "running", "started_at": time.time()})
+            try:
+                capability_state, detail_code = await _run_route_capability_probe(
+                    runtime,
+                    route_fingerprint,
+                    capability,
+                    media_path=media_path,
+                )
+            except Exception:
+                capability_state = "unknown"
+                detail_code = "probe_internal_failed"
+                route = _route_key_for_fingerprint(route_fingerprint)
+                if route is not None:
+                    _record_route_probe_observation(
+                        route[1],
+                        capability,
+                        CapabilityObservation.PARSE_ERROR,
+                        detail_code,
+                    )
+            route = _route_key_for_fingerprint(route_fingerprint)
+            verification_state = "not_run"
+            if route is not None:
+                verification_state = DEFAULT_ROUTE_CAPABILITY_REGISTRY.get(
+                    route[1], capability
+                ).verification_state.value
+            task.update(
+                {
+                    "status": "finished",
+                    "finished_at": time.time(),
+                    "capability_state": capability_state,
+                    "verification_state": verification_state,
+                    "detail_code": detail_code,
+                }
+            )
+            publish_runtime_event(
+                "provider.status_changed",
+                payload={
+                    "route_fingerprint": route_fingerprint,
+                    "capability": capability,
+                    "probe_status": "finished",
+                    "capability_state": capability_state,
+                    "verification_state": verification_state,
+                    "detail_code": detail_code,
+                },
+            )
+        finally:
+            if cleanup_dir is not None:
+                _cleanup_route_probe_upload(cleanup_dir)
 
     @router.post("/routes/capabilities/{route_fingerprint}/probes")
     async def queue_route_probe(
         route_fingerprint: str,
+        body: dict[str, Any] = Body(default_factory=dict),
         _: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
         known = {str(item.get("route_fingerprint") or "") for item in DEFAULT_ROUTE_CAPABILITY_REGISTRY.snapshot()}
         if route_fingerprint not in known:
             raise HTTPException(status_code=404, detail={"code": "route_not_found", "message": "未找到该模型路由。"})
-        _ROUTE_PROBE_TASKS[route_fingerprint] = {"status": "queued", "queued_at": time.time()}
-        asyncio.create_task(_finish_probe(route_fingerprint))
-        return {
-            "ok": True,
-            "code": "route_probe_queued",
-            "phase": "queued",
-            "title": "视觉能力探针已排队",
-            "message": "视觉探针在管理任务中异步执行，不占聊天回合预算。当前进程未保留该路由调用器时会保持未知。",
-            "retryable": False,
-            "partial": False,
-            "outcome_unknown": False,
-            "warnings": [],
-            "steps": [],
+        capability = str(body.get("capability") or "image_input").strip().lower()
+        if capability not in CAPABILITY_NAMES:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "route_probe_capability_invalid", "message": "未识别的路由能力，未执行探针。"},
+            )
+        catalog = _route_probe_catalog()[capability]
+        if catalog["confirmation_required"] and body.get("confirmed") is not True:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "route_probe_confirmation_required",
+                    "message": "该探针可能消耗 Provider 额度或网络请求，必须由管理员明确确认。",
+                },
+            )
+        if catalog.get("input_kind") == "media_upload":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "route_probe_media_upload_required",
+                    "message": "音频和视频能力探针必须由管理员选择一个受限样例上传；未写入文件，也未调用 Provider。",
+                },
+            )
+        if not catalog["available"]:
+            route = _route_key_for_fingerprint(route_fingerprint)
+            if route is not None:
+                _record_route_probe_observation(
+                    route[1],
+                    capability,
+                    CapabilityObservation.PROBE_UNAVAILABLE,
+                    str(catalog["reason_code"]),
+                )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "route_probe_unavailable",
+                    "message": "当前运行时没有可安全执行的该能力探针；未发送 Provider 请求。",
+                    "reason_code": str(catalog["reason_code"]),
+                },
+            )
+        task_key = _route_probe_task_key(route_fingerprint, capability)
+        _ROUTE_PROBE_TASKS[task_key] = {
+            "status": "queued",
+            "queued_at": time.time(),
+            "capability": capability,
         }
+        asyncio.create_task(_finish_probe(route_fingerprint, capability))
+        return operation_diagnostic(
+            ok=True,
+            code="route_probe_queued",
+            phase="queued",
+            title="路由能力探针已排队",
+            message="探针在管理任务中异步执行，不占聊天回合预算，也不会发送 QQ 消息。",
+            steps=(operation_step("probe", "执行能力探针", "pending", "等待 Provider 探针任务开始。"),),
+            retryable=False,
+            operation_id=f"{route_fingerprint}:{capability}",
+        )
+
+    @router.post("/routes/capabilities/{route_fingerprint}/probes/media")
+    async def upload_route_media_probe(
+        route_fingerprint: str,
+        request: Request,
+        capability: str = Query(default=""),
+        confirmed: bool = Query(default=False),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        """Stream one small admin-selected media sample to the selected route.
+
+        This intentionally follows the established health-video upload lifetime:
+        raw stream -> generated directory under the health-probe root -> one
+        asynchronous probe -> unconditional cleanup.  It stores neither a
+        filename, media content, nor a local path in the task or capability
+        snapshot.
+        """
+
+        known = {
+            str(item.get("route_fingerprint") or "")
+            for item in DEFAULT_ROUTE_CAPABILITY_REGISTRY.snapshot()
+        }
+        if route_fingerprint not in known:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "route_not_found", "message": "未找到该模型路由。"},
+            )
+        capability = str(capability or "").strip().lower()
+        if capability not in _ROUTE_MEDIA_PROBE_SPECS:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "route_probe_media_capability_invalid",
+                    "message": "媒体上传探针仅支持 audio_input 或 video_input。",
+                },
+            )
+        if not confirmed:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "route_probe_confirmation_required",
+                    "message": "该探针会把管理员选择的受限媒体样例发送给当前 Provider，必须明确确认。",
+                },
+            )
+
+        target = _route_probe_target(runtime, route_fingerprint)
+        if target is None:
+            _record_unavailable_route_probe(route_fingerprint, capability)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "route_probe_target_unavailable",
+                    "message": "当前配置中找不到该路由的可执行 Provider；未写入媒体，也未调用 Provider。",
+                },
+            )
+        _route_name, route_key, provider = target
+        from ...core.media_provider_adapters import resolve_media_provider_adapter
+
+        adapter = resolve_media_provider_adapter(provider)
+        route_supports_media = (
+            adapter.supports_audio if capability == "audio_input" else adapter.supports_video
+        )
+        if not route_supports_media:
+            _record_route_probe_observation(
+                route_key,
+                capability,
+                CapabilityObservation.PROBE_UNAVAILABLE,
+                "media_probe_primary_route_unavailable",
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "route_probe_media_protocol_unavailable",
+                    "message": "该路由当前没有已声明的安全原生媒体协议；未写入媒体，也未调用 Provider。",
+                },
+            )
+
+        spec = _ROUTE_MEDIA_PROBE_SPECS[capability]
+        original_name = str(
+            request.headers.get("x-personification-media-filename")
+            or request.headers.get("x-personification-video-filename")
+            or ""
+        ).strip()
+        content_type = str(request.headers.get("content-type", "") or "").split(";", 1)[0].strip().lower()
+        suffix = _route_probe_media_suffix(capability, original_name, content_type)
+        if suffix is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "route_probe_media_invalid_type",
+                    "message": "媒体样例的文件名扩展名与 MIME 类型必须匹配受支持格式；未写入文件，也未调用 Provider。",
+                },
+            )
+        max_bytes = int(spec["max_upload_bytes"])
+        content_length = str(request.headers.get("content-length", "") or "").strip()
+        if content_length.isdigit() and int(content_length) > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "code": "route_probe_media_payload_too_large",
+                    "message": "媒体样例超过能力探针上限；未调用 Provider。",
+                },
+            )
+
+        from ...core.diagnostics import _video_probe_root
+
+        root = _video_probe_root(getattr(runtime, "plugin_config", None)).resolve()
+        operation_id = uuid.uuid4().hex
+        probe_dir = root / f"route-capability-{operation_id}"
+        target_path = probe_dir / f"sample{suffix}"
+        total = 0
+        header = bytearray()
+        handed_to_probe = False
+        try:
+            probe_dir.mkdir(parents=True, exist_ok=False)
+            with target_path.open("wb") as sink:
+                async for chunk in request.stream():
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise HTTPException(
+                            status_code=413,
+                            detail={
+                                "code": "route_probe_media_payload_too_large",
+                                "message": "媒体样例超过能力探针上限；未调用 Provider。",
+                            },
+                        )
+                    if len(header) < 32:
+                        header.extend(chunk[: 32 - len(header)])
+                    sink.write(chunk)
+            if total <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "route_probe_media_empty_upload",
+                        "message": "没有收到媒体样例；未调用 Provider。",
+                    },
+                )
+            if not _route_probe_media_magic_matches(capability, suffix, bytes(header)):
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "route_probe_media_format_invalid",
+                        "message": "媒体样例未通过格式签名校验；未调用 Provider。",
+                    },
+                )
+
+            task_key = _route_probe_task_key(route_fingerprint, capability)
+            _ROUTE_PROBE_TASKS[task_key] = {
+                "status": "queued",
+                "queued_at": time.time(),
+                "capability": capability,
+                "media_upload": True,
+            }
+            asyncio.create_task(
+                _finish_probe(
+                    route_fingerprint,
+                    capability,
+                    media_path=target_path,
+                    cleanup_dir=probe_dir,
+                )
+            )
+            handed_to_probe = True
+            return operation_diagnostic(
+                ok=True,
+                code="route_probe_queued",
+                phase="queued",
+                title="媒体能力探针已排队",
+                message="受限样例将仅用于这一次当前 Provider 验证，完成后立即删除；不会发送 QQ 或保存媒体内容。",
+                steps=(
+                    operation_step("upload", "校验并接收受限媒体样例", "ok", "样例已进入一次性探针生命周期。"),
+                    operation_step("probe", "执行当前 Provider 媒体探针", "pending", "等待异步探针完成。"),
+                    operation_step("cleanup", "删除临时媒体样例", "pending", "探针结束后自动执行。"),
+                ),
+                retryable=False,
+                operation_id=f"{route_fingerprint}:{capability}",
+            )
+        finally:
+            if not handed_to_probe:
+                _cleanup_route_probe_upload(probe_dir)
 
     @router.get("/plugin-knowledge")
     async def plugin_knowledge(
@@ -2039,6 +3314,16 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
         data["bot_id"] = str(bot_id or "")
         return data
 
+    @router.get("/metrics/subscription-quotas")
+    async def metrics_subscription_quotas(
+        force: bool = Query(default=False),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        return await query_subscription_quotas(
+            getattr(runtime, "plugin_config", None),
+            force=force,
+        )
+
     @router.get("/runtime/agent")
     async def agent_runtime(
         bot_id: str = Query(default="", max_length=64),
@@ -2252,8 +3537,12 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
         return DEFAULT_QZONE_CAPABILITY_MATRIX.snapshot(
             bot_id,
             enabled=enabled,
-            auth_status=get_qzone_auth_status(bot_id),
-            aggregate_status=get_qzone_capability_status(bot_id, enabled=enabled),
+            auth_status=get_qzone_auth_status(bot_id, plugin_config=plugin_config),
+            aggregate_status=get_qzone_capability_status(
+                bot_id,
+                enabled=enabled,
+                plugin_config=plugin_config,
+            ),
         )
 
     @router.get("/events")

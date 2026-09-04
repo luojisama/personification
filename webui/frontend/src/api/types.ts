@@ -63,6 +63,7 @@ export interface CursorPage<T> {
 }
 
 export type CapabilityState = "supported" | "unsupported" | "unknown";
+export type VerificationState = "verified" | "not_run" | "probe_unavailable" | "inconclusive" | "stale";
 export type CapabilitySource =
   | "manual"
   | "runtime_success"
@@ -73,6 +74,7 @@ export type CapabilitySource =
 
 export interface RouteCapability {
   state: CapabilityState;
+  verification_state: VerificationState;
   source: CapabilitySource;
   checked_at: string | number | null;
   expires_at: string | number | null;
@@ -90,6 +92,20 @@ export type CapabilityName =
 
 export type RouteCapabilities = Record<CapabilityName, RouteCapability>;
 
+export interface RouteCapabilityProbe {
+  probe_id: string;
+  available: boolean;
+  risk: FunctionalTestRisk;
+  confirmation_required: boolean;
+  reason_code: string;
+  /** "media_upload" means a bounded, one-shot admin sample is required. */
+  input_kind?: "none" | "media_upload";
+  /** Stable server-declared MIME allowlist for a media-upload probe. */
+  accepted_mime_types?: string[];
+  /** Stable byte limit for the one-shot media-upload probe. */
+  max_upload_bytes?: number;
+}
+
 export interface RouteCapabilityItem {
   route_fingerprint: string;
   provider: string;
@@ -97,6 +113,8 @@ export interface RouteCapabilityItem {
   model: string;
   media_protocol: string;
   capabilities: RouteCapabilities;
+  probe_catalog: Record<CapabilityName, RouteCapabilityProbe>;
+  probe_statuses?: Partial<Record<CapabilityName, "idle" | "queued" | "running" | "finished" | "failed">>;
   probe_status?: "idle" | "queued" | "running" | "finished" | "failed";
   updated_at?: string | null;
 }
@@ -353,6 +371,46 @@ export interface ConfigListItem {
   choices: string[];
   min_value: number | null;
   max_value: number | null;
+  ui_schema?: ConfigUiSchema;
+}
+
+export interface ConfigUiOption {
+  value: string;
+  label: string;
+  description?: string;
+  disabled?: boolean;
+}
+
+export interface ConfigUiField {
+  key: string;
+  label: string;
+  control_kind: string;
+  required?: boolean;
+  placeholder?: string;
+  min?: number;
+  max?: number;
+  step?: number | "any";
+  unit?: string;
+  sensitive?: boolean;
+  options?: ConfigUiOption[];
+}
+
+export interface ConfigUiSchema {
+  control_kind?: string;
+  placeholder?: string;
+  min?: number;
+  max?: number;
+  step?: number | "any";
+  unit?: string;
+  options?: ConfigUiOption[];
+  sensitive_fields?: string[];
+  allow_advanced_json?: boolean;
+  item_schema?: {
+    type?: string;
+    label?: string;
+    placeholder?: string;
+    fields?: ConfigUiField[];
+  };
 }
 
 export interface ConfigPage extends Page<ConfigListItem> {
@@ -466,7 +524,7 @@ export interface TokenSummary {
   by_model: TokenUsageRow[];
   by_group: TokenUsageRow[];
   by_purpose: TokenUsageRow[];
-  provider_usage: Array<TokenUsageRow & { label: string; monthly_limit: number; usage_ratio: number; unlimited: boolean }>;
+  provider_usage: Array<TokenUsageRow & { label: string; source: "local_token_ledger" }>;
   billing: {
     cost_configured: boolean;
     currency: string;
@@ -476,27 +534,63 @@ export interface TokenSummary {
   dashboard_overview?: Record<string, unknown>;
 }
 
+export type SubscriptionQuotaStatus = "available" | "not_configured" | "auth_failed" | "upstream_failed" | "unsupported" | "stale";
+export type SubscriptionQuotaWindowType = "five_hour" | "weekly" | "other";
+export interface SubscriptionQuotaWindow {
+  window_type: SubscriptionQuotaWindowType;
+  limit_window_seconds: number;
+  used_percent: number;
+  remaining_percent: number;
+  reset_at: number | null;
+}
+export interface SubscriptionQuotaSnapshot {
+  route_name: string;
+  route_fingerprint: string;
+  status: SubscriptionQuotaStatus;
+  diagnostic_code: string;
+  checked_at: number;
+  source: "codex_wham_proxy";
+  windows: SubscriptionQuotaWindow[];
+  cached?: boolean;
+  refresh_diagnostic_code?: string;
+}
+export interface SubscriptionQuotaResponse {
+  items: SubscriptionQuotaSnapshot[];
+  checked_at: number;
+  cache_ttl_seconds: number;
+  force_cooldown_seconds: number;
+  diagnostic_code: string;
+}
+
 export type FunctionalTestRisk = "local_read" | "external_read" | "external_write";
 export interface FunctionalTestDefinition {
   id: string;
   label: string;
   category: string;
+  group: string;
   risk: FunctionalTestRisk;
+  execution_kind: "local_readonly" | "provider_probe" | "qq_canary" | "qzone_canary";
 }
 export interface FunctionalTestRun {
   id: string;
   test_id: string;
   label: string;
+  group: string;
   risk: FunctionalTestRisk;
+  execution_kind: "local_readonly" | "provider_probe" | "qq_canary" | "qzone_canary";
   state: "prepared" | "awaiting_confirmation" | "running" | "succeeded" | "failed" | "unknown";
   target_summary: string | null;
   route_fingerprint: string | null;
   trace_id: string | null;
   diagnostic_code: string;
   created_at: string | null;
+  started_at: string | null;
   finished_at: string | null;
   duration_ms: number | null;
+  steps: OperationStep[];
+  diagnostic: OperationDiagnostic;
   result_summary: Record<string, unknown>;
+  delivery_status: "not_applicable" | "not_started" | "dedicated_canary_required" | string;
 }
 
 export interface HealthCatalog {

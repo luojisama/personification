@@ -6,14 +6,15 @@
       description="按结构化结果查看发送、Agent 跳过、冷却和下一可用窗口。记录使用服务端游标读取，不再把接口对象拆成字段路径。"
     >
       <template v-if="section === 'recent'" #actions>
-        <label class="search-field">
-          <input
-            type="search"
-            :value="target"
-            placeholder="筛选目标 QQ / 群"
-            @input="(event) => setFilter('target', (event.target as HTMLInputElement).value)"
-          />
-        </label>
+        <TextField
+          :model-value="target"
+          class="search-field"
+          label="筛选目标 QQ / 群"
+          hide-label
+          type="search"
+          placeholder="筛选目标 QQ / 群"
+          @update:model-value="setFilter('target', $event)"
+        />
       </template>
     </PageHeader>
 
@@ -31,18 +32,12 @@
     </div>
 
     <Panel v-if="section === 'recent'" eyebrow="FILTER / OUTCOME" title="结果筛选">
-      <select
-        :value="outcome"
-        aria-label="按结果筛选"
-        @change="(event) => setFilter('outcome', (event.target as HTMLSelectElement).value)"
-      >
-        <option value="">全部结果</option>
-        <option value="sent">已发送</option>
-        <option value="skip_llm_decided">Agent 决定跳过</option>
-        <option value="skip_cooldown">冷却中</option>
-        <option value="skip_probability">概率门未通过</option>
-        <option value="skip_daily_limit">达到每日上限</option>
-      </select>
+      <SelectField
+        :model-value="outcome"
+        label="按结果筛选"
+        :options="OUTCOME_OPTIONS"
+        @update:model-value="setFilter('outcome', $event)"
+      />
     </Panel>
 
     <QueryBoundary :pending="activeQuery.isPending.value" :error="activeQuery.error.value">
@@ -185,6 +180,8 @@ import PageHeader from "@vue-app/components/PageHeader.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
+import SelectField from "@vue-app/components/forms/SelectField.vue";
+import TextField from "@vue-app/components/forms/TextField.vue";
 import { formatDateTime } from "@/lib/format";
 
 const SCOPES = [
@@ -192,6 +189,14 @@ const SCOPES = [
   { value: "private", label: "主动私聊" },
   { value: "group", label: "群主动接话" },
   { value: "qzone", label: "QQ 空间" },
+];
+const OUTCOME_OPTIONS = [
+  { value: "", label: "全部结果" },
+  { value: "sent", label: "已发送" },
+  { value: "skip_llm_decided", label: "Agent 决定跳过" },
+  { value: "skip_cooldown", label: "冷却中" },
+  { value: "skip_probability", label: "概率门未通过" },
+  { value: "skip_daily_limit", label: "达到每日上限" },
 ];
 
 function outcomeLabel(value: string): string {

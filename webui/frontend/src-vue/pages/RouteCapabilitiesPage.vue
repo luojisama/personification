@@ -3,18 +3,18 @@
     <PageHeader
       index="06"
       title="路由能力"
-      description="能力绑定 Provider、API 类型、URL 指纹、模型和媒体协议。超时与上游故障保持“未知”，不会伪装成“不支持”。"
+      description="能力状态与验证状态分别呈现。超时、网络、5xx 和解析异常都保持“未知 / 结果不确定”，不会伪装成“不支持”。"
     >
       <template #actions>
-        <div class="search-field">
-          <input
-            v-model="searchTerm"
-            type="search"
-            placeholder="搜索 Provider、模型或指纹"
-            aria-label="搜索路由能力"
-            @input="onSearchInput"
-          />
-        </div>
+        <TextField
+          v-model="searchTerm"
+          class="search-field"
+          label="搜索路由能力"
+          hide-label
+          type="search"
+          placeholder="搜索 Provider、模型或指纹"
+          @update:model-value="onSearchInput"
+        />
       </template>
     </PageHeader>
 
@@ -62,18 +62,6 @@
               :eyebrow="`${route.provider} / ${route.api_type}`"
               :title="route.model"
             >
-              <template #actions>
-                <button
-                  class="button button-secondary"
-                  type="button"
-                  :disabled="probingMap[route.route_fingerprint] || isPendingProbe"
-                  @click="triggerProbe(route.route_fingerprint)"
-                >
-                  <Icon name="refresh" />
-                  {{ probingMap[route.route_fingerprint] ? '正在排队' : '视觉重测' }}
-                </button>
-              </template>
-
               <div class="route-meta-line">
                 <code :title="route.route_fingerprint">{{ shortId(route.route_fingerprint, 10) }}</code>
                 <span>{{ route.media_protocol || '未声明媒体协议' }}</span>
@@ -81,7 +69,7 @@
                   :tone="route.probe_status === 'running' || route.probe_status === 'queued' ? 'running' : 'unknown'"
                   :raw="route.probe_status"
                 >
-                  {{ route.probe_status === 'running' ? '探针运行中' : route.probe_status === 'queued' ? '探针已排队' : '使用缓存证据' }}
+                  {{ routeProbeStatusLabel(route.probe_status) }}
                 </StateBadge>
               </div>
 
@@ -92,23 +80,55 @@
                   class="capability-cell"
                 >
                   <StateBadge
-                    :tone="cap.state === 'supported' ? 'ok' : cap.state === 'unsupported' ? 'error' : 'unknown'"
-                    :title="`${capabilityStateLabel(cap.state)} · ${capabilitySourceLabel(cap.source)} · ${cap.detail_code}`"
+                    :tone="capabilityTone(cap.state, cap.verification_state)"
+                    :raw="`${capabilityStateLabel(cap.state)} · ${verificationStateLabel(cap.verification_state)} · ${cap.detail_code}`"
                   >
                     {{ CAPABILITY_LABELS[name as CapabilityName] || name }}: {{ capabilityStateLabel(cap.state) }}
+                  </StateBadge>
+                  <StateBadge
+                    :tone="verificationTone(cap.state, cap.verification_state)"
+                    :raw="cap.verification_state"
+                  >
+                    {{ verificationStateLabel(cap.verification_state) }}
                   </StateBadge>
                   <dl>
                     <div><dt>证据</dt><dd>{{ capabilitySourceLabel(cap.source) }}</dd></div>
                     <div><dt>验证</dt><dd>{{ formatDateTime(cap.checked_at) }}</dd></div>
+                    <div><dt>探针</dt><dd>{{ probeAvailabilityLabel(probeFor(route, name as CapabilityName)) }}</dd></div>
+                    <div><dt>风险</dt><dd>{{ probeRiskLabel(probeFor(route, name as CapabilityName)) }}</dd></div>
+                    <div><dt>要求</dt><dd>{{ probeRequirementLabel(probeFor(route, name as CapabilityName)) }}</dd></div>
                     <div><dt>诊断</dt><dd><code>{{ cap.detail_code }}</code></dd></div>
                   </dl>
+                  <div v-if="isMediaUploadProbe(probeFor(route, name as CapabilityName))" class="probe-media-input">
+                    <label :for="mediaInputId(route.route_fingerprint, name as CapabilityName)">
+                      管理员受限{{ CAPABILITY_LABELS[name as CapabilityName] }}样例
+                    </label>
+                    <input
+                      :id="mediaInputId(route.route_fingerprint, name as CapabilityName)"
+                      data-testid="route-media-probe-input"
+                      type="file"
+                      :accept="mediaAccept(probeFor(route, name as CapabilityName))"
+                      @change="selectMediaSample(route.route_fingerprint, name as CapabilityName, $event)"
+                    />
+                    <small>{{ mediaSelectionLabel(route.route_fingerprint, name as CapabilityName, probeFor(route, name as CapabilityName)) }}</small>
+                  </div>
+                  <button
+                    class="button button-secondary"
+                    type="button"
+                    :disabled="!canRunProbe(route, name as CapabilityName) || !hasRequiredMediaSample(route.route_fingerprint, name as CapabilityName, probeFor(route, name as CapabilityName)) || isProbing(route.route_fingerprint, name as CapabilityName) || isPendingProbe || isPendingMediaProbe"
+                    :title="probeActionHint(probeFor(route, name as CapabilityName))"
+                    @click="triggerProbe(route.route_fingerprint, name as CapabilityName)"
+                  >
+                    <Icon name="refresh" />
+                    {{ isProbing(route.route_fingerprint, name as CapabilityName) ? '正在排队' : probeButtonLabel(probeFor(route, name as CapabilityName)) }}
+                  </button>
                 </div>
               </div>
 
               <footer class="route-summary">
-                <span>支持 {{ countCapabilities(route.capabilities, 'supported') }}</span>
-                <span>未知 {{ countCapabilities(route.capabilities, 'unknown') }}</span>
-                <span>不支持 {{ countCapabilities(route.capabilities, 'unsupported') }}</span>
+                <span>已验证支持 {{ countVerifiedCapabilities(route.capabilities, 'supported') }}</span>
+                <span>待核实 {{ countUnverifiedCapabilities(route.capabilities) }}</span>
+                <span>已验证不支持 {{ countVerifiedCapabilities(route.capabilities, 'unsupported') }}</span>
               </footer>
             </Panel>
           </div>
@@ -144,15 +164,23 @@ import { useRoute, RouterLink } from "vue-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 
 import { resources } from "@/api/resources";
-import type { CapabilityName, RouteCapabilities } from "@/api/types";
+import type {
+  CapabilityName,
+  CapabilityState,
+  RouteCapabilities,
+  RouteCapabilityItem,
+  RouteCapabilityProbe,
+  VerificationState,
+} from "@/api/types";
 import { formatDateTime, shortId } from "@/lib/format";
-import { capabilitySourceLabel, capabilityStateLabel } from "@/lib/labels";
+import { capabilitySourceLabel, capabilityStateLabel, verificationStateLabel } from "@/lib/labels";
 import EmptyState from "@vue-app/components/EmptyState.vue";
 import Icon from "@vue-app/components/Icon.vue";
 import PageHeader from "@vue-app/components/PageHeader.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
+import TextField from "@vue-app/components/forms/TextField.vue";
 
 const CAPABILITY_LABELS: Record<CapabilityName, string> = {
   image_input: "图片",
@@ -171,6 +199,9 @@ const currentSection = computed(() => String(route.params.section || "capabiliti
 const page = ref(1);
 const searchTerm = ref("");
 const probingMap = reactive<Record<string, boolean>>({});
+const selectedMedia = reactive<Record<string, File | undefined>>({});
+
+type MediaCapability = Extract<CapabilityName, "audio_input" | "video_input">;
 
 const { data, isPending, error } = useQuery({
   queryKey: computed(() => ["route-capabilities", page.value, searchTerm.value]),
@@ -178,26 +209,189 @@ const { data, isPending, error } = useQuery({
 });
 
 const { mutate: mutateProbe, isPending: isPendingProbe } = useMutation({
-  mutationFn: (fingerprint: string) => resources.queueRouteProbe(fingerprint),
-  onSuccess: (_, fingerprint) => {
-    probingMap[fingerprint] = false;
+  mutationFn: ({ fingerprint, capability }: { fingerprint: string; capability: CapabilityName }) =>
+    resources.queueRouteProbe(fingerprint, capability, true),
+  onSuccess: (_, request) => {
+    probingMap[probeMapKey(request.fingerprint, request.capability)] = false;
     void queryClient.invalidateQueries({ queryKey: ["route-capabilities"] });
   },
-  onError: (_, fingerprint) => {
-    probingMap[fingerprint] = false;
+  onError: (_, request) => {
+    probingMap[probeMapKey(request.fingerprint, request.capability)] = false;
   },
 });
 
-function triggerProbe(fingerprint: string) {
-  probingMap[fingerprint] = true;
-  mutateProbe(fingerprint);
+const { mutate: mutateMediaProbe, isPending: isPendingMediaProbe } = useMutation({
+  mutationFn: ({ fingerprint, capability, file }: { fingerprint: string; capability: MediaCapability; file: File }) =>
+    resources.uploadRouteMediaProbe(fingerprint, capability, file),
+  onSuccess: (_, request) => {
+    probingMap[probeMapKey(request.fingerprint, request.capability)] = false;
+    selectedMedia[probeMapKey(request.fingerprint, request.capability)] = undefined;
+    void queryClient.invalidateQueries({ queryKey: ["route-capabilities"] });
+  },
+  onError: (_, request) => {
+    probingMap[probeMapKey(request.fingerprint, request.capability)] = false;
+  },
+});
+
+function probeMapKey(fingerprint: string, capability: CapabilityName): string {
+  return `${fingerprint}:${capability}`;
+}
+
+function probeFor(routeItem: RouteCapabilityItem, capability: CapabilityName): RouteCapabilityProbe | undefined {
+  return routeItem.probe_catalog?.[capability];
+}
+
+function canRunProbe(routeItem: RouteCapabilityItem, capability: CapabilityName): boolean {
+  return probeFor(routeItem, capability)?.available === true;
+}
+
+function isMediaUploadProbe(probe: RouteCapabilityProbe | undefined): boolean {
+  return probe?.input_kind === "media_upload";
+}
+
+function isMediaCapability(capability: CapabilityName): capability is MediaCapability {
+  return capability === "audio_input" || capability === "video_input";
+}
+
+function mediaInputId(fingerprint: string, capability: CapabilityName): string {
+  return `route-media-${probeMapKey(fingerprint, capability).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+}
+
+function mediaAccept(probe: RouteCapabilityProbe | undefined): string {
+  return Array.isArray(probe?.accepted_mime_types) ? probe.accepted_mime_types.join(",") : "";
+}
+
+function selectMediaSample(fingerprint: string, capability: CapabilityName, event: Event) {
+  const input = event.target as HTMLInputElement | null;
+  selectedMedia[probeMapKey(fingerprint, capability)] = input?.files?.item(0) ?? undefined;
+}
+
+function hasRequiredMediaSample(
+  fingerprint: string,
+  capability: CapabilityName,
+  probe: RouteCapabilityProbe | undefined,
+): boolean {
+  return !isMediaUploadProbe(probe) || selectedMedia[probeMapKey(fingerprint, capability)] instanceof File;
+}
+
+function mediaSelectionLabel(
+  fingerprint: string,
+  capability: CapabilityName,
+  probe: RouteCapabilityProbe | undefined,
+): string {
+  const file = selectedMedia[probeMapKey(fingerprint, capability)];
+  if (!(file instanceof File)) {
+    const limit = Number(probe?.max_upload_bytes || 0);
+    return limit > 0 ? `请选择不超过 ${Math.ceil(limit / (1024 * 1024))} MB 的样例；上传后会自动删除。` : "请选择一个受限样例；上传后会自动删除。";
+  }
+  return `已选择受限样例（${Math.max(1, Math.ceil(file.size / 1024))} KiB）；不会保存到能力快照。`;
+}
+
+function isProbing(fingerprint: string, capability: CapabilityName): boolean {
+  return probingMap[probeMapKey(fingerprint, capability)] === true;
+}
+
+function triggerProbe(fingerprint: string, capability: CapabilityName) {
+  const routeItem = data.value?.items.find((item) => item.route_fingerprint === fingerprint);
+  const probe = routeItem ? probeFor(routeItem, capability) : undefined;
+  if (!probe?.available) return;
+
+  if (isMediaUploadProbe(probe)) {
+    const file = selectedMedia[probeMapKey(fingerprint, capability)];
+    if (!(file instanceof File) || !isMediaCapability(capability)) return;
+    if (Array.isArray(probe.accepted_mime_types) && !probe.accepted_mime_types.includes(file.type)) {
+      window.alert("所选样例的 MIME 类型不在服务端允许列表中；未上传，也未调用 Provider。");
+      return;
+    }
+    if (typeof probe.max_upload_bytes === "number" && file.size > probe.max_upload_bytes) {
+      window.alert("所选样例超过服务端允许大小；未上传，也未调用 Provider。");
+      return;
+    }
+    const detail = `${CAPABILITY_LABELS[capability]}探针会把当前受限样例发送给所选 Provider，可能产生网络或 Token 额度消耗。样例仅用于本次验证，结束后自动删除；不会发送 QQ，也不会保存媒体内容。\n\n确认上传并运行吗？`;
+    if (!window.confirm(detail)) return;
+    probingMap[probeMapKey(fingerprint, capability)] = true;
+    mutateMediaProbe({ fingerprint, capability, file });
+    return;
+  }
+
+  if (probe.confirmation_required) {
+    const detail = `${CAPABILITY_LABELS[capability]}探针会调用当前 Provider，可能产生网络或 Token 额度消耗。它不会发送 QQ，也不会执行模型返回的工具调用；推理探针不会请求或展示思维链。\n\n确认运行吗？`;
+    if (!window.confirm(detail)) return;
+  }
+  probingMap[probeMapKey(fingerprint, capability)] = true;
+  mutateProbe({ fingerprint, capability });
 }
 
 function onSearchInput() {
   page.value = 1;
 }
 
-function countCapabilities(capabilities: RouteCapabilities, state: "supported" | "unsupported" | "unknown"): number {
-  return Object.values(capabilities).filter((cap) => cap.state === state).length;
+function capabilityTone(state: CapabilityState, verificationState: VerificationState): "ok" | "error" | "unknown" {
+  if (verificationState !== "verified") return "unknown";
+  if (state === "supported") return "ok";
+  if (state === "unsupported") return "error";
+  return "unknown";
+}
+
+function verificationTone(capabilityState: CapabilityState, state: VerificationState): "ok" | "unknown" {
+  return capabilityState !== "unknown" && state === "verified" ? "ok" : "unknown";
+}
+
+function probeAvailabilityLabel(probe: RouteCapabilityProbe | undefined): string {
+  if (!probe) return "目录缺失";
+  if (!probe.available) return "当前不可用";
+  return isMediaUploadProbe(probe) ? "上传样例后可运行" : "可运行";
+}
+
+function probeRiskLabel(probe: RouteCapabilityProbe | undefined): string {
+  if (!probe) return "未声明";
+  if (probe.risk === "external_write") return "外部写入";
+  if (probe.risk === "external_read") return "Provider 外部读取";
+  return "本地只读";
+}
+
+function probeRequirementLabel(probe: RouteCapabilityProbe | undefined): string {
+  if (!probe) return "无";
+  if (!probe.available) {
+    if (!probe.confirmation_required) return "当前无安全探针";
+    return "不可用；启用时需确认";
+  }
+  if (isMediaUploadProbe(probe)) {
+    const limit = Number(probe.max_upload_bytes || 0);
+    return limit > 0
+      ? `需确认 + 管理员上传不超过 ${Math.ceil(limit / (1024 * 1024))} MB 的受限样例`
+      : "需确认 + 管理员上传受限样例";
+  }
+  return probe.confirmation_required ? "需确认（网络/Token 消耗）" : "无需确认";
+}
+
+function probeActionHint(probe: RouteCapabilityProbe | undefined): string {
+  if (!probe) return "服务端没有提供此能力的探针目录。";
+  if (!probe.available) return `当前不可运行：${probe.reason_code}`;
+  if (isMediaUploadProbe(probe)) return "选择符合格式与大小限制的管理员样例；探针结束后自动删除。";
+  return probe.confirmation_required ? "需明确确认，可能消耗网络或 Token 额度。" : "可运行无副作用探针。";
+}
+
+function probeButtonLabel(probe: RouteCapabilityProbe | undefined): string {
+  if (!probe?.available) return "探针不可用";
+  return isMediaUploadProbe(probe) ? "上传样例并运行" : "运行探针";
+}
+
+function routeProbeStatusLabel(status: RouteCapabilityItem["probe_status"]): string {
+  if (status === "running") return "探针运行中";
+  if (status === "queued") return "探针已排队";
+  if (status === "failed") return "最近探针失败";
+  if (status === "finished") return "探针已完成";
+  return "暂无运行中的探针";
+}
+
+function countVerifiedCapabilities(capabilities: RouteCapabilities, state: CapabilityState): number {
+  return Object.values(capabilities).filter(
+    (capability) => capability.state === state && capability.verification_state === "verified",
+  ).length;
+}
+
+function countUnverifiedCapabilities(capabilities: RouteCapabilities): number {
+  return Object.values(capabilities).filter((capability) => capability.verification_state !== "verified").length;
 }
 </script>
