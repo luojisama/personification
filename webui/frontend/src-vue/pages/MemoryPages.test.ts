@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { createMemoryHistory, createRouter } from "vue-router";
 import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
 
@@ -83,5 +83,37 @@ describe("MemoryPages.vue", () => {
     await btn.trigger("click");
     expect(confirmSpy).toHaveBeenCalled();
     expect(resources.rebuildMemoryIndex).not.toHaveBeenCalled();
+  });
+
+  it("点击 v2 宫殿分区后，缺少后端 entries 时明确展示空态而不伪造条目", async () => {
+    vi.mocked(resources.memoryBusiness).mockResolvedValue({
+      schema_version: 2,
+      zone_details: [
+        {
+          zone_id: "person",
+          name: "人物记忆",
+          purpose: "保留用户长期信息。",
+          status: "not_configured",
+          item_count: 3,
+          last_updated_at: 1710000000000,
+        },
+      ],
+    });
+
+    await router.push("/persona/memory-palace/palace-zones");
+    await router.isReady();
+    const wrapper = mount(MemoryPages, {
+      global: {
+        plugins: [router, [VueQueryPlugin, { queryClient }]],
+      },
+    });
+    await flushPromises();
+
+    const zone = wrapper.get("button.palace-zone-button");
+    expect(zone.attributes("aria-label")).toContain("人物记忆");
+    await zone.trigger("click");
+    expect(wrapper.text()).toContain("条目数");
+    expect(wrapper.text()).toContain("后端暂未提供该分区的条目明细");
+    expect(wrapper.text()).not.toContain("memory_1");
   });
 });

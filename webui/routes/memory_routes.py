@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import math
 import time
 import uuid
 from typing import Any, NoReturn
@@ -65,6 +67,77 @@ _TIER_LABELS: dict[str, str] = {
     "core": "核心记忆",
     "archive": "归档记忆",
 }
+
+# Stable backend contract for the seven first-class memory-palace zones.  A
+# zone not listed here can have been created by a legacy build or an extension;
+# it remains visible as custom instead of being assigned an invented purpose.
+_PALACE_ZONE_META: dict[str, tuple[str, str]] = {
+    "recent_episode": ("近期片段", "保留近期对话事件的短期回忆。"),
+    "working": ("工作记忆", "保留当前任务或会话的工作信息。"),
+    "person": ("人物记忆", "保留与特定用户有关的长期信息。"),
+    "group": ("群体记忆", "保留群体共同语境与群知识。"),
+    "topic": ("主题记忆", "保留可跨回合召回的主题与概念。"),
+    "self": ("自我记忆", "保留人格自身的稳定状态与自我模型。"),
+    "future": ("未来计划", "保留待办、计划与预期事件。"),
+}
+_CUSTOM_PALACE_ZONE_META = ("自定义分区", "未注册的历史或自定义分区。")
+_PALACE_CAPACITY_DIAGNOSTIC = "memory_zone_capacity_not_configured"
+
+
+def _safe_nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _safe_timestamp(value: Any) -> float:
+    try:
+        timestamp = float(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return timestamp if math.isfinite(timestamp) and timestamp >= 0 else 0.0
+
+
+def _palace_tier_from_payload(value: Any) -> str:
+    """Read the real tier stored in MemoryStore's payload without exposing it."""
+
+    try:
+        payload = json.loads(str(value or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        return "unavailable"
+    tier = str(payload.get("tier", "") or "").strip()
+    return tier or "unavailable"
+
+
+def _palace_zone_detail(zone_id: str, aggregate: dict[str, Any]) -> dict[str, Any]:
+    name, purpose = _PALACE_ZONE_META.get(zone_id, _CUSTOM_PALACE_ZONE_META)
+    # There is no capacity source in the current MemoryStore.  Report that
+    # mechanical absence explicitly; do not label an unconfigured zone active
+    # or unlimited.
+    return {
+        "zone_id": zone_id,
+        "name": name,
+        "purpose": purpose,
+        "status": "not_configured",
+        "item_count": _safe_nonnegative_int(aggregate.get("item_count")),
+        "tier_counts": {
+            str(key): _safe_nonnegative_int(value)
+            for key, value in sorted(dict(aggregate.get("tier_counts", {})).items())
+        },
+        "memory_type_counts": {
+            str(key): _safe_nonnegative_int(value)
+            for key, value in sorted(dict(aggregate.get("memory_type_counts", {})).items())
+        },
+        "total_access_count": _safe_nonnegative_int(aggregate.get("total_access_count")),
+        "last_accessed_at": _safe_timestamp(aggregate.get("last_accessed_at")),
+        "last_updated_at": _safe_timestamp(aggregate.get("last_updated_at")),
+        "capacity_mode": "not_configured",
+        "capacity": None,
+        "diagnostic_code": _PALACE_CAPACITY_DIAGNOSTIC,
+    }
 
 _NODE_KIND_LABELS: dict[str, str] = {
     "memory": "记忆条目",
@@ -875,19 +948,43 @@ def build_memory_router(*, runtime) -> APIRouter:
     async def palace_zones(_: AdminIdentity = Depends(require_admin)) -> dict:
         store = _memory_store(runtime)
         if store is None:
-            return {"zones": [], "available": False}
+            return {
+                "zones": [],
+                "zone_details": [],
+                "schema_version": 2,
+                "available": False,
+                "diagnostic_code": "memory_store_unavailable",
+            }
         try:
             from ...core.memory_store import _connect
 
             db_path = store.memory_palace_dir / "memory_palace.db"
         except Exception:
-            _raise_operation(503, _private_api_unavailable_report(purpose="读取记忆分区"))
+            return {
+                "zones": [],
+                "zone_details": [],
+                "schema_version": 2,
+                "available": False,
+                "diagnostic_code": "memory_palace_path_unavailable",
+            }
         if not db_path.exists():
-            return {"zones": [], "available": True}
+            return {
+                "zones": [],
+                "zone_details": [],
+                "schema_version": 2,
+                "available": True,
+                "diagnostic_code": "memory_palace_not_initialized",
+            }
         try:
             with _connect(db_path) as conn:
                 rows = conn.execute(
-                    "SELECT DISTINCT palace_zone FROM memory_items WHERE palace_zone IS NOT NULL AND palace_zone != '' ORDER BY palace_zone"
+                    """
+                    SELECT palace_zone, memory_type, payload, access_count,
+                           last_accessed_at, updated_at
+                    FROM memory_items
+                    WHERE palace_zone IS NOT NULL AND palace_zone != ''
+                    ORDER BY palace_zone ASC
+                    """
                 ).fetchall()
         except Exception as exc:
             report = _exception_report(
@@ -900,8 +997,55 @@ def build_memory_router(*, runtime) -> APIRouter:
                 suggestion="根据 Trace ID 检查脱敏日志和 memory_palace.db。",
                 steps=(operation_step("read", "查询记忆分区", "error", "未取得可靠分区列表。"),),
             )
-            _raise_operation(500, report)
-        zones = [str(row[0]) for row in rows if row and row[0]]
-        return {"zones": zones, "available": True}
+            return {
+                "zones": [],
+                "zone_details": [],
+                "schema_version": 2,
+                "available": False,
+                "diagnostic_code": "memory_zone_aggregation_unavailable",
+                "diagnostic": report,
+            }
+        aggregates: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            zone_id = str(row["palace_zone"] or "").strip()
+            if not zone_id:
+                continue
+            aggregate = aggregates.setdefault(
+                zone_id,
+                {
+                    "item_count": 0,
+                    "tier_counts": {},
+                    "memory_type_counts": {},
+                    "total_access_count": 0,
+                    "last_accessed_at": 0.0,
+                    "last_updated_at": 0.0,
+                },
+            )
+            aggregate["item_count"] += 1
+            tier = _palace_tier_from_payload(row["payload"])
+            aggregate["tier_counts"][tier] = _safe_nonnegative_int(
+                aggregate["tier_counts"].get(tier)
+            ) + 1
+            memory_type = str(row["memory_type"] or "").strip() or "unavailable"
+            aggregate["memory_type_counts"][memory_type] = _safe_nonnegative_int(
+                aggregate["memory_type_counts"].get(memory_type)
+            ) + 1
+            aggregate["total_access_count"] += _safe_nonnegative_int(row["access_count"])
+            aggregate["last_accessed_at"] = max(
+                _safe_timestamp(aggregate["last_accessed_at"]),
+                _safe_timestamp(row["last_accessed_at"]),
+            )
+            aggregate["last_updated_at"] = max(
+                _safe_timestamp(aggregate["last_updated_at"]),
+                _safe_timestamp(row["updated_at"]),
+            )
+        zones = sorted(aggregates)
+        return {
+            "zones": zones,
+            "zone_details": [_palace_zone_detail(zone_id, aggregates[zone_id]) for zone_id in zones],
+            "schema_version": 2,
+            "available": True,
+            "diagnostic_code": "memory_zone_aggregation_complete",
+        }
 
     return router

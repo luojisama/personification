@@ -6,16 +6,15 @@
       description="最近记忆、召回测试、内部状态、关联图谱、宫殿分区与向量索引；详情按需加载，敏感内容脱敏呈现。"
     >
       <template v-if="showSearch" #actions>
-        <div class="search-field">
-          <label :for="searchInputId">{{ searchLabel }}</label>
-          <input
-            :id="searchInputId"
-            v-model="searchTerm"
-            type="search"
-            :placeholder="searchPlaceholder"
-            @keydown.enter="handleSearchSubmit"
-          />
-        </div>
+        <TextField
+          :id="searchInputId"
+          v-model="searchTerm"
+          class="search-field"
+          :label="searchLabel"
+          type="search"
+          :placeholder="searchPlaceholder"
+          @keydown.enter="handleSearchSubmit"
+        />
       </template>
     </PageHeader>
 
@@ -25,7 +24,7 @@
         :key="item.key"
         :to="item.to"
         class="nav-tab"
-        :aria-selected="currentSection === item.key"
+        :aria-current="currentSection === item.key ? 'page' : undefined"
       >
         {{ item.label }}
       </router-link>
@@ -217,11 +216,11 @@
       title="记忆宫殿分区布局"
     >
       <QueryBoundary :pending="businessQuery.isPending.value" :error="businessQuery.error.value">
-        <div class="palace-grid">
+        <div v-if="palaceZoneCards.length" class="palace-grid">
           <article
-            v-for="(zone, idx) in palaceZones"
+            v-for="(zone, idx) in palaceZoneCards"
             :key="textAt(zone, 'zone_id', 'id', 'name') || idx"
-            class="palace-card"
+            :class="['palace-card', { 'is-selected': selectedPalaceZoneId === palaceZoneId(zone) }]"
           >
             <header class="palace-card-header">
               <div>
@@ -229,22 +228,64 @@
                 <h3>{{ textAt(zone, 'name', 'title') || '未命名殿室' }}</h3>
               </div>
               <StateBadge :tone="badgeTone(textAt(zone, 'status'))">
-                {{ textAt(zone, 'status') || '活跃' }}
+                {{ palaceStatusLabel(textAt(zone, 'status')) }}
               </StateBadge>
             </header>
             <p class="zone-desc">{{ textAt(zone, 'description', 'purpose') || '未分配具体职能。' }}</p>
             <dl class="zone-meta-list">
               <div>
-                <dt>记忆容量 / 锚点</dt>
-                <dd>{{ textAt(zone, 'anchor_count', 'items_count') || '0' }} / {{ textAt(zone, 'capacity') || '无上限' }}</dd>
+                <dt>条目数 / 容量</dt>
+                <dd>{{ textAt(zone, 'item_count', 'anchor_count', 'items_count') || '0' }} / {{ textAt(zone, 'capacity') || '未配置' }}</dd>
               </div>
               <div>
-                <dt>访问频率</dt>
-                <dd>{{ textAt(zone, 'access_frequency', 'frequency') || '常驻' }}</dd>
+                <dt>最近更新</dt>
+                <dd>{{ formatDateTime(zoneUpdatedAt(zone)) }}</dd>
               </div>
             </dl>
+            <button
+              class="button button-secondary palace-zone-button"
+              type="button"
+              :aria-pressed="selectedPalaceZoneId === palaceZoneId(zone)"
+              :aria-label="`查看${textAt(zone, 'name', 'title') || '当前'}分区详情`"
+              @click="selectedPalaceZoneId = palaceZoneId(zone)"
+            >
+              {{ selectedPalaceZoneId === palaceZoneId(zone) ? "正在查看分区详情" : "查看分区详情" }}
+            </button>
           </article>
         </div>
+        <div v-else class="empty-notice">记忆宫殿当前没有可展示的分区。</div>
+
+        <Panel v-if="selectedPalaceZone" eyebrow="MEMORY / PALACE-DETAIL" :title="`${textAt(selectedPalaceZone, 'name', 'title') || '未命名殿室'}详情`">
+          <dl class="compact-kv">
+            <dt>条目数</dt><dd>{{ textAt(selectedPalaceZone, 'item_count', 'count', 'anchor_count') || '—' }}</dd>
+            <dt>更新时间</dt><dd>{{ formatDateTime(zoneUpdatedAt(selectedPalaceZone)) }}</dd>
+          </dl>
+
+          <div v-if="selectedZoneEntriesProvided && selectedZoneEntries.length" class="table-responsive">
+            <table class="data-table" aria-label="记忆宫殿分区条目">
+              <thead>
+                <tr>
+                  <th scope="col">条目摘要 / ID</th>
+                  <th scope="col">状态</th>
+                  <th scope="col">更新时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(entry, index) in selectedZoneEntries" :key="textAt(entry, 'memory_id', 'id') || index">
+                  <td>
+                    <strong>{{ textAt(entry, 'summary', 'title', 'label') || '（未提供摘要）' }}</strong>
+                    <br />
+                    <code>{{ textAt(entry, 'memory_id', 'id') || '—' }}</code>
+                  </td>
+                  <td>{{ textAt(entry, 'status', 'state') || '—' }}</td>
+                  <td>{{ formatDateTime(entry.updated_at as string | number | null) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else-if="selectedZoneEntriesProvided" class="empty-notice">当前分区暂无可展示条目。</p>
+          <p v-else class="empty-notice">后端暂未提供该分区的条目明细；页面不会根据汇总数量生成虚拟条目。</p>
+        </Panel>
       </QueryBoundary>
     </Panel>
 
@@ -308,6 +349,7 @@ import PageHeader from "@vue-app/components/PageHeader.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
+import TextField from "@vue-app/components/forms/TextField.vue";
 import { formatDateTime } from "@/lib/format";
 
 const route = useRoute();
@@ -394,6 +436,39 @@ const businessRecord = computed(() => asRecord(businessQuery.data.value));
 const graphNodes = computed(() => (Array.isArray(businessRecord.value.nodes) ? (businessRecord.value.nodes as RecordObj[]) : []));
 const graphEdges = computed(() => (Array.isArray(businessRecord.value.edges) ? (businessRecord.value.edges as RecordObj[]) : []));
 const palaceZones = computed(() => (Array.isArray(businessRecord.value.zones) ? (businessRecord.value.zones as RecordObj[]) : Array.isArray(businessRecord.value.items) ? (businessRecord.value.items as RecordObj[]) : []));
+const palaceZoneDetails = computed(() => recordsFromUnknown(businessRecord.value.zone_details));
+const palaceZoneCards = computed(() => palaceZoneDetails.value.length ? palaceZoneDetails.value : palaceZones.value);
+const selectedPalaceZoneId = ref("");
+const selectedPalaceZone = computed(() => palaceZoneCards.value.find((zone) => palaceZoneId(zone) === selectedPalaceZoneId.value) ?? null);
+const selectedZoneEntriesProvided = computed(() => Boolean(selectedPalaceZone.value && Array.isArray(selectedPalaceZone.value.entries)));
+const selectedZoneEntries = computed(() => selectedPalaceZone.value ? recordsFromUnknown(selectedPalaceZone.value.entries) : []);
+
+watch(palaceZoneCards, (zones) => {
+  if (selectedPalaceZoneId.value && zones.some((zone) => palaceZoneId(zone) === selectedPalaceZoneId.value)) return;
+  selectedPalaceZoneId.value = "";
+}, { immediate: true });
+
+function recordsFromUnknown(value: unknown): RecordObj[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is RecordObj => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    : [];
+}
+
+function palaceZoneId(zone: RecordObj): string {
+  return textAt(zone, "zone_id", "id", "name");
+}
+
+function zoneUpdatedAt(zone: RecordObj): string | number | null {
+  const value = zone.last_updated_at ?? zone.updated_at;
+  return typeof value === "string" || typeof value === "number" ? value : null;
+}
+
+function palaceStatusLabel(value: string): string {
+  if (value === "not_configured") return "容量未配置";
+  if (value === "ready" || value === "active") return "可用";
+  if (value === "unavailable") return "暂不可用";
+  return value || "状态未知";
+}
 
 // Search query
 const searchQuery = useQuery<RecordObj>({
@@ -434,3 +509,14 @@ function handleRebuildPrompt() {
   }
 }
 </script>
+
+<style scoped>
+.palace-zone-button {
+  width: 100%;
+}
+
+.palace-card.is-selected {
+  border-color: var(--color-accent, currentColor);
+  box-shadow: 0 0 0 1px var(--color-accent, currentColor);
+}
+</style>

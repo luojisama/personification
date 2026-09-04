@@ -9,11 +9,13 @@
       >
         <template #actions>
           <div class="search-field">
-            <input
-              v-model="searchDraft"
+            <TextField
+              :model-value="searchDraft"
+              label="搜索当前目录"
+              hide-label
               placeholder="搜索当前目录"
-              aria-label="搜索当前目录"
-              @input="handleSearchInput"
+              type="search"
+              @update:model-value="handleSearchInput"
             />
           </div>
         </template>
@@ -22,34 +24,54 @@
       <!-- Personas 筛选 -->
       <Panel v-if="dataset === 'personas'" eyebrow="FILTER / PERSONAS" title="服务端筛选">
         <div class="inline-controls filter-control-row">
-          <input :value="groupIdQuery" placeholder="群 ID" aria-label="按群筛选" @input="updateParam('group_id', ($event.target as HTMLInputElement).value)" />
-          <input :value="favorabilityLevelQuery" placeholder="好感等级" aria-label="按好感等级筛选" @input="updateParam('favorability_level', ($event.target as HTMLInputElement).value)" />
-          <select :value="sortByQuery" aria-label="画像排序" @change="updateParam('sort', ($event.target as HTMLSelectElement).value)">
-            <option value="updated_at">更新时间降序</option>
-            <option value="favorability">好感度降序</option>
-            <option value="user_id">QQ 号升序</option>
-          </select>
+          <CurrentGroupSelect
+            label="按当前 Bot 群筛选"
+            description="选择后会同步到地址栏，并作为画像列表与详情的群范围。"
+            allow-empty
+            empty-label="全部群画像"
+          />
+          <TextField
+            :model-value="favorabilityLevelQuery"
+            label="好感等级"
+            hide-label
+            placeholder="好感等级"
+            @update:model-value="updateParam('favorability_level', $event)"
+          />
+          <SelectField
+            :model-value="sortByQuery"
+            :options="personaSortOptions"
+            label="画像排序"
+            hide-label
+            @update:model-value="updateParam('sort', $event)"
+          />
         </div>
       </Panel>
 
       <!-- Groups 筛选 -->
       <Panel v-if="dataset === 'groups'" eyebrow="FILTER / GROUPS" title="服务端筛选">
         <div class="inline-controls filter-control-row">
-          <select :value="membershipStateQuery" aria-label="关系来源" @change="onMembershipStateChange">
-            <option value="">确认与配置</option>
-            <option value="confirmed">仅已确认</option>
-            <option value="configured">仅配置</option>
-            <option value="unconfirmed">仅未确认候选</option>
-          </select>
-          <select :value="enabledQuery" aria-label="群开关状态" @change="updateParam('enabled', ($event.target as HTMLSelectElement).value)">
-            <option value="">全部开关</option>
-            <option value="true">已启用</option>
-            <option value="false">已停用</option>
-          </select>
-          <label class="checkbox-label">
-            <input type="checkbox" :checked="includeUnconfirmedQuery" @change="updateParam('include_unconfirmed', ($event.target as HTMLInputElement).checked ? 'true' : '')" />
-            显示未确认候选
-          </label>
+          <SelectField
+            :model-value="membershipStateQuery"
+            :options="membershipStateOptions"
+            label="关系来源"
+            hide-label
+            @update:model-value="onMembershipStateChange"
+          />
+          <SelectField
+            :model-value="enabledQuery"
+            :options="groupEnabledOptions"
+            label="群开关状态"
+            hide-label
+            @update:model-value="updateParam('enabled', $event)"
+          />
+          <SwitchField
+            :model-value="includeUnconfirmedQuery"
+            label="显示未确认候选"
+            hide-label
+            on-label="显示"
+            off-label="隐藏"
+            @update:model-value="updateParam('include_unconfirmed', $event ? 'true' : '')"
+          />
         </div>
       </Panel>
 
@@ -192,8 +214,20 @@
       >
         <template #actions>
           <div class="inline-controls">
-            <input :value="detailUserId" placeholder="QQ ID" inputmode="numeric" @input="updateParam('user_id', ($event.target as HTMLInputElement).value)" />
-            <input :value="detailGroupId" placeholder="群 ID（可选）" inputmode="numeric" @input="updateParam('group_id', ($event.target as HTMLInputElement).value)" />
+            <TextField
+              :model-value="detailUserId"
+              label="QQ ID"
+              hide-label
+              placeholder="QQ ID"
+              inputmode="numeric"
+              @update:model-value="updateParam('user_id', $event)"
+            />
+            <CurrentGroupSelect
+              label="画像群范围"
+              description="可选；未选择时查看全局画像。"
+              allow-empty
+              empty-label="全局画像（不限定群）"
+            />
           </div>
         </template>
       </PageHeader>
@@ -217,11 +251,32 @@
           </div>
 
           <Panel eyebrow="PROFILE / SOURCE-AWARE" title="结构化画像（不显示原始 profile_text）">
+            <div v-if="personaStructuredFields.length" class="trace-table-wrap">
+              <table class="forensic-table" aria-label="结构化画像字段">
+                <thead>
+                  <tr>
+                    <th>字段</th>
+                    <th>值</th>
+                    <th>来源</th>
+                    <th class="numeric-column">置信度</th>
+                    <th>更新时间</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="field in personaStructuredFields" :key="text(field.key, text(field.label, '未命名字段'))">
+                    <td><strong>{{ text(field.label, text(field.key, "未命名字段")) }}</strong></td>
+                    <td>{{ structuredFieldValue(field) }}</td>
+                    <td>{{ structuredFieldSource(field) }}</td>
+                    <td class="numeric-column numeric-cell">{{ structuredFieldConfidence(field) }}</td>
+                    <td>{{ formatDateTime(field.updated_at as string | number | null) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p v-else class="muted-copy">暂无可展示的白名单结构化字段。</p>
             <dl class="compact-kv">
               <dt>用户明确更正</dt>
               <dd>{{ Object.keys(personaUserCorrections).length ? Object.entries(personaUserCorrections).map(([k, v]) => `${k}=${text(v)}`).join("；") : "无" }}</dd>
-              <dt>结构化字段</dt>
-              <dd>{{ Object.entries(personaStructured).filter(([, item]) => typeof item !== 'object').slice(0, 20).map(([k, v]) => `${k}=${text(v)}`).join("；") || "暂无白名单字段" }}</dd>
               <dt>头像分析状态</dt>
               <dd>{{ Object.keys(personaAvatarAnalysis).length ? "已有受控分析" : "未分析" }}</dd>
               <dt>证据范围</dt>
@@ -231,8 +286,8 @@
 
           <Panel eyebrow="ACTIONS / EXPLICIT TARGET" title="画像维护">
             <div class="form-grid">
-              <label>更正字段<input v-model="correctionField" placeholder="例如 nickname_preference" /></label>
-              <label>更正值<input v-model="correctionValue" /></label>
+              <TextField v-model="correctionField" label="更正字段" placeholder="例如 nickname_preference" />
+              <TextField v-model="correctionValue" label="更正值" />
             </div>
             <div class="inline-controls">
               <button class="button" type="button" :disabled="!correctionField || !correctionValue || personaActionMutation.isPending.value" @click="personaActionMutation.mutate('correct')">保存用户明确更正</button>
@@ -254,12 +309,12 @@
         description="成员画像、别名、群风格、知识、梗、Agent 状态、Peer Bot 协作、空间互动和计划均按当前群懒加载。"
       >
         <template #actions>
-          <input :value="detailGroupId" placeholder="群 ID" inputmode="numeric" @input="updateParam('group_id', ($event.target as HTMLInputElement).value)" />
+          <CurrentGroupSelect label="当前 Bot 群" description="切换后会同步到地址栏，并用于所有群详情分区。" required />
         </template>
       </PageHeader>
 
       <Panel v-if="!detailGroupId" eyebrow="PROMPT" title="需要群 ID">
-        <p class="muted-copy">从群列表选择群，或输入群 ID。</p>
+        <p class="muted-copy">请从当前 Bot 的群下拉列表选择一个已确认或已配置群。</p>
       </Panel>
 
       <GroupPeerBotsPanel
@@ -329,11 +384,14 @@
                 </dl>
               </Panel>
               <Panel eyebrow="GROUP / SCHEDULE" title="群作息与计划">
-                <label class="checkbox-label">
-                  <input v-model="scheduleEnabled" type="checkbox" />
-                  启用群作息
-                </label>
-                <textarea v-model="scheduleText" rows="8" placeholder="群作息表" />
+                <SwitchField v-model="scheduleEnabled" label="启用群作息" on-label="已启用" off-label="未启用" />
+                <TextareaField
+                  id="group-schedule-text"
+                  v-model="scheduleText"
+                  label="群作息表"
+                  :rows="8"
+                  placeholder="群作息表"
+                />
                 <div class="inline-controls">
                   <button class="button" type="button" :disabled="groupActionMutation.isPending.value" @click="groupActionMutation.mutate('schedule-save')">保存计划</button>
                   <button class="button button-secondary" type="button" :disabled="groupActionMutation.isPending.value" @click="groupActionMutation.mutate('schedule-generate')">自动生成草稿</button>
@@ -370,16 +428,16 @@
         <Panel eyebrow="UPLOAD / NEW" title="上传新表情包">
           <div class="form-grid">
             <label>图片文件<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" @change="onStickerFileChange" /></label>
-            <label>描述<input v-model="stickerUploadDesc" /></label>
+            <TextField v-model="stickerUploadDesc" label="描述" />
           </div>
           <button class="button" type="button" :disabled="!stickerUploadFile || stickerMutation.isPending.value" @click="stickerMutation.mutate('upload')">上传并写入索引</button>
         </Panel>
         <Panel eyebrow="EDIT / EXISTING" title="编辑现有表情包">
           <div class="form-grid">
-            <label>文件名<input :value="selectedStickerParam" placeholder="从目录页选择" @input="updateParam('sticker', ($event.target as HTMLInputElement).value)" /></label>
-            <label>描述<input v-model="stickerEditDesc" /></label>
-            <label>心情标签<input v-model="stickerMoodTags" /></label>
-            <label>场景标签<input v-model="stickerSceneTags" /></label>
+            <TextField :model-value="selectedStickerParam" label="文件名" placeholder="从目录页选择" @update:model-value="updateParam('sticker', $event)" />
+            <TextField v-model="stickerEditDesc" label="描述" />
+            <TextField v-model="stickerMoodTags" label="心情标签" />
+            <TextField v-model="stickerSceneTags" label="场景标签" />
           </div>
           <div class="inline-controls">
             <button class="button" type="button" :disabled="!selectedStickerItem || stickerMutation.isPending.value" @click="stickerMutation.mutate('save')">保存 metadata</button>
@@ -407,6 +465,11 @@ import StateBadge from "@vue-app/components/StateBadge.vue";
 import { useBotStore } from "@vue-app/stores/bot";
 import GroupPeerBotsPanel from "@vue-app/components/GroupPeerBotsPanel.vue";
 import GroupQzoneAgentPanel from "@vue-app/components/GroupQzoneAgentPanel.vue";
+import CurrentGroupSelect from "@vue-app/components/CurrentGroupSelect.vue";
+import SelectField from "@vue-app/components/forms/SelectField.vue";
+import SwitchField from "@vue-app/components/forms/SwitchField.vue";
+import TextareaField from "@vue-app/components/forms/TextareaField.vue";
+import TextField from "@vue-app/components/forms/TextField.vue";
 
 import GroupAliasesPanel from "./subcomponents/GroupAliasesPanel.vue";
 import GroupFavorabilityPanel from "./subcomponents/GroupFavorabilityPanel.vue";
@@ -437,11 +500,29 @@ const membershipStateQuery = computed(() => String(route.query.membership_state 
 const includeUnconfirmedQuery = computed(() => route.query.include_unconfirmed === "true");
 const enabledQuery = computed(() => String(route.query.enabled ?? ""));
 
+const personaSortOptions = [
+  { value: "updated_at", label: "更新时间降序" },
+  { value: "favorability", label: "好感度降序" },
+  { value: "user_id", label: "QQ 号升序" },
+];
+const membershipStateOptions = [
+  { value: "", label: "确认与配置" },
+  { value: "confirmed", label: "仅已确认" },
+  { value: "configured", label: "仅配置" },
+  { value: "unconfirmed", label: "仅未确认候选" },
+];
+const groupEnabledOptions = [
+  { value: "", label: "全部开关" },
+  { value: "true", label: "已启用" },
+  { value: "false", label: "已停用" },
+];
+
 const searchDraft = ref(searchQuery.value);
 watch(searchQuery, (next) => { searchDraft.value = next; });
 
 let debounceTimer: ReturnType<typeof setTimeout> | undefined;
-function handleSearchInput() {
+function handleSearchInput(value: string) {
+  searchDraft.value = value;
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
     updateParam("search", searchDraft.value);
@@ -454,8 +535,7 @@ function updateParam(key: string, value: string) {
   router.replace({ query: next });
 }
 
-function onMembershipStateChange(event: Event) {
-  const val = (event.target as HTMLSelectElement).value;
+function onMembershipStateChange(val: string) {
   const next: LocationQueryRaw = { ...route.query, membership_state: val || undefined, page: "1" };
   if (val === "unconfirmed") next.include_unconfirmed = "true";
   router.replace({ query: next });
@@ -470,7 +550,12 @@ function copyText(val: string) {
 }
 
 function navigateToDetail(dataset: "personas" | "groups" | "stickers", id: string) {
-  if (dataset === "personas") router.push({ path: "/persona/personas/detail", query: { user_id: id } });
+  if (dataset === "personas") {
+    router.push({
+      path: "/persona/personas/detail",
+      query: { user_id: id, group_id: groupIdQuery.value || undefined },
+    });
+  }
   else if (dataset === "groups") router.push({ path: "/persona/groups/detail", query: { group_id: id } });
   else router.push({ path: "/persona/stickers/upload", query: { sticker: id } });
 }
@@ -507,8 +592,38 @@ const personaCoreProfile = computed(() => record(personaDetailQuery.data.value?.
 const personaQqProfile = computed(() => record(personaCoreProfile.value.qq_profile));
 const personaFavorability = computed(() => record(personaDetailQuery.data.value?.favorability));
 const personaStructured = computed(() => record(personaCoreProfile.value.structured));
+const personaStructuredFields = computed(() => {
+  const projected = records(personaCoreProfile.value.structured_fields);
+  if (projected.length) return projected;
+  return Object.entries(personaStructured.value)
+    .filter(([, value]) => value !== null && value !== undefined && value !== "")
+    .slice(0, 32)
+    .map(([key, value]) => ({
+      key,
+      label: key,
+      value_summary: text(value),
+      source_state: "legacy_unknown",
+      confidence: 0,
+      updated_at: personaCoreProfile.value.updated_at,
+    }));
+});
 const personaUserCorrections = computed(() => record(personaCoreProfile.value.user_corrections));
 const personaAvatarAnalysis = computed(() => record(personaCoreProfile.value.avatar_analysis));
+
+function structuredFieldValue(field: Record<string, unknown>): string {
+  return text(field.value ?? field.value_summary, "—");
+}
+function structuredFieldSource(field: Record<string, unknown>): string {
+  const source = text(field.source ?? field.source_state, "legacy_unknown");
+  if (source === "user_correction") return "用户明确更正";
+  if (source === "system_observation") return "系统观察";
+  if (source === "legacy_unknown") return "历史字段（来源未知）";
+  return source;
+}
+function structuredFieldConfidence(field: Record<string, unknown>): string {
+  const confidence = Number(field.confidence);
+  return Number.isFinite(confidence) ? `${Math.max(0, Math.min(1, confidence)).toFixed(2)}` : "—";
+}
 
 const personaActionMutation = useMutation({
   mutationFn: async (action: "refresh" | "correct" | "avatar" | "clear-avatar") => {

@@ -47,13 +47,30 @@ describe("favorability display & management subcomponents", () => {
     const wrapper = mount(GroupFavorabilityPanel, {
       props: {
         eyebrow: "RELATION / FAVORABILITY",
-        favorability: { score: -80, level: "厌恶", score_min: -100, score_max: 100, daily_positive_count: 2, daily_negative_count: 3, daily_net_count: -1, behavior_policy: { random_reply_add: -0.2, group_idle_add: -0.16 } },
+        favorability: {
+          score: -80,
+          level: "厌恶",
+          score_min: -100,
+          score_max: 100,
+          today_positive: 2,
+          daily_negative_count: 0,
+          daily_net_count: 0,
+          daily_growth_cap: 0.23,
+          remaining_today: 0.23,
+          last_progress_quality: "normal",
+          estimated_active_days_to_70: 653,
+          behavior_policy: { random_reply_add: -0.2, group_idle_add: -0.16 },
+        },
       },
     });
-    expect(wrapper.find(".state-error").text()).toBe("-80 / -100..100");
+    expect(wrapper.find(".state-error").text()).toBe("−80 / −100 ～ 100");
     expect(wrapper.text()).toContain("+2");
-    expect(wrapper.text()).toContain("-3");
-    expect(wrapper.text()).toContain("-0.2");
+    expect(wrapper.text()).toContain("今日扣分0");
+    expect(wrapper.text()).toContain("今日净变化0");
+    expect(wrapper.text()).toContain("−0.2");
+    expect(wrapper.text()).toContain("每日增长上限");
+    expect(wrapper.text()).toContain("常规");
+    expect(wrapper.text()).toContain("653 天");
     expect(wrapper.text()).toContain("厌恶");
     expect(wrapper.text()).toContain("RELATION / FAVORABILITY");
   });
