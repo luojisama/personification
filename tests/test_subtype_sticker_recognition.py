@@ -34,13 +34,13 @@ async def _run_extract(seg, *, runtime=None, monkeypatch=None, classify_called: 
     if monkeypatch is None:
         raise RuntimeError("monkeypatch required")
     # 给 download_safe_image_bytes 一个固定的小 PNG（防止真的去请求 URL）
-    async def _fake_download(*, url, file_name, http_client, logger):
+    async def _fake_download(*, url, file_name, http_client, logger, response_deadline=None, **_kwargs):
         return ("image/png", b"\x89PNG\r\n\x1a\n" + b"0" * 64, False)
 
     monkeypatch.setattr(pipeline_sticker, "download_safe_image_bytes", _fake_download)
 
     # 让 classify_incoming_image 被记录（默认应该不被 sub_type=1 路径调用）
-    async def _fake_classify(*, runtime, image_url, source_kind, width, height, file_id):
+    async def _fake_classify(*, runtime, image_url, source_kind, width, height, file_id, response_deadline=None):
         if classify_called is not None:
             classify_called.append(True)
         return SimpleNamespace(
@@ -146,10 +146,10 @@ def test_subtype_0_or_missing_goes_normal_path(monkeypatch) -> None:
 
 def test_heuristic_sticker_classification_also_skips_image_urls(monkeypatch) -> None:
     """如果 vision 启发式判断为 sticker，也不应把 data_url 加入 image_urls。"""
-    async def _fake_download(*, url, file_name, http_client, logger):
+    async def _fake_download(*, url, file_name, http_client, logger, response_deadline=None, **_kwargs):
         return ("image/png", b"\x89PNG\r\n\x1a\n" + b"0" * 64, False)
 
-    async def _fake_classify_returns_sticker(*, runtime, image_url, source_kind, width, height, file_id):
+    async def _fake_classify_returns_sticker(*, runtime, image_url, source_kind, width, height, file_id, response_deadline=None):
         return SimpleNamespace(
             is_sticker_like=True,
             text_label="[表情包]",

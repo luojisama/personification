@@ -352,6 +352,7 @@ async def classify_incoming_image(
     width: int = 0,
     height: int = 0,
     file_id: str = "",
+    response_deadline: float | None = None,
 ) -> IncomingImageClassification:
     normalized_source_kind = str(source_kind or "").strip().lower()
     if normalized_source_kind == "mface":
@@ -416,13 +417,26 @@ async def classify_incoming_image(
     ]
     attempted_vision_classify = False
     for caller_label, caller in eligible_callers:
+        if response_deadline is not None:
+            remaining = float(response_deadline) - time.monotonic()
+            if remaining <= 0.0:
+                return conservative_fallback
         attempted_vision_classify = True
         try:
-            response = await caller.chat_with_tools(
+            request = caller.chat_with_tools(
                 messages=request_messages,
                 tools=[],
                 use_builtin_search=False,
             )
+            response = await (
+                asyncio.wait_for(request, timeout=remaining)
+                if response_deadline is not None
+                else request
+            )
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            return conservative_fallback
         except Exception as exc:
             log_exception(
                 runtime.logger,

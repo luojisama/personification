@@ -922,6 +922,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     gif_understanding_counter = [0]
     is_direct_mention = False
     http_client = runtime.get_http_client()
+    # Absolute turn deadline is created by the outer reply buffer/direct-turn
+    # owner.  Inbound media stages consume only what remains of this same
+    # budget; they must not create a second timeout window.
+    response_deadline = state.get("response_deadline")
     disable_network_hooks = bool(state.get("disable_network_hooks", False))
     batched_events = list(state.get("batched_events") or [])
     batch_trigger = dict(state.get("batch_trigger") or {})
@@ -1047,6 +1051,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     sticker_image_urls=sticker_image_urls,
                     gif_understanding_counter_ref=gif_understanding_counter,
                     transport_aliases=media_transport_aliases,
+                    response_deadline=response_deadline if isinstance(response_deadline, (int, float)) else None,
                 )
             elif seg.type == "image":
                 await _extract_images_from_segment(
@@ -1061,6 +1066,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     sticker_image_urls=sticker_image_urls,
                     gif_understanding_counter_ref=gif_understanding_counter,
                     transport_aliases=media_transport_aliases,
+                    response_deadline=response_deadline if isinstance(response_deadline, (int, float)) else None,
                 )
             elif seg.type == "gif":
                 await _extract_gif_from_segment(
@@ -1071,6 +1077,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     logger=runtime.logger,
                     stop_reply_ref=stop_reply_due_to_gif,
                     gif_understanding_counter_ref=gif_understanding_counter,
+                    response_deadline=response_deadline if isinstance(response_deadline, (int, float)) else None,
                 )
 
         if not image_urls and source_message is not event.message:
@@ -1089,6 +1096,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             sticker_image_urls=sticker_image_urls,
                             gif_understanding_counter_ref=gif_understanding_counter,
                             transport_aliases=media_transport_aliases,
+                            response_deadline=response_deadline if isinstance(response_deadline, (int, float)) else None,
                         )
                     elif getattr(seg, "type", None) == "gif":
                         await _extract_gif_from_segment(
@@ -1099,6 +1107,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             logger=runtime.logger,
                             stop_reply_ref=stop_reply_due_to_gif,
                             gif_understanding_counter_ref=gif_understanding_counter,
+                            response_deadline=response_deadline if isinstance(response_deadline, (int, float)) else None,
                         )
             except Exception as e:
                 runtime.logger.warning(f"回退解析原始消息图片失败: {e}")
@@ -1143,6 +1152,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                                     stop_reply_ref=stop_reply_due_to_gif,
                                     runtime=runtime,
                                     gif_understanding_counter_ref=gif_understanding_counter,
+                                    response_deadline=response_deadline if isinstance(response_deadline, (int, float)) else None,
                                 )
                 except Exception as e:
                     runtime.logger.warning(f"处理引用消息失败: {e}")
@@ -1355,7 +1365,6 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
     is_private_session = str(group_id).startswith(session.private_session_prefix)
     reply_required = bool(state.get("reply_required", False) or is_private_session or is_direct_mention)
-    response_deadline = state.get("response_deadline")
 
     async def _maybe_silence_reaction() -> None:
         """NO_REPLY 沉默前的轻量回应（贴表情/拍一拍），never-raise。"""

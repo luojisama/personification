@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 from ._loader import load_personification_module
@@ -179,6 +180,24 @@ def test_classify_incoming_remote_url_does_not_cache_url_digest() -> None:
 
     assert (first.kind, second.kind) == ("photo", "sticker")
     assert caller.calls == 2
+
+
+def test_classifier_does_not_start_provider_call_after_turn_deadline() -> None:
+    pipeline_context.clear_image_classify_cache()
+    caller = _FakeCaller("photo")
+    runtime = _build_runtime(caller)
+
+    result = asyncio.run(
+        pipeline_context.classify_incoming_image(
+            runtime=runtime,
+            image_url="data:image/png;base64,aaa",
+            source_kind="image",
+            response_deadline=time.monotonic() - 0.01,
+        )
+    )
+
+    assert result.kind == "unknown"
+    assert caller.calls == 0
 
 
 def test_classify_incoming_image_falls_back_to_unknown_on_llm_failure() -> None:

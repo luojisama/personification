@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import ipaddress
+import io
 import random
-import socket
 import time
+import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List
-from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -22,6 +21,11 @@ from ...core.gif_understanding import (
 from ...core.media_understanding import analyze_images_with_route_or_fallback
 from ...core.metrics import record_counter
 from ...core.qq_expression_library import semantic_text_for_qq_expression_segment
+from ...core.safe_image_download import (
+    DownloadedImage,
+    SafeImageDownloadError,
+    download_public_image,
+)
 from ...core.sticker_library import (
     analyze_sticker_image,
     image_bytes_to_data_url,
@@ -79,66 +83,19 @@ def _can_collect_after_cooldown(group_id: str, user_id: str, cooldown_seconds: i
 def _mark_collect_cooldown(group_id: str, user_id: str) -> None:
     _COLLECT_COOLDOWN_STATE[_collect_cooldown_key(group_id, user_id)] = time.time()
 _MAX_IMAGE_DOWNLOAD_BYTES = 8 * 1024 * 1024
-_BLOCKED_IMAGE_HOST_SUFFIXES = (".local", ".lan", ".home", ".internal", ".corp")
-_BLOCKED_IMAGE_HOSTS = {
-    "localhost",
-    "127.0.0.1",
-    "::1",
-    "0.0.0.0",
-    "host.docker.internal",
-}
-# QQ 协议常见图片下载域名。NTQQ 客户端会把图片下载请求重定向到
-# 198.18.0.0/15 这种 RFC2544 测试网段（实际是客户端内部代理），按通用 SSRF
-# 规则会被当作"内网/保留 IP"拒绝。这里把腾讯系图床显式信任，跳过 IP 解析检查。
-_TRUSTED_IMAGE_HOST_SUFFIXES: tuple[str, ...] = (
-    ".qq.com",
-    ".qq.com.cn",
-    ".qpic.cn",
-    ".gtimg.com",
-    ".gtimg.cn",
-    ".myqcloud.com",
-    ".tencent-cloud.net",
-)
-# 由 set_image_host_allowlist() 在插件启动时填充，反映用户的
-# personification_image_host_allowlist 配置项。
-_USER_IMAGE_HOST_ALLOWLIST: tuple[str, ...] = ()
-_MAX_IMAGE_REDIRECTS = 5
+_ALLOWED_IMAGE_MIMES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+_MAX_IMAGE_DECODE_PIXELS = 40_000_000
 
 
 def set_image_host_allowlist(suffixes: list[str] | tuple[str, ...] | str | None) -> None:
-    """配置由用户追加的可信图片域名后缀列表。
+    """Retain config compatibility without granting any network exemption.
 
-    入参可以是 list / tuple / 逗号分隔字符串；空值会清空覆盖。
-    每项会被自动 lowercase + 加前导 "."（如果缺失）。
+    Every image host, including QQ and user-configured domains, is resolved
+    and pinned by ``download_public_image``.  The former allowlist bypassed
+    private/reserved-address checks and is deliberately no longer consulted.
     """
-    global _USER_IMAGE_HOST_ALLOWLIST
-    items: list[str] = []
-    raw_iter: list[str]
-    if suffixes is None:
-        raw_iter = []
-    elif isinstance(suffixes, str):
-        raw_iter = [part.strip() for part in suffixes.split(",")]
-    else:
-        raw_iter = [str(part or "") for part in suffixes]
-    for raw in raw_iter:
-        cleaned = raw.strip().lower()
-        if not cleaned:
-            continue
-        if not cleaned.startswith("."):
-            cleaned = "." + cleaned
-        if cleaned not in items:
-            items.append(cleaned)
-    _USER_IMAGE_HOST_ALLOWLIST = tuple(items)
 
-
-def _is_image_host_trusted(host: str) -> bool:
-    if not host:
-        return False
-    target = host.lower()
-    for suffix in _TRUSTED_IMAGE_HOST_SUFFIXES + _USER_IMAGE_HOST_ALLOWLIST:
-        if target.endswith(suffix):
-            return True
-    return False
+    del suffixes
 
 
 @dataclass
@@ -232,6 +189,7 @@ async def _append_gif_understanding_from_url(
     summary_hint: str = "",
     source_hint: str = "",
     counter_ref: List[int] | None = None,
+    response_deadline: float | None = None,
 ) -> bool:
     if not is_gif_understanding_enabled(runtime):
         return False
@@ -241,6 +199,11 @@ async def _append_gif_understanding_from_url(
 
     config = getattr(runtime, "plugin_config", None)
     timeout = get_gif_understanding_timeout(config)
+    if response_deadline is not None:
+        timeout = min(timeout, float(response_deadline) - time.monotonic())
+        if timeout <= 0.0:
+            message_text_ref.append(_gif_placeholder(summary_hint))
+            return True
 
     async def _download_and_summarize() -> bool:
         mime_type, payload, is_gif = await download_safe_image_bytes(
@@ -250,6 +213,7 @@ async def _append_gif_understanding_from_url(
             logger=logger,
             allow_gif=True,
             max_bytes=get_gif_max_bytes(config),
+            response_deadline=response_deadline,
         )
         if payload is None:
             message_text_ref.append(_gif_placeholder(summary_hint))
@@ -554,71 +518,32 @@ def spawn_auto_collect_stickers(
     task.add_done_callback(task_exc_logger("auto_collect_stickers", runtime.logger))
 
 
-def _is_disallowed_ip_address(ip: ipaddress._BaseAddress) -> bool:
-    return any(
-        (
-            ip.is_private,
-            ip.is_loopback,
-            ip.is_link_local,
-            ip.is_multicast,
-            ip.is_reserved,
-            ip.is_unspecified,
-        )
-    )
-
-
-async def _is_safe_remote_image_url(url: str, logger: Any) -> bool:
-    try:
-        parsed = urlparse(str(url or "").strip())
-    except Exception:
-        return False
-    if parsed.scheme not in {"http", "https"}:
-        return False
-    host = (parsed.hostname or "").strip().lower()
-    if not host:
-        return False
-    if host in _BLOCKED_IMAGE_HOSTS or host.endswith(_BLOCKED_IMAGE_HOST_SUFFIXES):
-        logger.warning(f"拟人插件：拒绝访问高风险图片地址 host={host}")
-        return False
-    # 信任的图床域名（QQ 系 + 用户配置 allowlist）跳过 IP 解析检查，
-    # 解决 NTQQ 把图片重定向到 198.18.0.0/15 客户端代理时被误判为内网的问题。
-    if _is_image_host_trusted(host):
-        return True
+def _validate_downloaded_image_payload(payload: bytes, mime_type: str) -> None:
+    """Validate image bytes before they reach data URLs or visual callers."""
 
     try:
-        literal_ip = ipaddress.ip_address(host)
-    except ValueError:
-        literal_ip = None
-    if literal_ip is not None:
-        if _is_disallowed_ip_address(literal_ip):
-            logger.warning(f"拟人插件：拒绝访问内网/本地图片地址 ip={literal_ip}")
-            return False
-        return True
+        from PIL import Image, UnidentifiedImageError
 
-    try:
-        infos = await asyncio.to_thread(
-            socket.getaddrinfo,
-            host,
-            parsed.port or (443 if parsed.scheme == "https" else 80),
-            socket.AF_UNSPEC,
-            socket.SOCK_STREAM,
-        )
-    except socket.gaierror:
-        logger.warning(f"拟人插件：图片域名解析失败，已拒绝 {host}")
-        return False
-    except Exception as e:
-        logger.warning(f"拟人插件：解析图片域名失败，已拒绝 {host}: {e}")
-        return False
-
-    for info in infos:
-        try:
-            resolved_ip = ipaddress.ip_address(info[4][0])
-        except Exception:
-            continue
-        if _is_disallowed_ip_address(resolved_ip):
-            logger.warning(f"拟人插件：拒绝访问解析到内网/本地的图片地址 host={host} ip={resolved_ip}")
-            return False
-    return True
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(payload)) as image:
+                image.verify()
+            with Image.open(io.BytesIO(payload)) as image:
+                image.load()
+                if int(image.width) * int(image.height) > _MAX_IMAGE_DECODE_PIXELS:
+                    raise ValueError("image dimensions exceed decode limit")
+                decoded_mime = {
+                    "JPEG": "image/jpeg",
+                    "PNG": "image/png",
+                    "WEBP": "image/webp",
+                    "GIF": "image/gif",
+                }.get(str(image.format or "").upper(), "")
+                if not decoded_mime or decoded_mime != mime_type:
+                    raise ValueError("image MIME does not match decoded payload")
+    except ImportError as exc:
+        raise ValueError("image decoder unavailable") from exc
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise ValueError("image decoder rejected payload") from exc
 
 
 async def download_safe_image_bytes(
@@ -629,53 +554,51 @@ async def download_safe_image_bytes(
     logger: Any,
     allow_gif: bool = False,
     max_bytes: int | None = None,
+    response_deadline: float | None = None,
 ) -> tuple[str | None, bytes | None, bool]:
     extension_is_gif = str(file_name or "").lower().endswith(".gif")
     if extension_is_gif and not allow_gif:
         return None, None, True
-    current_url = str(url or "").strip()
-    if not current_url:
-        return None, None, False
-    if not await _is_safe_remote_image_url(current_url, logger):
+    if not str(url or "").strip():
         return None, None, False
     byte_limit = int(max_bytes or _MAX_IMAGE_DOWNLOAD_BYTES)
+    request_timeout = 10.0
+    if response_deadline is not None:
+        request_timeout = min(request_timeout, float(response_deadline) - time.monotonic())
+        if request_timeout <= 0.0:
+            return None, None, False
 
     try:
-        for _ in range(_MAX_IMAGE_REDIRECTS):
-            async with http_client.stream("GET", current_url, timeout=10, follow_redirects=False) as resp:
-                if resp.status_code in {301, 302, 303, 307, 308}:
-                    location = str(resp.headers.get("Location") or resp.headers.get("location") or "").strip()
-                    if not location:
-                        raise ValueError("redirect without location")
-                    next_url = urljoin(current_url, location)
-                    if not await _is_safe_remote_image_url(next_url, logger):
-                        raise ValueError("redirect target rejected")
-                    current_url = next_url
-                    continue
-                if resp.status_code != 200:
-                    raise ValueError(f"HTTP {resp.status_code}")
-                mime_type = resp.headers.get("Content-Type", "image/jpeg")
-                content_is_gif = "image/gif" in mime_type.lower()
-                if content_is_gif and not allow_gif:
-                    return None, None, True
-
-                content_length = resp.headers.get("Content-Length")
-                if content_length:
-                    try:
-                        if int(content_length) > byte_limit:
-                            raise ValueError("image too large")
-                    except ValueError:
-                        raise ValueError("invalid image size")
-
-                payload = bytearray()
-                async for chunk in resp.aiter_bytes():
-                    payload.extend(chunk)
-                    if len(payload) > byte_limit:
-                        raise ValueError("image too large")
-                return mime_type, bytes(payload), bool(content_is_gif or extension_is_gif)
-        raise ValueError("too many redirects")
-    except Exception as e:
-        logger.warning(f"下载图片失败或被拦截，已忽略原图 URL: {e}")
+        # The legacy injected client may carry proxies or resolve hostnames
+        # again.  It is deliberately not used for this untrusted fetch.
+        del http_client
+        request = download_public_image(
+            str(url),
+            headers={"Accept": "image/jpeg,image/png,image/webp,image/gif"},
+            timeout=request_timeout,
+            connect_timeout=min(4.0, request_timeout),
+            max_bytes=byte_limit,
+            allowed_mimes=set(_ALLOWED_IMAGE_MIMES),
+            max_redirects=4,
+        )
+        downloaded: DownloadedImage = await asyncio.wait_for(request, timeout=request_timeout)
+        mime_type = str(downloaded.content_type or "").strip().lower()
+        content_is_gif = mime_type == "image/gif"
+        if content_is_gif and not allow_gif:
+            return None, None, True
+        payload = bytes(downloaded.content)
+        _validate_downloaded_image_payload(payload, mime_type)
+        return mime_type, payload, bool(content_is_gif or extension_is_gif)
+    except asyncio.CancelledError:
+        raise
+    except asyncio.TimeoutError:
+        logger.warning("拟人插件：图片下载超出本轮剩余时间，已忽略该媒体。")
+        return None, None, False
+    except (SafeImageDownloadError, ValueError):
+        logger.warning("拟人插件：图片下载或校验未通过，已忽略该媒体。")
+        return None, None, False
+    except Exception:
+        logger.warning("拟人插件：图片下载失败，已忽略该媒体。")
         return None, None, False
 
 
@@ -691,6 +614,8 @@ async def extract_mface_from_segment(
     stop_reply_ref: List[bool],
     sticker_image_urls: List[str] | None = None,
     gif_understanding_counter_ref: List[int] | None = None,
+    transport_aliases: Dict[str, str] | None = None,
+    response_deadline: float | None = None,
 ) -> None:
     if getattr(seg, "type", None) != "mface":
         return
@@ -714,6 +639,7 @@ async def extract_mface_from_segment(
             summary_hint=summary,
             source_hint="mface",
             counter_ref=gif_understanding_counter_ref,
+            response_deadline=response_deadline,
         )
         return
     download_kwargs: dict[str, Any] = {
@@ -721,6 +647,7 @@ async def extract_mface_from_segment(
         "file_name": file_name,
         "http_client": http_client,
         "logger": logger,
+        "response_deadline": response_deadline,
     }
     if gif_enabled:
         download_kwargs["allow_gif"] = True
@@ -746,6 +673,8 @@ async def extract_mface_from_segment(
         return
     message_text_ref.append(semantic_token or "[图片·表情包]")
     data_url = image_bytes_to_data_url(payload, mime_type)
+    if transport_aliases is not None:
+        transport_aliases[url] = data_url
     # 非 gif 表情包 → 走 sticker_image_urls，由上层决定是否直传视觉模型理解（不打标）。
     if sticker_image_urls is not None:
         sticker_image_urls.append(data_url)
@@ -773,6 +702,7 @@ async def extract_images_from_segment(
     sticker_image_urls: List[str] | None = None,
     gif_understanding_counter_ref: List[int] | None = None,
     transport_aliases: Dict[str, str] | None = None,
+    response_deadline: float | None = None,
 ) -> None:
     if getattr(seg, "type", None) != "image":
         return
@@ -825,6 +755,7 @@ async def extract_images_from_segment(
                 "file_name": file_name,
                 "http_client": http_client,
                 "logger": logger,
+                "response_deadline": response_deadline,
             }
             if gif_enabled:
                 download_kwargs["allow_gif"] = True
@@ -842,6 +773,7 @@ async def extract_images_from_segment(
                     summary_hint=summary,
                     source_hint="onebot_sticker",
                     counter_ref=gif_understanding_counter_ref,
+                    response_deadline=response_deadline,
                 )
             return
         if payload is not None and mime_type is not None:
@@ -874,6 +806,7 @@ async def extract_images_from_segment(
             summary_hint=str(data.get("summary") or "").strip(),
             source_hint="image",
             counter_ref=gif_understanding_counter_ref,
+            response_deadline=response_deadline,
         )
         return
     download_kwargs = {
@@ -881,6 +814,7 @@ async def extract_images_from_segment(
         "file_name": file_name,
         "http_client": http_client,
         "logger": logger,
+        "response_deadline": response_deadline,
     }
     if gif_enabled:
         download_kwargs["allow_gif"] = True
@@ -917,6 +851,7 @@ async def extract_images_from_segment(
         width=data.get("width", 0),
         height=data.get("height", 0),
         file_id=str(data.get("file") or data.get("file_id") or "").strip(),
+        response_deadline=response_deadline,
     )
     is_sticker_like = classification.is_sticker_like
     message_text_ref.append(classification.text_label)
@@ -954,6 +889,7 @@ async def extract_reply_images(
     stop_reply_ref: List[bool],
     runtime: Any | None = None,
     gif_understanding_counter_ref: List[int] | None = None,
+    response_deadline: float | None = None,
 ) -> None:
     if seg_type != "image":
         return
@@ -973,6 +909,7 @@ async def extract_reply_images(
             summary_hint=str(data.get("summary") or "").strip(),
             source_hint="quoted_image",
             counter_ref=gif_understanding_counter_ref,
+            response_deadline=response_deadline,
         )
         return
     download_kwargs = {
@@ -980,6 +917,7 @@ async def extract_reply_images(
         "file_name": file_name,
         "http_client": http_client,
         "logger": logger,
+        "response_deadline": response_deadline,
     }
     if gif_enabled:
         download_kwargs["allow_gif"] = True
@@ -994,7 +932,8 @@ async def extract_reply_images(
                 logger=logger,
                 summary_hint=str(data.get("summary") or "").strip(),
                 source_hint="quoted_image",
-                counter_ref=gif_understanding_counter_ref,
+            counter_ref=gif_understanding_counter_ref,
+            response_deadline=response_deadline,
             )
             return
         stop_reply_ref[0] = True
@@ -1015,6 +954,7 @@ async def extract_gif_from_segment(
     logger: Any,
     stop_reply_ref: List[bool],
     gif_understanding_counter_ref: List[int] | None = None,
+    response_deadline: float | None = None,
 ) -> None:
     if getattr(seg, "type", None) != "gif":
         return
@@ -1039,6 +979,7 @@ async def extract_gif_from_segment(
         summary_hint=summary,
         source_hint="gif_segment",
         counter_ref=gif_understanding_counter_ref,
+        response_deadline=response_deadline,
     )
 
 
