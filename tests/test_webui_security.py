@@ -17,6 +17,9 @@ def _runtime(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(paths, "get_data_dir", lambda _cfg=None: tmp_path)
     cfg = SimpleNamespace(personification_data_dir=str(tmp_path))
     data_store.init_data_store(cfg)
+    config_routes = load_personification_module("plugin.personification.webui.routes.config_routes")
+    diagnostics_warm_calls: list[object] = []
+    monkeypatch.setattr(config_routes, "_schedule_diagnostics_warm", lambda runtime: diagnostics_warm_calls.append(runtime))
 
     app_module = load_personification_module("plugin.personification.webui.app")
     app_module.set_runtime_context(
@@ -26,7 +29,7 @@ def _runtime(tmp_path: Path, monkeypatch):
         logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
         runtime_bundle=SimpleNamespace(),
     )
-    return SimpleNamespace(plugin_config=cfg, app_module=app_module)
+    return SimpleNamespace(plugin_config=cfg, app_module=app_module, diagnostics_warm_calls=diagnostics_warm_calls)
 
 
 def _client(rt, *, base_url: str = "http://testserver"):
@@ -408,6 +411,8 @@ def test_audit_log_records_login_and_config_update(_runtime) -> None:
     assert "login_verify" in actions
     # config_update 不论成功失败都应该记录
     assert "config_update" in actions or res.status_code >= 400
+    if res.status_code < 400:
+        assert len(_runtime.diagnostics_warm_calls) == 1
 
 
 def test_audit_query_filters_by_action(_runtime) -> None:

@@ -28,6 +28,9 @@ def _runtime_context(tmp_path: Path, monkeypatch):
         personification_use_skillpacks=False,
     )
     data_store_mod.init_data_store(cfg)
+    config_routes = load_personification_module("plugin.personification.webui.routes.config_routes")
+    diagnostics_warm_calls: list[object] = []
+    monkeypatch.setattr(config_routes, "_schedule_diagnostics_warm", lambda runtime: diagnostics_warm_calls.append(runtime))
     review_mod = load_personification_module("plugin.personification.core.remote_skill_review")
     source_resolver = load_personification_module("plugin.personification.skill_runtime.source_resolver")
 
@@ -79,7 +82,13 @@ def _runtime_context(tmp_path: Path, monkeypatch):
         logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
         runtime_bundle=runtime_bundle,
     )
-    return SimpleNamespace(plugin_config=cfg, app_module=app_module, runtime_bundle=runtime_bundle, registry=registry)
+    return SimpleNamespace(
+        plugin_config=cfg,
+        app_module=app_module,
+        runtime_bundle=runtime_bundle,
+        registry=registry,
+        diagnostics_warm_calls=diagnostics_warm_calls,
+    )
 
 
 def _build_client(rt):
@@ -559,3 +568,4 @@ def test_apply_recommended_writes_subset(_runtime_context, tmp_path, monkeypatch
     assert env_json["personification_agent_max_steps"] == 5
     assert env_json["personification_probability"] == 0.35
     assert _runtime_context.plugin_config.personification_agent_max_steps == 5
+    assert len(_runtime_context.diagnostics_warm_calls) == 1

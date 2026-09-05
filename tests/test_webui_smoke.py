@@ -18,6 +18,9 @@ def _runtime_context(tmp_path: Path, monkeypatch):
     cfg = SimpleNamespace(personification_data_dir=str(tmp_path))
     monkeypatch.setattr(paths, "get_data_dir", lambda _cfg=None: tmp_path)
     data_store.init_data_store(cfg)
+    config_routes = load_personification_module("plugin.personification.webui.routes.config_routes")
+    diagnostics_warm_calls: list[object] = []
+    monkeypatch.setattr(config_routes, "_schedule_diagnostics_warm", lambda runtime: diagnostics_warm_calls.append(runtime))
 
     sent_messages: list[dict] = []
 
@@ -36,7 +39,12 @@ def _runtime_context(tmp_path: Path, monkeypatch):
         get_bots=_get_bots,
         logger=SimpleNamespace(info=lambda *_a, **_k: None, warning=lambda *_a, **_k: None),
     )
-    return SimpleNamespace(plugin_config=cfg, sent=sent_messages, app_module=app_module)
+    return SimpleNamespace(
+        plugin_config=cfg,
+        sent=sent_messages,
+        app_module=app_module,
+        diagnostics_warm_calls=diagnostics_warm_calls,
+    )
 
 
 def _build_client(runtime_context):
@@ -352,6 +360,7 @@ def test_config_value_update_writes_env_json_only(_runtime_context, monkeypatch,
     assert _json.loads(env_json_path.read_text(encoding="utf-8"))["personification_agent_max_steps"] == 8
     # 运行时也更新了
     assert _runtime_context.plugin_config.personification_agent_max_steps == 8
+    assert len(_runtime_context.diagnostics_warm_calls) == 1
 
 
 def test_config_value_validation_rejects_bad_value(_runtime_context) -> None:
