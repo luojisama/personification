@@ -110,6 +110,7 @@ def _run_stop_handler(
     plugin_config=None,
     user_images=None,
     tool_deadline=None,
+    structured_output: bool = False,
 ):
     traces: list[dict] = []
     decision = asyncio.run(
@@ -142,6 +143,7 @@ def _run_stop_handler(
             classify_deferred_lookup_reply=_unused_classifier,
             select_semantic_fallback_tool=select_semantic_fallback_tool,
             tool_deadline=tool_deadline,
+            structured_output=structured_output,
         )
     )
     return decision, traces
@@ -275,6 +277,26 @@ def test_media_evidence_gate_never_returns_unverified_video_draft() -> None:
     assert traces[-1]["key"] == "media_evidence_gate"
 
 
+def test_structured_internal_output_finishes_before_media_silence_gate() -> None:
+    payload = '{"action":"classify","value":"internal"}'
+    decision, traces = _run_stop_handler(
+        state=stop_flow.StopFlowState(),
+        response=_stop_response(payload),
+        content_len=len(payload),
+        has_media=True,
+        turn_plan=SimpleNamespace(vision_need="summary"),
+        reply_required=True,
+        structured_output=True,
+    )
+
+    assert decision.action == "return"
+    assert decision.result.text == payload
+    assert decision.result.bypass_length_limits is True
+    assert decision.result.quality_context == ""
+    assert traces[-1]["key"] == "agent_finish"
+    assert not any(item["key"] == "media_evidence_gate" for item in traces)
+
+
 @pytest.mark.parametrize(
     ("tool", "reason"),
     [
@@ -282,7 +304,7 @@ def test_media_evidence_gate_never_returns_unverified_video_draft() -> None:
         (_VisionTool("", enabled=False), "tool_disabled"),
     ],
 )
-def test_required_media_evidence_unavailable_uses_safe_direct_notice_or_silence(tool, reason) -> None:  # noqa: ANN001
+def test_required_media_evidence_unavailable_is_silenced_with_incomplete_delivery(tool, reason) -> None:  # noqa: ANN001
     direct_draft = "这是未经证据的旧草稿。"
     decision, traces = _run_stop_handler(
         state=stop_flow.StopFlowState(),
@@ -296,13 +318,16 @@ def test_required_media_evidence_unavailable_uses_safe_direct_notice_or_silence(
     )
 
     assert decision.action == "return"
-    assert decision.result.text == "媒体文件已经收到了，但这次内容分析失败了，我不能在没看清的情况下乱猜。"
-    assert direct_draft not in decision.result.text
-    assert decision.result.direct_output is True
+    assert decision.result.text == "[SILENCE]"
+    assert decision.result.direct_output is False
     assert decision.result.quality_context == "evidence_unavailable"
     assert decision.result.suppress_reply_recovery is True
+    assert decision.result.media_grounding == "unavailable"
+    assert decision.result.media_recovery_method == "failed"
+    assert decision.result.media_delivery == "incomplete"
     evidence_trace = next(item for item in traces if item["key"] == "media_evidence_tool")
     assert f"reason={reason}" in evidence_trace["detail"]
+    assert traces[-1]["detail"].endswith("action=silence")
 
     group_decision, _ = _run_stop_handler(
         state=stop_flow.StopFlowState(),
@@ -317,6 +342,7 @@ def test_required_media_evidence_unavailable_uses_safe_direct_notice_or_silence(
     assert group_decision.action == "return"
     assert group_decision.result.text == "[SILENCE]"
     assert group_decision.result.direct_output is False
+    assert group_decision.result.media_delivery == "incomplete"
 
 
 @pytest.mark.parametrize(
@@ -372,8 +398,10 @@ def test_required_media_evidence_empty_or_failed_result_continues_once_then_fail
     )
 
     assert second.action == "return"
-    assert second.result.direct_output is True
+    assert second.result.text == "[SILENCE]"
+    assert second.result.direct_output is False
     assert second.result.quality_context == "evidence_unavailable"
+    assert second.result.media_delivery == "incomplete"
     assert second_draft not in second.result.text
     assert vision.calls == 1
     assert second_traces[-1]["key"] == "media_evidence_gate"
@@ -393,7 +421,10 @@ def test_required_media_evidence_tool_exception_is_safe_and_does_not_leak() -> N
     )
 
     assert decision.action == "return"
-    assert decision.result.direct_output is True
+    assert decision.result.text == "[SILENCE]"
+    assert decision.result.direct_output is False
+    assert decision.result.quality_context == "evidence_unavailable"
+    assert decision.result.media_delivery == "incomplete"
     evidence_trace = next(item for item in traces if item["key"] == "media_evidence_tool")
     assert "outcome=operational_failure" in evidence_trace["detail"]
     assert "reason=tool_exception" in evidence_trace["detail"]

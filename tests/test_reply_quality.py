@@ -123,8 +123,8 @@ def test_finalize_agent_reply_quality_does_not_rewrite_markdown_with_caller() ->
     assert result.quality_checks[-1]["action"] == "normalized"
 
 
-def test_finalize_agent_reply_quality_preserves_direct_media_failure_notice() -> None:
-    caller = _RewriteCaller("发了什么好玩的？")
+def test_finalize_agent_reply_quality_silences_legacy_direct_media_failure_notice() -> None:
+    caller = _RewriteCaller("not-json")
     notice = "媒体文件已经收到了，但这次内容分析失败了，我不能在没看清的情况下乱猜。"
 
     result = asyncio.run(
@@ -141,9 +141,10 @@ def test_finalize_agent_reply_quality_preserves_direct_media_failure_notice() ->
         )
     )
 
-    assert result.text == notice
-    assert caller.calls == []
-    assert result.quality_checks[-1]["action"] == "skipped"
+    assert result.text == "[SILENCE]"
+    assert result.suppress_reply_recovery is True
+    assert len(caller.calls) == 1
+    assert result.quality_checks[-1]["action"] == "context_request_rejected"
 
 
 def test_finalize_agent_reply_quality_recovers_video_evidence_after_control_block_loss() -> None:
@@ -528,7 +529,7 @@ def test_malformed_video_fallback_closes_once_through_evidence_unavailable_bound
     assert caller.calls == []
 
 
-def test_malformed_video_fallback_uses_single_direct_evidence_unavailable_closure(monkeypatch) -> None:  # noqa: ANN001
+def test_malformed_video_fallback_allows_only_double_checked_direct_context_request(monkeypatch) -> None:  # noqa: ANN001
     caller = _SequenceCaller(
         [
             (
@@ -540,6 +541,7 @@ def test_malformed_video_fallback_uses_single_direct_evidence_unavailable_closur
         ]
     )
     monkeypatch.setattr(reply_quality, "_render_video_evidence_fallback", lambda *_args, **_kwargs: "")
+    traces: list[dict[str, object]] = []
     result = asyncio.run(
         reply_quality.finalize_agent_reply_quality(
             _agent_result("这是你录的高光还是刷到的整活？"),
@@ -556,6 +558,7 @@ def test_malformed_video_fallback_uses_single_direct_evidence_unavailable_closur
             reply_required=True,
             current_user_text="这段视频是什么？",
             turn_media_context=[{"kind": "video", "ref": "https://cdn.example/video.mp4"}],
+            record_trace=lambda **kwargs: traces.append(kwargs),
         )
     )
 
@@ -568,9 +571,11 @@ def test_malformed_video_fallback_uses_single_direct_evidence_unavailable_closur
     # calls are exactly the shared no-evidence decision and its semantic check,
     # proving that this branch does not recursively re-enter the media gate.
     assert len(caller.calls) == 2
+    assert traces[-1]["status"] == "warn"
+    assert "action=context_request" in str(traces[-1]["detail"])
 
 
-def test_malformed_video_fallback_gives_direct_transparent_failure_without_reviewer(monkeypatch) -> None:  # noqa: ANN001
+def test_malformed_video_fallback_silences_without_reviewer(monkeypatch) -> None:  # noqa: ANN001
     monkeypatch.setattr(reply_quality, "_render_video_evidence_fallback", lambda *_args, **_kwargs: "")
     result = asyncio.run(
         reply_quality.finalize_agent_reply_quality(
@@ -590,12 +595,13 @@ def test_malformed_video_fallback_gives_direct_transparent_failure_without_revie
         )
     )
 
-    assert result.text == "这段媒体我已经收到，但这次没能提取出可核验的内容，所以不想乱猜。"
+    assert result.text == "[SILENCE]"
     assert result.quality_context == "evidence_unavailable"
     assert result.media_grounding == "unavailable"
     assert result.media_delivery == "incomplete"
     assert result.media_recovery_method == "failed"
-    assert result.quality_checks[-1]["action"] == "transparent_media_failure"
+    assert result.suppress_reply_recovery is True
+    assert result.quality_checks[-1]["action"] == "context_request_rejected"
 
 
 def test_finalize_agent_reply_quality_keeps_visible_video_markdown_without_recovery() -> None:

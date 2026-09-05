@@ -851,21 +851,22 @@ async def handle_model_stop(
             status="warn",
             detail=(
                 f"required=true vision_need={vision_need} evidence=false "
-                f"action={'direct_failure_notice' if reply_required else 'silence'}"
+                "action=silence"
             ),
             hint="媒体证据仍不可用，禁止发送对附件内容的猜测",
         )
         return StopFlowDecision.return_result(
             AgentResult(
-                text=(
-                    "媒体文件已经收到了，但这次内容分析失败了，我不能在没看清的情况下乱猜。"
-                    if reply_required
-                    else "[SILENCE]"
-                ),
+                # An unavailable media provider is diagnostic state, not chat
+                # content.  Required turns may later ask one concrete question
+                # only through the shared two-stage uncertainty resolver.
+                text="[SILENCE]",
                 pending_actions=pending_actions,
-                direct_output=bool(reply_required),
                 quality_context="evidence_unavailable",
                 suppress_reply_recovery=True,
+                media_grounding="unavailable",
+                media_recovery_method="failed",
+                media_delivery="incomplete",
             )
         )
 

@@ -59,9 +59,6 @@ _EVIDENCE_UNSAFE_REFERENCE_RE = re.compile(
 )
 _EVIDENCE_OPAQUE_PAYLOAD_RE = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{96,}(?![A-Za-z0-9+/=_-])")
 _EVIDENCE_SECRET_TOKEN_RE = re.compile(r"(?i)\bsk-[a-z0-9_-]{8,}\b")
-_DIRECT_MEDIA_EVIDENCE_UNAVAILABLE_NOTICE = (
-    "这段媒体我已经收到，但这次没能提取出可核验的内容，所以不想乱猜。"
-)
 
 
 @dataclass(frozen=True)
@@ -1112,18 +1109,6 @@ async def _finalize_evidence_unavailable_reply(
         if candidate and candidate_visibility.allowed and not invalid_group_question:
             final_text = candidate
             action = "context_request"
-    media_delivery_failed = str(
-        getattr(result, "media_delivery", "not_required")
-        if media_delivery is None
-        else media_delivery
-    ) == "incomplete"
-    if final_text == "[SILENCE]" and reply_required and media_delivery_failed:
-        # A direct interaction still deserves a transparent failure boundary if
-        # the optional semantic reviewer is unavailable or declines a suitable
-        # context request.  This is a fixed operational notice, not a semantic
-        # guess and not a second trip through the media completion gate.
-        final_text = _DIRECT_MEDIA_EVIDENCE_UNAVAILABLE_NOTICE
-        action = "transparent_media_failure"
     elapsed_ms = int((time.monotonic() - started_at) * 1000)
     flags = list(dict.fromkeys(["evidence_unavailable", *decision.flags]))
     effective_media_only = bool(getattr(result, "media_only", False) if media_only is None else media_only)
@@ -1187,7 +1172,9 @@ async def _finalize_evidence_unavailable_reply(
         record_trace(
             key="agent_reply_quality",
             label="Agent 回复质量",
-            status="ok" if action in {"context_request", "transparent_media_failure"} else "warn",
+            # A permitted clarification still means evidence delivery failed;
+            # never report this diagnostic closure as a successful completion.
+            status="warn",
             detail=(
                 f"action={action} flags={','.join(flags)} media_only={str(effective_media_only).lower()} "
                 f"media_grounding={effective_grounding} available_evidence_fields={effective_available_fields} "
@@ -1357,7 +1344,7 @@ async def finalize_agent_reply_quality(
             return _copy_result_with_quality(result, text="[SILENCE]", check=check)
     skipped = (
         (
-            direct_output
+            (direct_output and quality_context != "evidence_unavailable")
             or _is_direct_media_reply(raw_text)
             or (_is_control_reply(raw_text) and quality_context != "evidence_unavailable")
         )
