@@ -1329,6 +1329,7 @@ async def review_response_text(
         )
     if parsed.action == "rewrite" and parsed.text:
         reviewed_segments = _segments_match_reviewed_text(parsed.segments, parsed.text)
+        segments_mismatched = bool(parsed.segments) and not reviewed_segments
         if recent_duplicate_requires_rewrite and _looks_like_recent_duplicate(
             parsed.text,
             recent_bot_replies or [],
@@ -1425,7 +1426,7 @@ async def review_response_text(
             reason=parsed.reason,
             flags=parsed.flags,
             segments=reviewed_segments,
-            self_claims=parsed.self_claims if reviewed_segments else (),
+            self_claims=() if segments_mismatched else parsed.self_claims,
             attribution_verdict=parsed.attribution_verdict,
         )
     if recent_duplicate_requires_rewrite:
@@ -1462,13 +1463,14 @@ async def review_response_text(
     if parsed.action == "no_reply":
         return ResponseReviewDecision(action="no_reply", text="", reason=parsed.reason, flags=parsed.flags)
     reviewed_segments = _segments_match_reviewed_text(parsed.segments, candidate)
+    segments_mismatched = bool(parsed.segments) and not reviewed_segments
     return ResponseReviewDecision(
         action="accept",
         text=candidate,
         reason=parsed.reason,
         flags=parsed.flags,
         segments=reviewed_segments,
-        self_claims=parsed.self_claims if reviewed_segments else (),
+        self_claims=() if segments_mismatched else parsed.self_claims,
     )
 
 
