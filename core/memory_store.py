@@ -988,6 +988,8 @@ class MemoryStore:
             limit=max(limit * 3, 12),
             scan_limit=scan_limit,
         ):
+            if not self._payload_identity_visible(candidate.payload, platform=platform, bot_id=bot_id):
+                continue
             existing = candidate_map.get(candidate.memory_id)
             if existing is None or candidate.base_score > existing.base_score:
                 candidate_map[candidate.memory_id] = candidate

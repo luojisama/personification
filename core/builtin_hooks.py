@@ -222,6 +222,8 @@ async def _private_memory_recall_hook(ctx: HookContext) -> Optional[str]:
     if not message_text:
         return None
     try:
+        from .llm_context import current_llm_context
+        identity = current_llm_context()
         memories = memory_store.recall_memories(
             query=message_text,
             scope="auto",
@@ -229,6 +231,8 @@ async def _private_memory_recall_hook(ctx: HookContext) -> Optional[str]:
             limit=6,
             mode="auto",
             context_type="private",
+            platform=str(identity.get("platform") or "onebot"),
+            bot_id=str(identity.get("bot_id") or getattr(ctx.bot, "self_id", "") or ""),
         )
     except Exception:
         return None

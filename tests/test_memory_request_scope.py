@@ -174,3 +174,26 @@ def test_memory_catalog_page_searches_and_filters_expiration_in_database(tmp_pat
     assert active_total == 1 and [item["memory_id"] for item in active] == ["catalog-active"]
     assert expired_total == 1 and [item["memory_id"] for item in expired_rows] == ["catalog-expired"]
     assert active[0]["updated_at"] > 0
+
+
+def test_private_auto_hook_can_recall_tagged_own_bot_memory_only(tmp_path: Path) -> None:
+    hooks = load_personification_module("plugin.personification.core.builtin_hooks")
+    llm_context = load_personification_module("plugin.personification.core.llm_context")
+    store, cfg = _store(tmp_path)
+    for bot_id in ("own", "other"):
+        token = llm_context.set_llm_context(platform="onebot", bot_id=bot_id, user_id="u")
+        try:
+            _write(store, memory_id=bot_id, summary="HOOKKEY " + bot_id, user_id="u", permission_type="private_fact")
+        finally:
+            llm_context.reset_llm_context(token)
+    ctx = SimpleNamespace(
+        is_private=True, runtime=SimpleNamespace(memory_store=store), plugin_config=cfg,
+        message_text="HOOKKEY", user_id="u", bot=SimpleNamespace(self_id="own"),
+    )
+    token = llm_context.set_llm_context(platform="onebot", bot_id="own", user_id="u")
+    try:
+        rendered = asyncio.run(hooks._private_memory_recall_hook(ctx))
+    finally:
+        llm_context.reset_llm_context(token)
+    assert "HOOKKEY own" in rendered
+    assert "HOOKKEY other" not in rendered
