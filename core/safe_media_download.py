@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import urljoin
+from uuid import uuid4
 
 import httpx
 
@@ -50,6 +51,11 @@ async def download_public_media_to_path(
     """
 
     destination_path = Path(destination)
+    # Never stream into a pre-existing target: cancellation/rejection may only
+    # remove the uniquely-owned part file created by this invocation.
+    temporary_path = destination_path.with_name(
+        f".{destination_path.name}.{uuid4().hex}.part"
+    )
     current = str(url or "").strip()
     for redirect_count in range(max_redirects + 1):
         try:
@@ -86,21 +92,26 @@ async def download_public_media_to_path(
                     raise SafeMediaDownloadError("invalid media Content-Length") from exc
                 if length > max_bytes:
                     raise SafeMediaDownloadError("media Content-Length is too large")
-                destination_path.parent.mkdir(parents=True, exist_ok=True)
+                temporary_path.parent.mkdir(parents=True, exist_ok=True)
                 size = 0
                 try:
-                    with destination_path.open("wb") as handle:
+                    with temporary_path.open("xb") as handle:
                         async for chunk in response.aiter_bytes():
                             size += len(chunk)
                             if size > max_bytes:
                                 raise SafeMediaDownloadError("media response exceeded size limit")
                             handle.write(chunk)
-                except Exception:
-                    destination_path.unlink(missing_ok=True)
+                except BaseException:
+                    temporary_path.unlink(missing_ok=True)
                     raise
                 if size <= 0:
-                    destination_path.unlink(missing_ok=True)
+                    temporary_path.unlink(missing_ok=True)
                     raise SafeMediaDownloadError("media body is empty")
+                try:
+                    temporary_path.replace(destination_path)
+                except BaseException:
+                    temporary_path.unlink(missing_ok=True)
+                    raise
                 return DownloadedMedia(destination_path, mime, original_url, size)
             finally:
                 await response.aclose()
