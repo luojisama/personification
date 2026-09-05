@@ -190,6 +190,7 @@ async def _append_gif_understanding_from_url(
     source_hint: str = "",
     counter_ref: List[int] | None = None,
     response_deadline: float | None = None,
+    failed_original_refs: set[str] | None = None,
 ) -> bool:
     if not is_gif_understanding_enabled(runtime):
         return False
@@ -216,6 +217,8 @@ async def _append_gif_understanding_from_url(
             response_deadline=response_deadline,
         )
         if payload is None:
+            if failed_original_refs is not None:
+                failed_original_refs.add(str(url).strip())
             message_text_ref.append(_gif_placeholder(summary_hint))
             return True
         if not is_gif:
@@ -236,6 +239,8 @@ async def _append_gif_understanding_from_url(
     try:
         return await asyncio.wait_for(_download_and_summarize(), timeout=timeout)
     except asyncio.TimeoutError:
+        if failed_original_refs is not None:
+            failed_original_refs.add(str(url).strip())
         message_text_ref.append(_gif_placeholder(summary_hint))
         try:
             logger.warning(f"拟人插件：GIF 下载/理解超过 {timeout:.1f}s，已降级为占位符。")
@@ -616,6 +621,7 @@ async def extract_mface_from_segment(
     gif_understanding_counter_ref: List[int] | None = None,
     transport_aliases: Dict[str, str] | None = None,
     response_deadline: float | None = None,
+    failed_original_refs: set[str] | None = None,
 ) -> None:
     if getattr(seg, "type", None) != "mface":
         return
@@ -640,6 +646,7 @@ async def extract_mface_from_segment(
             source_hint="mface",
             counter_ref=gif_understanding_counter_ref,
             response_deadline=response_deadline,
+            failed_original_refs=failed_original_refs,
         )
         return
     download_kwargs: dict[str, Any] = {
@@ -669,6 +676,8 @@ async def extract_mface_from_segment(
         message_text_ref.append(semantic_token or _gif_placeholder(summary))
         return
     if payload is None or mime_type is None:
+        if failed_original_refs is not None:
+            failed_original_refs.add(url)
         message_text_ref.append(semantic_token or f"[{summary}]")
         return
     message_text_ref.append(semantic_token or "[图片·表情包]")
@@ -703,6 +712,7 @@ async def extract_images_from_segment(
     gif_understanding_counter_ref: List[int] | None = None,
     transport_aliases: Dict[str, str] | None = None,
     response_deadline: float | None = None,
+    failed_original_refs: set[str] | None = None,
 ) -> None:
     if getattr(seg, "type", None) != "image":
         return
@@ -747,6 +757,8 @@ async def extract_images_from_segment(
                 summary_hint=summary,
                 source_hint="onebot_sticker",
                 counter_ref=gif_understanding_counter_ref,
+                response_deadline=response_deadline,
+                failed_original_refs=failed_original_refs,
             )
             return
         try:
@@ -793,6 +805,8 @@ async def extract_images_from_segment(
                     summary_hint=summary or "动画表情",
                 )
             )
+        elif failed_original_refs is not None:
+            failed_original_refs.add(str(url).strip())
         return
 
     if gif_enabled and file_name.endswith(".gif"):
@@ -807,6 +821,7 @@ async def extract_images_from_segment(
             source_hint="image",
             counter_ref=gif_understanding_counter_ref,
             response_deadline=response_deadline,
+            failed_original_refs=failed_original_refs,
         )
         return
     download_kwargs = {
@@ -836,7 +851,8 @@ async def extract_images_from_segment(
         stop_reply_ref[0] = True
         return
     if payload is None or mime_type is None:
-        message_text_ref.append("[图片·表情包]")
+        if failed_original_refs is not None:
+            failed_original_refs.add(str(url).strip())
         return
 
     data_url = image_bytes_to_data_url(payload, mime_type)
@@ -890,6 +906,7 @@ async def extract_reply_images(
     runtime: Any | None = None,
     gif_understanding_counter_ref: List[int] | None = None,
     response_deadline: float | None = None,
+    failed_original_refs: set[str] | None = None,
 ) -> None:
     if seg_type != "image":
         return
@@ -910,6 +927,7 @@ async def extract_reply_images(
             source_hint="quoted_image",
             counter_ref=gif_understanding_counter_ref,
             response_deadline=response_deadline,
+            failed_original_refs=failed_original_refs,
         )
         return
     download_kwargs = {
@@ -940,6 +958,8 @@ async def extract_reply_images(
         return
     message_text_ref.append("[图片]")
     if payload is None or mime_type is None:
+        if failed_original_refs is not None:
+            failed_original_refs.add(str(url).strip())
         return
     base64_data = base64.b64encode(payload).decode("utf-8")
     image_urls.append(f"data:{mime_type};base64,{base64_data}")
@@ -955,6 +975,7 @@ async def extract_gif_from_segment(
     stop_reply_ref: List[bool],
     gif_understanding_counter_ref: List[int] | None = None,
     response_deadline: float | None = None,
+    failed_original_refs: set[str] | None = None,
 ) -> None:
     if getattr(seg, "type", None) != "gif":
         return
@@ -980,6 +1001,7 @@ async def extract_gif_from_segment(
         source_hint="gif_segment",
         counter_ref=gif_understanding_counter_ref,
         response_deadline=response_deadline,
+        failed_original_refs=failed_original_refs,
     )
 
 

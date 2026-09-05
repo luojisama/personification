@@ -3,7 +3,7 @@ import json
 import random
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
@@ -916,6 +916,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     # Process-local only: bind a OneBot source ref to the data URL produced
     # from that exact downloaded payload.  It must never enter history/Trace.
     media_transport_aliases: Dict[str, str] = {}
+    failed_image_refs: set[str] = set()
     sticker_image_urls: List[str] = []
     sticker_candidates: List[IncomingStickerCandidate] = []
     stop_reply_due_to_gif = [False]
@@ -1052,6 +1053,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     gif_understanding_counter_ref=gif_understanding_counter,
                     transport_aliases=media_transport_aliases,
                     response_deadline=response_deadline if isinstance(response_deadline, (int, float)) else None,
+                    failed_original_refs=failed_image_refs,
                 )
             elif seg.type == "image":
                 await _extract_images_from_segment(
@@ -1067,6 +1069,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     gif_understanding_counter_ref=gif_understanding_counter,
                     transport_aliases=media_transport_aliases,
                     response_deadline=response_deadline if isinstance(response_deadline, (int, float)) else None,
+                    failed_original_refs=failed_image_refs,
                 )
             elif seg.type == "gif":
                 await _extract_gif_from_segment(
@@ -1078,6 +1081,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     stop_reply_ref=stop_reply_due_to_gif,
                     gif_understanding_counter_ref=gif_understanding_counter,
                     response_deadline=response_deadline if isinstance(response_deadline, (int, float)) else None,
+                    failed_original_refs=failed_image_refs,
                 )
 
         if not image_urls and source_message is not event.message:
@@ -1097,6 +1101,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             gif_understanding_counter_ref=gif_understanding_counter,
                             transport_aliases=media_transport_aliases,
                             response_deadline=response_deadline if isinstance(response_deadline, (int, float)) else None,
+                            failed_original_refs=failed_image_refs,
                         )
                     elif getattr(seg, "type", None) == "gif":
                         await _extract_gif_from_segment(
@@ -1108,6 +1113,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             stop_reply_ref=stop_reply_due_to_gif,
                             gif_understanding_counter_ref=gif_understanding_counter,
                             response_deadline=response_deadline if isinstance(response_deadline, (int, float)) else None,
+                            failed_original_refs=failed_image_refs,
                         )
             except Exception as e:
                 runtime.logger.warning(f"回退解析原始消息图片失败: {e}")
@@ -1153,6 +1159,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                                     runtime=runtime,
                                     gif_understanding_counter_ref=gif_understanding_counter,
                                     response_deadline=response_deadline if isinstance(response_deadline, (int, float)) else None,
+                                    failed_original_refs=failed_image_refs,
                                 )
                 except Exception as e:
                     runtime.logger.warning(f"处理引用消息失败: {e}")
@@ -1338,7 +1345,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         return
 
     user_name = sender_name
-    if not message_content and not is_poke and not _has_turn_media_input(
+    if not message_content and not is_poke and not failed_image_refs and not _has_turn_media_input(
         image_urls,
         turn_media_context,
     ):
@@ -1681,6 +1688,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             pass
         for media_ref in turn_media_context:
             if media_ref.reference_role == "selected_referent" and media_ref.ref and media_ref.kind in {"image", "sticker", "gif", "mface"} and media_ref.ref not in image_urls:
+                materialized_ref = media_transport_aliases.get(media_ref.ref, media_ref.ref)
+                if materialized_ref in sticker_image_urls:
+                    # A selected protocol sticker remains subject to the
+                    # sticker vision cap; do not promote it to photo input.
+                    continue
                 image_urls.append(media_ref.ref)
                 if media_ref.ref not in tool_image_urls:
                     tool_image_urls.append(media_ref.ref)
@@ -1724,6 +1736,83 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 )
         except Exception:
             pass
+    if failed_image_refs:
+        turn_media_context = [
+            replace(item, resolution_code="onebot_image_download_failed")
+            if item.kind in {"image", "sticker", "gif", "mface"}
+            and str(item.ref or "").strip() in failed_image_refs
+            else item
+            for item in turn_media_context
+        ]
+        state["turn_media_context"] = serialize_turn_media(turn_media_context)
+        # A selected referent is appended above from provenance so a textual
+        # follow-up can activate it.  If this turn's exact occurrence failed
+        # safe download, that raw source must not survive that earlier append
+        # and be treated as visual transport below.
+        failed_transports = {
+            media_transport_aliases.get(original_ref, original_ref)
+            for original_ref in failed_image_refs
+        }
+
+        def _is_failed_visual_transport(value: str) -> bool:
+            candidate = str(value or "").strip()
+            return (
+                candidate in failed_image_refs
+                or candidate in failed_transports
+                or media_transport_aliases.get(candidate, candidate) in failed_transports
+            )
+
+        image_urls = [value for value in image_urls if not _is_failed_visual_transport(value)]
+        sticker_image_urls = [value for value in sticker_image_urls if not _is_failed_visual_transport(value)]
+        # Segment placeholders are generated processing text, not independent
+        # user evidence.  Determine media-only status from the original event.
+        try:
+            original_text = str(event.get_plaintext() or "").strip()
+        except Exception:
+            original_text = ""
+        batch_has_real_text = any(
+            str(item.get("text", "") or "").strip()
+            for item in batched_events
+            if isinstance(item, dict)
+        )
+        active_nonvisual_media = [
+            item
+            for item in turn_media_context
+            if item.kind in {"video", "audio"}
+            # address_only identifies the quoted message for reply routing; it
+            # is not selected media evidence.  A quoted item becomes active
+            # only when the resolver explicitly promotes it.
+            and item.reference_role in {"current", "selected_referent"}
+        ]
+        nonvisual_availability = build_media_availability(active_nonvisual_media)
+        has_other_active_media = bool(
+            nonvisual_availability.usable_video_count
+            or nonvisual_availability.usable_audio_count
+        )
+        if (
+            not original_text
+            and not batch_has_real_text
+            and not has_other_active_media
+            and not image_urls
+            and not sticker_image_urls
+        ):
+            try:
+                from ...core import reply_turn_trace
+                reply_turn_trace.record_stage(
+                    key="incoming_media_download_failed",
+                    label="媒体下载失败",
+                    status="warn",
+                    detail=f"failed={len(failed_image_refs)} visible_reply=false",
+                    hint="无独立文本证据时不猜测图片内容",
+                )
+                reply_turn_trace.finish_trace(
+                    outcome="no_reply",
+                    diagnosis_code="incoming_media_download_failed",
+                    detail={"silent": True, "failed_media": len(failed_image_refs)},
+                )
+            except Exception:
+                pass
+            return
     # Referent selection may have activated an older image after the first
     # current-message pass computed visual transport.  Rebuild after the
     # resolver (and for private turns) from selected provenance instead of
@@ -1759,9 +1848,22 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             if sticker_transport not in tool_image_urls:
                 tool_image_urls.append(sticker_transport)
     photo_image_urls = list(image_urls)
+    if image_input_mode == "disabled":
+        # Disabled is a full visual-input boundary, including YAML/Agent handoff.
+        tool_image_urls = []
+        photo_image_urls = []
     direct_image_input = bool(tool_image_urls) and image_input_mode in {"auto", "direct"} and plain_route_vision
     agent_direct_image_input = bool(tool_image_urls) and image_input_mode in {"auto", "direct"} and agent_route_vision
     image_urls_for_text_model = list(tool_image_urls) if direct_image_input else []
+    yaml_visual_projection = replace(
+        visual_projection,
+        transport_refs=tuple(tool_image_urls),
+        occurrence_transport_refs=tuple(
+            binding
+            for binding in visual_projection.occurrence_transport_refs
+            if binding[1] in set(tool_image_urls)
+        ),
+    )
     if tool_image_urls or sticker_image_urls:
         try:
             from ...core import reply_turn_trace
@@ -2203,7 +2305,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             trigger_reason=trigger_reason,
             current_image_urls=tool_image_urls,
             media_transport_aliases=media_transport_aliases,
-            prepared_visual_projection=visual_projection,
+            prepared_visual_projection=yaml_visual_projection,
             get_configured_api_providers=runtime.get_configured_api_providers,
             vision_caller=runtime.vision_caller,
             disable_network_hooks=disable_network_hooks,

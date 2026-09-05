@@ -341,7 +341,11 @@ def project_visual_media_inputs(
         for item in all_visual_media
         if item.kind in _VISUAL_KINDS and item.reference_role in _VISUAL_INPUT_ROLES
     )
-    allowed_original_refs = {_text(item.ref) for item in media if _text(item.ref)}
+    allowed_original_refs = {
+        _text(item.ref)
+        for item in media
+        if _text(item.ref) and not _text(item.resolution_code).endswith("_failed")
+    }
     has_visual_manifest = bool(all_visual_media)
     transport_refs: list[str] = []
     occurrence_transport_refs: list[tuple[str, str]] = []
@@ -374,6 +378,10 @@ def project_visual_media_inputs(
             continue
         _append_transport(raw_transport)
     for item in media:
+        if _text(item.resolution_code).endswith("_failed"):
+            # Keep the occurrence in ``media`` for provenance/availability,
+            # but never resurrect a failed raw ref as provider transport.
+            continue
         raw_ref = _text(item.ref)
         transport = aliases.get(raw_ref, raw_ref)
         if item.media_id and transport:

@@ -841,6 +841,25 @@ def test_media_availability_does_not_mark_a_failed_media_ref_usable() -> None:
     assert availability.media_only_turn is True
 
 
+def test_failed_visual_occurrence_keeps_provenance_but_cannot_restore_raw_transport() -> None:
+    failed = turn_media.TurnMediaRef(
+        media_id="failed-image", ref="https://cdn.example/failed.png", origin="current",
+        owner_user_id="alice", message_id="m-current", kind="image",
+        resolution_code="onebot_image_download_failed",
+    )
+
+    projection = turn_media.project_visual_media_inputs(
+        [failed], image_refs=[failed.ref],
+    )
+
+    assert projection.media == (failed,)
+    assert projection.transport_refs == ()
+    assert projection.occurrence_transport_refs == ()
+    assert turn_media.build_media_availability(
+        projection.media, image_refs=projection.transport_refs,
+    ).usable_image_count == 0
+
+
 def test_visual_projection_deduplicates_payload_but_keeps_distinct_occurrences() -> None:
     first = turn_media.TurnMediaRef(
         media_id="first", ref="https://cdn.example/a", origin="current",

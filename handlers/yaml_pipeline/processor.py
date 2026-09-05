@@ -1016,6 +1016,9 @@ async def process_yaml_response_logic(
     image_input_mode = normalize_image_input_mode(
         getattr(plugin_config, "personification_image_input_mode", "auto")
     )
+    if image_input_mode == "disabled":
+        # Do not hand visual payloads to YAML's text model or Agent/tool path.
+        last_images = []
     image_summary_suffix = str(precomputed_image_summary_suffix or "").strip()
     per_media_visual_summaries: dict[str, str] = {
         str(item.media_id): str(item.safe_summary)

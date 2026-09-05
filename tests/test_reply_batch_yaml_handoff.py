@@ -14,6 +14,7 @@ config_module = load_personification_module("plugin.personification.config")
 turn_media = load_personification_module("plugin.personification.core.turn_media")
 yaml_processor = load_personification_module("plugin.personification.handlers.yaml_pipeline.processor")
 planner = load_personification_module("plugin.personification.agent.runtime.planner")
+pipeline_sticker = load_personification_module("plugin.personification.handlers.reply_pipeline.pipeline_sticker")
 
 
 class _Text:
@@ -80,14 +81,21 @@ def test_agent_preparation_shares_group_envelope_and_keeps_single_private_shape(
     assert private == "trigger"
 
 
-def test_normal_processor_reprojects_selected_referent_into_yaml_provider_request(monkeypatch) -> None:  # noqa: ANN001
+def _run_normal_selected_referent_replay(
+    monkeypatch, *, image_input_mode: str = "direct", simulate_image_download_failure: bool = False,
+    protocol_sticker_urls: list[str] | None = None, batch_text: str = "", sticker_vision_max: int = 1,
+) -> tuple[list[dict], dict, list[dict]]:  # noqa: ANN001
     """A text-only follow-up can activate exactly its selected historical image.
 
     This exercises the normal processor from an initially image-free event,
     through referent selection and direct-mode recomputation, into the real
     YAML provider call.  An unselected historical image must not leak there.
     """
-    selected_image = "data:image/png;base64,c2VsZWN0ZWQtcmVmZXJlbnQ="
+    selected_image = (
+        "https://images.example.test/download-fails.png"
+        if simulate_image_download_failure
+        else "data:image/png;base64,c2VsZWN0ZWQtcmVmZXJlbnQ="
+    )
     unselected_image = "data:image/png;base64,dW5zZWxlY3RlZC1oaXN0b3J5"
     selected = turn_media.TurnMediaRef(
         media_id="selected", ref=selected_image, origin="history",
@@ -104,12 +112,23 @@ def test_normal_processor_reprojects_selected_referent_into_yaml_provider_reques
         owner_user_id="other-owner", message_id="other-message", kind="image",
         file_id="background-file", content_hash="background-hash", reference_role="background",
     )
+    active_media = (selected, selected_same_transport)
+    if protocol_sticker_urls:
+        active_media = tuple(
+            turn_media.TurnMediaRef(
+                media_id=f"sticker-{index}", ref=url, origin="current",
+                owner_user_id="asker", message_id="follow-up", kind="image",
+                file_id=f"sticker-{index}", content_hash=f"sticker-hash-{index}",
+                reference_role="selected_referent",
+            )
+            for index, url in enumerate(protocol_sticker_urls)
+        )
 
     class _Resolver:
         async def resolve(self, **_kwargs):  # noqa: ANN003
             return SimpleNamespace(
-                active_media=(selected, selected_same_transport),
-                media_manifest=(unselected, selected, selected_same_transport),
+                active_media=active_media,
+                media_manifest=(unselected, *active_media),
                 diagnostic_code="followup_referent_resolved", addressing_target="bot",
                 semantic_referent="selected", confidence=1.0, candidates=(selected,),
                 context_fields=lambda: {"selected_media_id": "selected"},
@@ -156,8 +175,10 @@ def test_normal_processor_reprojects_selected_referent_into_yaml_provider_reques
     )
     plugin_config = config_module.Config(
         personification_agent_enabled=False, personification_schedule_global=False,
-        personification_qq_expression_enabled=False, personification_image_input_mode="direct",
+        personification_qq_expression_enabled=False, personification_image_input_mode=image_input_mode,
+        personification_sticker_vision_max=sticker_vision_max,
     )
+    object.__setattr__(plugin_config, "personification_sticker_vision_max", sticker_vision_max)
     monkeypatch.setattr(processor, "refresh_bot_group_mute_state", lambda *_a, **_k: _false())
     monkeypatch.setattr(processor, "extract_forward_message_content", lambda *_a, **_k: _empty())
     monkeypatch.setattr(processor, "review_pending_sticker_reaction", lambda *_a, **_k: _none())
@@ -176,6 +197,14 @@ def test_normal_processor_reprojects_selected_referent_into_yaml_provider_reques
     monkeypatch.setattr(processor, "format_meme_turn_prompt", lambda _value: "")
     monkeypatch.setattr(yaml_processor, "get_recent_group_msgs", lambda *_a, **_k: [])
     monkeypatch.setattr(yaml_processor, "get_group_topic_summary", lambda *_a, **_k: "")
+    if simulate_image_download_failure:
+        async def _failed_download(**_kwargs):  # noqa: ANN003
+            return None, None, False
+        monkeypatch.setattr(pipeline_sticker, "download_safe_image_bytes", _failed_download)
+    if protocol_sticker_urls:
+        async def _download_sticker(*, url, **_kwargs):  # noqa: ANN003
+            return "image/png", str(url).encode("utf-8"), False
+        monkeypatch.setattr(pipeline_sticker, "download_safe_image_bytes", _download_sticker)
 
     session = processor.SessionDeps(
         private_session_prefix="private_", looks_like_private_command=lambda _text: False,
@@ -207,11 +236,30 @@ def test_normal_processor_reprojects_selected_referent_into_yaml_provider_reques
         private_message_event_cls=type("Private", (), {}), message_cls=list,
     )
     event = _GroupEvent()
-    event.message = [_Mention("bot"), _Text("这张图怎么样？")]
+    event.message = (
+        [SimpleNamespace(type="image", data={"url": selected_image, "file": "failed.png"})]
+        if simulate_image_download_failure
+        else [
+            SimpleNamespace(type="image", data={"url": url, "file": f"sticker-{index}.png", "sub_type": 1})
+            for index, url in enumerate(protocol_sticker_urls)
+        ]
+        if protocol_sticker_urls
+        else [_Mention("bot"), _Text("这张图怎么样？")]
+    )
+    if simulate_image_download_failure:
+        event.get_plaintext = lambda: ""
     event.message_id = "follow-up"
     event.user_id = "asker"
     event.sender = SimpleNamespace(nickname="提问者", card="", role="member")
     state = {"response_deadline": 10_000_000_000.0, "turn_media_context": []}
+    if batch_text:
+        state.update({
+            "batch_event_count": 2,
+            "batched_events": [
+                {"message_id": "batch-text", "user_id": "other", "sender_name": "同伴", "text": batch_text},
+                {"message_id": "follow-up", "user_id": "asker", "sender_name": "提问者", "text": ""},
+            ],
+        })
     asyncio.run(processor._process_response_logic_impl(
         SimpleNamespace(self_id="bot"), event,
         state,
@@ -222,12 +270,62 @@ def test_normal_processor_reprojects_selected_referent_into_yaml_provider_reques
         for part in (message.get("content") if isinstance(message.get("content"), list) else [])
         if isinstance(part, dict) and part.get("type") == "image_url"
     ]
+    return image_parts, state, model_messages
+
+
+def test_normal_processor_reprojects_selected_referent_into_yaml_provider_request(monkeypatch) -> None:  # noqa: ANN001
+    image_parts, state, _messages = _run_normal_selected_referent_replay(monkeypatch)
+    selected_image = "data:image/png;base64,c2VsZWN0ZWQtcmVmZXJlbnQ="
     assert [part["image_url"]["url"] for part in image_parts] == [selected_image]
     # Provider transport de-duplicates, while the per-occurrence manifest
     # still keeps both owners for provenance and per-media summary binding.
     assert [item["owner_user_id"] for item in state["turn_media_context"]] == [
         "image-owner", "second-owner",
     ]
+
+
+def test_normal_to_yaml_disabled_mode_has_no_provider_image_input(monkeypatch) -> None:  # noqa: ANN001
+    image_parts, state, _messages = _run_normal_selected_referent_replay(
+        monkeypatch, image_input_mode="disabled",
+    )
+    assert image_parts == []
+    assert [item["owner_user_id"] for item in state["turn_media_context"]] == [
+        "image-owner", "second-owner",
+    ]
+
+
+def test_image_only_download_failure_is_silent_and_never_replays_raw_url(monkeypatch) -> None:  # noqa: ANN001
+    image_parts, state, messages = _run_normal_selected_referent_replay(
+        monkeypatch, simulate_image_download_failure=True,
+    )
+    assert image_parts == []
+    assert messages == [], state
+    assert state["turn_media_context"][0]["resolution_code"] == "onebot_image_download_failed", state
+
+
+def test_normal_protocol_sticker_cap_is_preserved_by_yaml_provider_request(monkeypatch) -> None:  # noqa: ANN001
+    sticker_urls = [f"https://images.example.test/sticker-{index}.png" for index in range(4)]
+    image_parts, _state, _messages = _run_normal_selected_referent_replay(
+        monkeypatch,
+        protocol_sticker_urls=sticker_urls,
+    )
+    assert len(image_parts) == 1
+    assert image_parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
+    all_image_parts, _state, _messages = _run_normal_selected_referent_replay(
+        monkeypatch,
+        protocol_sticker_urls=sticker_urls,
+        sticker_vision_max=4,
+    )
+    assert len(all_image_parts) == 4
+
+
+def test_failed_image_does_not_silence_independent_batched_text(monkeypatch) -> None:  # noqa: ANN001
+    image_parts, state, messages = _run_normal_selected_referent_replay(
+        monkeypatch, simulate_image_download_failure=True, batch_text="我有个文字问题",
+    )
+    assert image_parts == []
+    assert messages, "independent batched text must continue to the provider"
+    assert state["turn_media_context"][0]["resolution_code"] == "onebot_image_download_failed"
 
 
 async def _false() -> bool:

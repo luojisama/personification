@@ -75,6 +75,13 @@ def _run_yaml_turn(
     monkeypatch.setattr(yaml_processor, "get_recent_group_msgs", lambda *_args, **_kwargs: history)
     monkeypatch.setattr(yaml_processor, "get_group_topic_summary", lambda *_args, **_kwargs: "")
 
+    async def _empty_sticker_feedback() -> dict[str, object]:
+        # This isolated YAML replay does not initialise the plugin DataStore.
+        # Feedback is unrelated to the provenance gate under test.
+        return {}
+
+    monkeypatch.setattr(yaml_processor, "load_sticker_feedback", _empty_sticker_feedback)
+
     plugin_config = config_module.Config(
         personification_agent_enabled=False,
         personification_qq_expression_enabled=False,
