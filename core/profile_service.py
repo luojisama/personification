@@ -186,6 +186,9 @@ class ProfileService:
     def list_local_profiles(self, group_id: str) -> list[dict[str, Any]]:
         return self.memory_store.list_local_profiles(group_id)
 
+    def list_local_profile_summaries(self, group_id: str) -> list[dict[str, Any]]:
+        return self.memory_store.list_local_profile_summaries(group_id)
+
     @staticmethod
     def _global_claim_document(profile_json: dict[str, Any]) -> dict[str, Any]:
         embedded = profile_json.get("scoped_profile") if isinstance(profile_json, dict) else None

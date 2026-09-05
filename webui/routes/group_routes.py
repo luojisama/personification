@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import re
 import time
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from starlette.concurrency import run_in_threadpool
 
 from ...core import webui_audit_log
 from ...core.db import connect_sync
@@ -24,6 +26,42 @@ from ..deps import AdminIdentity, get_client_ip, require_admin
 from .favorability_view import serialize_favorability
 from .peer_bot_routes import build_peer_bot_group_router
 from .qzone_agent_routes import build_qzone_agent_group_router
+
+
+_FAVORABILITY_SUMMARY_FIELDS = (
+    "available",
+    "enabled",
+    "exists",
+    "scope",
+    "scope_used",
+    "fallback_used",
+    "score",
+    "score_min",
+    "score_max",
+    "level",
+    "today_positive",
+    "daily_positive_count",
+    "daily_negative_count",
+    "daily_net_count",
+    "daily_growth_cap",
+    "remaining_today",
+    "last_progress_quality",
+    "estimated_active_days_to_70",
+    "source",
+    "updated_at",
+    "reason",
+)
+
+
+def _favorability_summary(runtime: Any, key: str, *, scope: str, group_id: str = "") -> dict[str, Any]:
+    full = serialize_favorability(
+        runtime,
+        key,
+        scope=scope,
+        include_events=False,
+        group_id=group_id,
+    )
+    return {field: full[field] for field in _FAVORABILITY_SUMMARY_FIELDS if field in full}
 
 
 class _ModelResponseView:
@@ -624,50 +662,86 @@ def build_group_router(*, runtime) -> APIRouter:
         )
 
     @router.get("/{group_id}/personas")
-    async def personas(group_id: str, _: AdminIdentity = Depends(require_admin)) -> dict:
+    async def personas(
+        group_id: str,
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+        search: str = Query("", max_length=120),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
         svc = _profile_service(runtime)
         if svc is None:
             raise HTTPException(status_code=503, detail="profile_service 未就绪")
-        profiles = svc.list_local_profiles(group_id)
-        seen = {str(p.get("user_id", "")) for p in profiles}
-        aliases_by_user = list_group_member_aliases(group_id)
-        recent_names_by_user = _load_recent_group_member_names(group_id)
-        # 本地群画像通常为空（没有专门的本地画像构建流程）。回退：把本群近期活跃成员
-        # 的【全局画像】并进来，避免「群内成员画像」一直显示为 0。
-        try:
-            from ...utils import get_recent_group_msgs
-
-            recent = get_recent_group_msgs(str(group_id), limit=200, expire_hours=0) or []
-            active_uids: list[str] = []
-            for m in recent:
-                uid = str((m or {}).get("user_id", "") or "").strip()
-                if uid and uid not in seen and uid not in active_uids:
-                    active_uids.append(uid)
-            for uid in active_uids:
-                snap = svc.get_core_profile(uid)
-                text = getattr(snap, "profile_text", "") if snap is not None else ""
-                if not str(text or "").strip():
-                    continue
-                profiles.append({
-                    "user_id": uid,
-                    "profile_text": str(text),
-                    "profile_json": {"scope": "global"},
-                    "updated_at": float(getattr(snap, "updated_at", 0) or 0),
-                })
-                seen.add(uid)
-        except Exception as exc:
-            getattr(runtime, "logger", None) and runtime.logger.debug(f"[group personas] 全局画像回退失败: {exc}")
-        for uid in sorted(set(aliases_by_user.keys()) - seen):
-            profiles.append(
-                {
-                    "user_id": uid,
-                    "profile_text": "",
-                    "profile_json": {"scope": "group_alias"},
-                    "updated_at": float(aliases_by_user.get(uid, {}).get("updated_at", 0) or 0),
-                }
+        def _load_catalog() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, list[str]]]:
+            summary_loader = getattr(svc, "list_local_profile_summaries", None)
+            profiles = list(
+                (summary_loader(group_id) if callable(summary_loader) else svc.list_local_profiles(group_id))
+                or []
             )
-            seen.add(uid)
-        profiles.sort(key=lambda p: float(p.get("updated_at", 0) or 0), reverse=True)
+            seen = {str(p.get("user_id", "")) for p in profiles}
+            aliases_by_user = list_group_member_aliases(group_id)
+            recent_names_by_user = _load_recent_group_member_names(group_id)
+            # 本地群画像为空时，仅在 worker thread 中读取近期成员的全局画像。
+            try:
+                from ...utils import get_recent_group_msgs
+
+                recent = []
+                if not profiles:
+                    recent = get_recent_group_msgs(str(group_id), limit=200, expire_hours=0) or []
+                active_uids: list[str] = []
+                for message in recent:
+                    uid = str((message or {}).get("user_id", "") or "").strip()
+                    if uid and uid not in seen and uid not in active_uids:
+                        active_uids.append(uid)
+                for uid in active_uids:
+                    snap = svc.get_core_profile(uid)
+                    text = getattr(snap, "profile_text", "") if snap is not None else ""
+                    if not str(text or "").strip():
+                        continue
+                    profiles.append(
+                        {
+                            "user_id": uid,
+                            "profile_text": str(text)[:240],
+                            "profile_json": {"scope": "global"},
+                            "updated_at": float(getattr(snap, "updated_at", 0) or 0),
+                        }
+                    )
+                    seen.add(uid)
+            except Exception as exc:
+                logger = getattr(runtime, "logger", None)
+                if logger is not None:
+                    logger.debug(f"[group personas] 全局画像回退失败: {type(exc).__name__}")
+            for uid in sorted(set(aliases_by_user) - seen):
+                profiles.append(
+                    {
+                        "user_id": uid,
+                        "profile_text": "",
+                        "profile_json": {"scope": "group_alias"},
+                        "updated_at": float(aliases_by_user.get(uid, {}).get("updated_at", 0) or 0),
+                    }
+                )
+            profiles.sort(key=lambda item: float(item.get("updated_at", 0) or 0), reverse=True)
+            return profiles, aliases_by_user, recent_names_by_user
+
+        profiles, aliases_by_user, recent_names_by_user = await run_in_threadpool(_load_catalog)
+        query = search.strip().casefold()
+        if query:
+            profiles = [
+                profile
+                for profile in profiles
+                if query
+                in " ".join(
+                    [
+                        str(profile.get("user_id", "")),
+                        str(profile.get("profile_text", ""))[:240],
+                        *recent_names_by_user.get(str(profile.get("user_id", "")), []),
+                        *list(aliases_by_user.get(str(profile.get("user_id", "")), {}).get("aliases") or []),
+                    ]
+                ).casefold()
+            ]
+        total = len(profiles)
+        offset = (page - 1) * page_size
+        page_profiles = profiles[offset : offset + page_size]
         bot = _get_first_bot(runtime)
 
         names_for_edges = {
@@ -676,9 +750,15 @@ def build_group_router(*, runtime) -> APIRouter:
         }
         for uid, entry in aliases_by_user.items():
             names_for_edges[uid] = merge_known_names(names_for_edges.get(uid, []), entry.get("aliases", []))
-        relationship_edges = _load_member_relationship_edges(
+        page_user_ids = {
+            str(profile.get("user_id", "") or "").strip()
+            for profile in page_profiles
+            if str(profile.get("user_id", "") or "").strip()
+        }
+        relationship_edges = await run_in_threadpool(
+            _load_member_relationship_edges,
             group_id,
-            {str(p.get("user_id", "") or "").strip() for p in profiles if str(p.get("user_id", "") or "").strip()},
+            page_user_ids,
             names_by_user=names_for_edges,
         )
 
@@ -694,12 +774,21 @@ def build_group_router(*, runtime) -> APIRouter:
         except Exception:
             emotion_per_user = {}
 
+        nickname_semaphore = asyncio.Semaphore(8)
+
+        async def _nickname(uid: str) -> str:
+            cached_names = recent_names_by_user.get(uid, [])
+            if cached_names:
+                return str(cached_names[0])[:160]
+            async with nickname_semaphore:
+                return await get_user_nickname(bot, uid)
+
+        nicknames = await asyncio.gather(*(_nickname(str(p.get("user_id", ""))) for p in page_profiles))
         items: list[dict[str, Any]] = []
-        for p in profiles:
+        for p, nickname in zip(page_profiles, nicknames):
             uid = str(p["user_id"])
             text = p.get("profile_text") or ""
             entry_emotion = emotion_per_user.get(str(uid), {})
-            nickname = await get_user_nickname(bot, uid)
             alias_entry = aliases_by_user.get(
                 str(uid),
                 {"user_id": str(uid), "aliases": [], "note": "", "updated_at": 0.0, "updated_by": ""},
@@ -719,7 +808,6 @@ def build_group_router(*, runtime) -> APIRouter:
                     "alias_updated_at": float(alias_entry.get("updated_at", 0) or 0),
                     "alias_updated_by": str(alias_entry.get("updated_by", "") or ""),
                     "snippet": str(text)[:240],
-                    "profile_text": str(text),
                     "updated_at": p.get("updated_at", 0),
                     "latest_emotion": {
                         "user_attitude": str(entry_emotion.get("user_attitude", "") or "")[:60],
@@ -727,12 +815,8 @@ def build_group_router(*, runtime) -> APIRouter:
                         "expression_style": str(entry_emotion.get("expression_style", "") or "")[:60],
                         "updated_at": str(entry_emotion.get("updated_at", "") or ""),
                     },
-                    "favorability": serialize_favorability(
-                        runtime,
-                        str(uid),
-                        scope="user",
-                        include_events=False,
-                        group_id=group_id,
+                    "favorability": _favorability_summary(
+                        runtime, str(uid), scope="user", group_id=group_id
                     ),
                     "relationship_edges": relationship_edges.get(str(uid), []),
                 }
@@ -740,21 +824,53 @@ def build_group_router(*, runtime) -> APIRouter:
         return {
             "group_id": group_id,
             "profiles": items,
-            "group_aliases": sorted(aliases_by_user.values(), key=lambda item: str(item.get("user_id", ""))),
-            "group_favorability": serialize_favorability(
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "has_more": offset + len(items) < total,
+            "search": search.strip(),
+            "group_favorability": _favorability_summary(
                 runtime,
                 f"group_{group_id}",
                 scope="group",
-                include_events=True,
+                group_id=group_id,
             ),
         }
 
     @router.get("/{group_id}/aliases")
-    async def aliases(group_id: str, _: AdminIdentity = Depends(require_admin)) -> dict:
+    async def aliases(
+        group_id: str,
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+        search: str = Query("", max_length=120),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
         entries = list_group_member_aliases(group_id)
+        items = sorted(entries.values(), key=lambda item: str(item.get("user_id", "")))
+        query = search.strip().casefold()
+        if query:
+            items = [
+                item
+                for item in items
+                if query in " ".join(
+                    [
+                        str(item.get("user_id", "")),
+                        *[str(value) for value in list(item.get("aliases") or [])],
+                        str(item.get("note", "")),
+                    ]
+                ).casefold()
+            ]
+        total = len(items)
+        offset = (page - 1) * page_size
+        selected = items[offset : offset + page_size]
         return {
             "group_id": str(group_id),
-            "aliases": sorted(entries.values(), key=lambda item: str(item.get("user_id", ""))),
+            "aliases": selected,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "has_more": offset + len(selected) < total,
+            "search": search.strip(),
         }
 
     @router.put("/{group_id}/aliases/{user_id}")
@@ -821,7 +937,10 @@ def build_group_router(*, runtime) -> APIRouter:
             detail={"aliases": entry.get("aliases", []), "has_note": bool(entry.get("note"))},
         )
         try:
-            entries = list_group_member_aliases(group_id)
+            verified_entry = list_group_member_aliases(group_id).get(
+                str(user_id),
+                {"user_id": str(user_id), "aliases": [], "note": "", "updated_at": 0.0, "updated_by": ""},
+            )
         except Exception as exc:
             _raise_unexpected_failure(
                 runtime,
@@ -830,12 +949,12 @@ def build_group_router(*, runtime) -> APIRouter:
                 code="group_alias_refresh_failed",
                 phase="verification",
                 title="群成员称呼已保存，但列表刷新失败",
-                message="目标成员称呼已明确保存，服务器未能重新读取完整称呼列表。",
+                message="目标成员称呼已明确保存，服务器未能重新读取该条目。",
                 suggestion="刷新群详情即可重新读取；不要重复保存同一内容。",
                 details=(detail("目标群", group_id), detail("目标成员", user_id), detail("保存状态", "confirmed", "ok")),
                 steps=(
                     step("persist", "保存群成员称呼", "ok", "目标成员称呼已保存。"),
-                    step("verify", "重新读取称呼列表", "error", "完整列表读取失败。"),
+                    step("verify", "重新读取称呼条目", "error", "目标条目读取失败。"),
                 ),
                 partial=True,
                 outcome_unknown=False,
@@ -843,8 +962,7 @@ def build_group_router(*, runtime) -> APIRouter:
         return _operation_success(
             {
                 "success": True,
-                "entry": entry,
-                "aliases": sorted(entries.values(), key=lambda item: str(item.get("user_id", ""))),
+                "entry": verified_entry,
             },
             code="group_alias_saved",
             phase="operation_complete",
@@ -858,7 +976,7 @@ def build_group_router(*, runtime) -> APIRouter:
             steps=(
                 step("validate", "校验群成员称呼", "ok", "称呼格式有效。"),
                 step("persist", "保存群成员称呼", "ok", "称呼映射已写入。"),
-                step("verify", "重新读取称呼列表", "ok", "已确认保存结果可读取。"),
+                step("verify", "重新读取称呼条目", "ok", "已确认目标条目可读取。"),
                 step("audit", "记录管理员操作", "ok" if audit_ok else "warn", "审计记录已保存。" if audit_ok else "称呼已保存，但审计记录写入失败。"),
             ),
             warnings=() if audit_ok else ("称呼映射已保存，但本次管理员审计记录未能写入。",),
@@ -899,7 +1017,10 @@ def build_group_router(*, runtime) -> APIRouter:
             detail={"changed": changed},
         )
         try:
-            entries = list_group_member_aliases(group_id)
+            verified_entry = list_group_member_aliases(group_id).get(
+                str(user_id),
+                {"user_id": str(user_id), "aliases": [], "note": "", "updated_at": 0.0, "updated_by": ""},
+            )
         except Exception as exc:
             _raise_unexpected_failure(
                 runtime,
@@ -908,12 +1029,12 @@ def build_group_router(*, runtime) -> APIRouter:
                 code="group_alias_refresh_failed",
                 phase="verification",
                 title="群成员称呼已删除，但列表刷新失败",
-                message="删除结果已明确返回，服务器未能重新读取完整称呼列表。",
+                message="删除结果已明确返回，服务器未能重新读取目标成员条目。",
                 suggestion="刷新群详情即可重新读取；不要重复删除。",
                 details=(detail("目标群", group_id), detail("目标成员", user_id), detail("已删除", changed, "ok")),
                 steps=(
                     step("persist", "删除群成员称呼", "ok", "删除操作已明确完成。"),
-                    step("verify", "重新读取称呼列表", "error", "完整列表读取失败。"),
+                    step("verify", "重新读取称呼条目", "error", "目标条目读取失败。"),
                 ),
                 partial=True,
                 outcome_unknown=False,
@@ -922,7 +1043,7 @@ def build_group_router(*, runtime) -> APIRouter:
             {
                 "success": True,
                 "deleted": changed,
-                "aliases": sorted(entries.values(), key=lambda item: str(item.get("user_id", ""))),
+                "entry": verified_entry,
             },
             code="group_alias_deleted" if changed else "group_alias_delete_noop",
             phase="operation_complete",
@@ -931,7 +1052,7 @@ def build_group_router(*, runtime) -> APIRouter:
             details=(detail("目标群", group_id), detail("目标成员", user_id), detail("删除结果", changed, "ok")),
             steps=(
                 step("persist", "删除群成员称呼", "ok", "删除操作已明确完成。"),
-                step("verify", "重新读取称呼列表", "ok", "已确认删除后的列表可读取。"),
+                step("verify", "重新读取称呼条目", "ok", "已确认目标成员条目已清空。"),
                 step("audit", "记录管理员操作", "ok" if audit_ok else "warn", "审计记录已保存。" if audit_ok else "删除结果已确认，但审计记录写入失败。"),
             ),
             warnings=() if audit_ok else ("删除结果已确认，但本次管理员审计记录未能写入。",),

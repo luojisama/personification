@@ -290,8 +290,8 @@ def test_qq_group_adapter_routes_cover_reads_and_audited_writes(
                 "succeeded",
                 "ok",
                 data=[
-                    {"group_id": "20001", "user_id": "10001", "role": "owner"},
-                    {"group_id": "20001", "user_id": "10002", "role": "member"},
+                    {"group_id": "20001", "user_id": "10001", "role": "owner", "api_token": "secret"},
+                    {"group_id": "20001", "user_id": "10002", "role": "member", "raw": {"secret": "value"}},
                 ],
                 selected_path="get_group_member_list",
             )
@@ -348,9 +348,27 @@ def test_qq_group_adapter_routes_cover_reads_and_audited_writes(
     )
     assert members.status_code == 200, members.text
     assert members.json()["members"] == [
-        {"group_id": "20001", "user_id": "10002", "role": "member"}
+        {
+            "user_id": "10002",
+            "nickname": "",
+            "card": "",
+            "role": "member",
+            "title": "",
+            "level": "",
+        }
     ]
     assert members.json()["total"] == 2
+
+    bounded = client.get(
+        "/personification/api/qq/groups/20001/members",
+        params={"bot_id": "100", "limit": 500, "search": "10002"},
+    )
+    assert bounded.status_code == 200
+    assert bounded.json()["limit"] == 100
+    assert bounded.json()["members"][0]["user_id"] == "10002"
+    assert "group_id" not in bounded.json()["members"][0]
+    assert "raw" not in bounded.json()["members"][0]
+    assert bounded.json()["cache_hit"] is True
 
     notices = client.get(
         "/personification/api/qq/groups/20001/announcements",
@@ -378,7 +396,6 @@ def test_qq_group_adapter_routes_cover_reads_and_audited_writes(
     )
     assert title.status_code == 200, title.text
     assert title.json()["code"] == "qq_group_title_updated"
-
     notice = client.request(
         "DELETE",
         "/personification/api/qq/groups/20001/announcements/notice-1",
@@ -395,3 +412,50 @@ def test_qq_group_adapter_routes_cover_reads_and_audited_writes(
         "delete_group_notice",
         {"group_id": "20001", "notice_id": "notice-1"},
     ) in adapter.calls
+
+
+def test_group_member_cold_load_is_singleflight_and_projects_protocol_rows(monkeypatch) -> None:  # noqa: ANN001
+    from ._loader import load_personification_module
+
+    adapter_module = load_personification_module("plugin.personification.core.protocol_adapter")
+    qq_routes = load_personification_module("plugin.personification.webui.routes.qq_routes")
+    monkeypatch.setattr(qq_routes, "_GROUP_MEMBER_CACHE", {})
+    monkeypatch.setattr(qq_routes, "_GROUP_MEMBER_INFLIGHT", {})
+
+    class _Adapter:
+        calls = 0
+
+        async def get_group_member_list(self, **_kwargs):  # noqa: ANN003, ANN201
+            self.calls += 1
+            await asyncio.sleep(0)
+            return adapter_module.ProtocolResult(
+                "succeeded",
+                "ok",
+                data=[
+                    {
+                        "group_id": "20001",
+                        "user_id": "10001",
+                        "nickname": "昵称" * 100,
+                        "role": "unexpected",
+                        "credential": "must-not-leak",
+                    }
+                ],
+                selected_path="get_group_member_list",
+            )
+
+    adapter = _Adapter()
+
+    async def _scenario():  # noqa: ANN202
+        return await asyncio.gather(
+            qq_routes._load_group_members_singleflight(adapter, bot_id="100", group_id="20001"),
+            qq_routes._load_group_members_singleflight(adapter, bot_id="100", group_id="20001"),
+        )
+
+    first, second = asyncio.run(_scenario())
+
+    assert adapter.calls == 1
+    assert first == second
+    assert first[0]["role"] == "member"
+    assert len(first[0]["nickname"]) == 100
+    assert "group_id" not in first[0]
+    assert "credential" not in first[0]

@@ -653,6 +653,41 @@ class MemoryStore:
             )
         return out
 
+    def list_local_profile_summaries(
+        self,
+        group_id: str,
+        *,
+        snippet_chars: int = 240,
+    ) -> list[dict[str, Any]]:
+        """Return a lightweight catalog without loading complete profile documents.
+
+        The WebUI still performs its union with alias-only/recent members before
+        pagination, but the expensive column is clipped by SQLite rather than
+        materialized in Python for every member in a large group.
+        """
+
+        safe_group_id = str(group_id or "").strip()
+        if not safe_group_id:
+            return []
+        safe_chars = max(1, min(240, int(snippet_chars or 240)))
+        path = self.groups_dir / safe_group_id / "local_user_profiles.db"
+        if not path.exists():
+            return []
+        with _connect(path) as conn:
+            rows = conn.execute(
+                "SELECT user_id, substr(profile_text, 1, ?) AS profile_snippet, updated_at "
+                "FROM profiles ORDER BY updated_at DESC",
+                (safe_chars,),
+            ).fetchall()
+        return [
+            {
+                "user_id": str(row["user_id"] or ""),
+                "profile_text": str(row["profile_snippet"] or ""),
+                "updated_at": float(row["updated_at"] or 0),
+            }
+            for row in rows
+        ]
+
     def clear_all_profiles(self) -> dict[str, int]:
         counts = {"core_profiles": 0, "local_profiles": 0}
         with self.maintenance_lock:

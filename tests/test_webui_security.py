@@ -92,6 +92,52 @@ def test_get_does_not_require_csrf(_runtime) -> None:
     # 不设 CSRF header 的 GET 仍可通
     res = client.get("/personification/api/auth/me")
     assert res.status_code == 200
+    assert res.json()["identity_source"] == "SUPERUSER"
+
+
+def test_plugin_admin_login_reports_identity_source(_runtime) -> None:
+    admin_acl = load_personification_module("plugin.personification.core.admin_acl")
+    admin_acl.add_plugin_admin("30003")
+    sent: list[dict] = []
+
+    class _Bot:
+        async def call_api(self, _name: str, **kwargs):
+            sent.append(kwargs)
+            return {"message_id": 1}
+
+    _runtime.app_module.get_runtime_context().get_bots = lambda: {"1": _Bot()}
+    client = _client(_runtime)
+    try:
+        requested = client.post("/personification/api/auth/login", json={"qq": "30003"})
+        assert requested.status_code == 200
+        code = re.search(r"\b(\d{6})\b", str(sent[-1].get("message", ""))).group(1)
+        verified = client.post(
+            "/personification/api/auth/verify",
+            json={"qq": "30003", "code": code, "device_label": "plugin-admin"},
+        )
+        assert verified.status_code == 200
+        assert client.get("/personification/api/auth/me").json()["identity_source"] == "plugin_admin"
+    finally:
+        admin_acl.remove_plugin_admin("30003")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/personification/api/v2/personas",
+        "/personification/api/v2/plugin-knowledge-management/list",
+        "/personification/api/v2/logs",
+        "/personification/api/v2/config/meta",
+        "/personification/api/v2/health",
+    ],
+)
+def test_business_v2_endpoints_are_not_public(_runtime, path: str) -> None:
+    assert _client(_runtime).get(path).status_code == 401
+
+
+def test_non_admin_cannot_start_login(_runtime) -> None:
+    response = _client(_runtime).post("/personification/api/auth/login", json={"qq": "39999"})
+    assert response.status_code == 403
 
 
 # ---- 验证码失败 5 次废弃 ----

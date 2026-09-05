@@ -300,8 +300,14 @@ def build_auth_router(*, runtime) -> APIRouter:
         return VerifyResponse(success=True, message="登录成功")
 
     @router.get("/me")
-    async def me(admin: AdminIdentity = Depends(require_admin)) -> AdminIdentity:
-        return admin
+    async def me(admin: AdminIdentity = Depends(require_admin)) -> dict[str, str]:
+        source = "SUPERUSER" if str(admin.qq) in {str(item) for item in (runtime.superusers or set())} else "plugin_admin"
+        return {
+            "qq": admin.qq,
+            "device_id": admin.device_id,
+            "label": admin.label,
+            "identity_source": source,
+        }
 
     @router.post("/logout")
     async def logout(response: Response, admin: AdminIdentity = Depends(require_admin)) -> dict:

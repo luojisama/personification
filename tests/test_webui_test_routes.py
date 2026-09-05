@@ -847,6 +847,19 @@ def test_persona_prompt_inline_system_prompt(_runtime_context) -> None:
     assert body["diagnostic"]["code"] == "persona_prompt_inline_loaded"
 
 
+def test_persona_prompt_rejects_oversized_inline_system_prompt(_runtime_context) -> None:
+    _runtime_context.plugin_config.personification_system_prompt = "甲" * (256 * 1024)
+    _runtime_context.plugin_config.personification_prompt_path = ""
+    _runtime_context.plugin_config.personification_system_path = ""
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+
+    res = client.get("/personification/api/test/persona-prompt")
+
+    assert res.status_code == 413
+    assert res.json()["detail"]["code"] == "persona_prompt_too_large"
+
+
 def test_persona_prompt_reads_specified_path(_runtime_context, tmp_path) -> None:
     f = tmp_path / "persona.txt"
     f.write_text("自定义人设内容", encoding="utf-8")

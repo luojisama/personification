@@ -9,6 +9,8 @@ from typing import Any
 
 
 class PluginKnowledgeStore:
+    WEBUI_ENTRY_MAX_BYTES = 2 * 1024 * 1024
+    WEBUI_SNAPSHOT_MAX_BYTES = 16 * 1024 * 1024
     def __init__(self, data_dir: Path) -> None:
         self.root = Path(data_dir) / "plugin_knowledge"
         self.local_dir = self.root / "local"
@@ -41,6 +43,107 @@ class PluginKnowledgeStore:
         if default is None:
             return data
         return data if isinstance(data, type(default)) else default
+
+    def _inspect_json_path_nolock(
+        self,
+        path: Path,
+        *,
+        max_bytes: int,
+        include_data: bool,
+    ) -> dict[str, Any]:
+        """Inspect an admin-facing JSON file without collapsing error states."""
+
+        try:
+            resolved_root = self.root.resolve(strict=True)
+            resolved = path.resolve(strict=True)
+        except FileNotFoundError:
+            return {"status": "missing", "size_bytes": 0, "data": None}
+        except OSError:
+            return {"status": "unavailable", "size_bytes": 0, "data": None}
+        try:
+            if not resolved.is_relative_to(resolved_root) or not resolved.is_file():
+                return {"status": "unavailable", "size_bytes": 0, "data": None}
+            size_bytes = int(resolved.stat().st_size)
+            if size_bytes > max(1, int(max_bytes)):
+                return {"status": "too_large", "size_bytes": size_bytes, "data": None}
+            if not include_data:
+                return {"status": "ready", "size_bytes": size_bytes, "data": None}
+            with resolved.open("r", encoding="utf-8") as source:
+                data = json.load(source)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return {"status": "corrupt", "size_bytes": size_bytes, "data": None}
+        except OSError:
+            return {"status": "unavailable", "size_bytes": 0, "data": None}
+        if not isinstance(data, dict):
+            return {"status": "corrupt", "size_bytes": size_bytes, "data": None}
+        return {"status": "ready", "size_bytes": size_bytes, "data": data}
+
+    def inspect_index_sync(self) -> dict[str, Any]:
+        with self._sync_lock:
+            return self._inspect_json_path_nolock(
+                self.index_path,
+                max_bytes=self.WEBUI_ENTRY_MAX_BYTES,
+                include_data=True,
+            )
+
+    async def inspect_index(self) -> dict[str, Any]:
+        async with self._async_lock:
+            return await asyncio.to_thread(self.inspect_index_sync)
+
+    def inspect_build_state_sync(self) -> dict[str, Any]:
+        with self._sync_lock:
+            return self._inspect_json_path_nolock(
+                self.build_state_path,
+                max_bytes=self.WEBUI_ENTRY_MAX_BYTES,
+                include_data=True,
+            )
+
+    async def inspect_build_state(self) -> dict[str, Any]:
+        async with self._async_lock:
+            return await asyncio.to_thread(self.inspect_build_state_sync)
+
+    def inspect_plugin_assets_sync(self, plugin_name: str) -> dict[str, Any]:
+        normalized = str(plugin_name or "").strip()
+        if not normalized or Path(normalized).name != normalized:
+            return {
+                "entry": {"status": "missing", "size_bytes": 0, "data": None},
+                "runtime": {"status": "missing", "size_bytes": 0, "data": None},
+                "source": {"status": "missing", "size_bytes": 0, "data": None},
+            }
+        with self._sync_lock:
+            index_result = self._inspect_json_path_nolock(
+                self.index_path,
+                max_bytes=self.WEBUI_ENTRY_MAX_BYTES,
+                include_data=True,
+            )
+            index = index_result.get("data") if index_result.get("status") == "ready" else None
+            plugins = index.get("plugins", {}) if isinstance(index, dict) else {}
+            meta = plugins.get(normalized) if isinstance(plugins, dict) else None
+            file_rel = str(meta.get("file", "") or "") if isinstance(meta, dict) else ""
+            entry = (
+                self._inspect_json_path_nolock(
+                    self.root / file_rel,
+                    max_bytes=self.WEBUI_ENTRY_MAX_BYTES,
+                    include_data=True,
+                )
+                if file_rel
+                else {"status": "missing", "size_bytes": 0, "data": None}
+            )
+            runtime = self._inspect_json_path_nolock(
+                self.runtime_dir / f"{normalized}.json",
+                max_bytes=self.WEBUI_SNAPSHOT_MAX_BYTES,
+                include_data=False,
+            )
+            source = self._inspect_json_path_nolock(
+                self.source_dir / f"{normalized}.json",
+                max_bytes=self.WEBUI_SNAPSHOT_MAX_BYTES,
+                include_data=False,
+            )
+            return {"entry": entry, "runtime": runtime, "source": source, "meta": dict(meta or {})}
+
+    async def inspect_plugin_assets(self, plugin_name: str) -> dict[str, Any]:
+        async with self._async_lock:
+            return await asyncio.to_thread(self.inspect_plugin_assets_sync, plugin_name)
 
     def _write_json_nolock(self, path: Path, data: Any) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -135,6 +135,23 @@ def test_profile_delete_and_clear_stay_within_profile_scope(profile_store) -> No
     assert not (empty_group / "local_user_profiles.db").exists()
 
 
+def test_local_profile_summary_catalog_clips_text_in_sql(profile_store) -> None:
+    _memory_store, store = profile_store
+    store.upsert_local_profile(
+        group_id="g1",
+        user_id="u-large",
+        profile_text="甲" * 2_000,
+        profile_json={"private_large_field": "乙" * 2_000},
+    )
+
+    rows = store.list_local_profile_summaries("g1")
+
+    assert len(rows) == 1
+    assert rows[0]["user_id"] == "u-large"
+    assert rows[0]["profile_text"] == "甲" * 240
+    assert "profile_json" not in rows[0]
+
+
 @pytest.mark.parametrize(
     ("group_id", "user_id", "message"),
     [("", "u1", "group_id is required"), ("g1", "  ", "user_id is required")],

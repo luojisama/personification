@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import time
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from starlette.concurrency import run_in_threadpool
 
 from ...core.agent_bridge import (
     TEXT_AGENT_TOOL_PROFILE_QZONE_READ_ONLY,
@@ -36,6 +38,26 @@ _SAFE_PROVIDER_ERROR_CODES = {
     "provider_timeout",
     "providers_exhausted",
 }
+
+
+def _read_text_file_bounded(path: Any, max_bytes: int) -> dict[str, Any]:
+    """Open, size-check, and read one file through the same descriptor."""
+
+    try:
+        with path.open("rb") as source:
+            size = int(os.fstat(source.fileno()).st_size)
+            payload = source.read(max_bytes + 1)
+    except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+        return {"status": "missing", "size": 0, "content": ""}
+    if size > max_bytes or len(payload) > max_bytes:
+        return {"status": "too_large", "size": max(size, len(payload)), "content": ""}
+    return {
+        "status": "ready",
+        "size": len(payload),
+        "content": payload.decode("utf-8", errors="replace"),
+    }
+
+
 _DIAGNOSTIC_FIELDS = (
     "ok",
     "code",
@@ -1041,6 +1063,21 @@ def build_test_router(*, runtime) -> APIRouter:
         from ...core.prompt_loader import _resolve_candidate_path
 
         def _inline(text: str, src: str) -> dict:
+            size = len(text.encode("utf-8"))
+            if size > _PROMPT_PREVIEW_MAX_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=diagnostic(
+                        ok=False,
+                        code="persona_prompt_too_large",
+                        phase="inline_read",
+                        title="内联人设 prompt 过大",
+                        message="内联 system_prompt 超过 WebUI prompt 预览上限。",
+                        details=(detail("预览上限", _PROMPT_PREVIEW_MAX_BYTES),),
+                        steps=(step("read_prompt", "读取内联人设 prompt", "error", "正文超过安全上限，未返回。"),),
+                        retryable=False,
+                    ),
+                )
             return _persona_payload(
                 {
                     "exists": True,
@@ -1048,7 +1085,7 @@ def build_test_router(*, runtime) -> APIRouter:
                     "source": src,
                     "resolved_path": "",
                     "content": text,
-                    "size": len(text.encode("utf-8")),
+                    "size": size,
                 },
                 ok=True,
                 code="persona_prompt_inline_loaded",
@@ -1056,12 +1093,6 @@ def build_test_router(*, runtime) -> APIRouter:
                 title="内联人设 prompt 已载入",
                 message="已从当前运行时配置读取内联 system_prompt。",
             )
-
-        def _safe_is_file(p: Any) -> bool:
-            try:
-                return p.is_file()
-            except OSError:  # 文件名过长等 → 视为非文件
-                return False
 
         requested = str(path or "").strip().strip('"').strip("'")
         source = "指定路径"
@@ -1099,10 +1130,8 @@ def build_test_router(*, runtime) -> APIRouter:
 
         try:
             resolved = _resolve_candidate_path(requested)
-            is_file = _safe_is_file(resolved)
         except OSError:  # 路径过长/非法 → 当作"不是文件"
             resolved = None
-            is_file = False
         except Exception as exc:
             report = exception_diagnostic(
                 exc,
@@ -1117,29 +1146,34 @@ def build_test_router(*, runtime) -> APIRouter:
                 step("resolve_source", "解析人设 prompt 来源", "error", "路径解析异常，未读取文件。").to_dict()
             ]
             raise HTTPException(status_code=400, detail=report) from exc
-        if not is_file:
-            if inline_fallback:
-                return _inline(inline_fallback, "system_prompt（内联文本）")
-            return _persona_payload(
-                {
-                    "exists": False,
-                    "is_file": False,
-                    "source": source,
-                    "resolved_path": str(resolved.absolute()) if resolved is not None else requested,
-                    "content": "",
-                    "size": 0,
-                },
-                ok=False,
-                code="persona_prompt_path_not_found",
-                phase="path_lookup",
-                title="人设 prompt 文件不存在",
-                message="指定路径没有对应的可读文件。",
-                suggestion="检查服务器路径，或留空以读取当前生效配置。",
-                retryable=False,
-            )
         try:
-            size = resolved.stat().st_size
-            if size > _PROMPT_PREVIEW_MAX_BYTES:
+            read_result = (
+                await run_in_threadpool(_read_text_file_bounded, resolved, _PROMPT_PREVIEW_MAX_BYTES)
+                if resolved is not None
+                else {"status": "missing", "size": 0, "content": ""}
+            )
+            if read_result["status"] == "missing":
+                if inline_fallback:
+                    return _inline(inline_fallback, "system_prompt（内联文本）")
+                return _persona_payload(
+                    {
+                        "exists": False,
+                        "is_file": False,
+                        "source": source,
+                        "resolved_path": str(resolved.absolute()) if resolved is not None else requested,
+                        "content": "",
+                        "size": 0,
+                    },
+                    ok=False,
+                    code="persona_prompt_path_not_found",
+                    phase="path_lookup",
+                    title="人设 prompt 文件不存在",
+                    message="指定路径没有对应的可读文件。",
+                    suggestion="检查服务器路径，或留空以读取当前生效配置。",
+                    retryable=False,
+                )
+            size = int(read_result["size"])
+            if read_result["status"] == "too_large":
                 raise HTTPException(
                     status_code=413,
                     detail=diagnostic(
@@ -1161,7 +1195,7 @@ def build_test_router(*, runtime) -> APIRouter:
                         retryable=False,
                     ),
                 )
-            content = resolved.read_text(encoding="utf-8", errors="replace")
+            content = str(read_result["content"])
         except HTTPException:
             raise
         except Exception as exc:

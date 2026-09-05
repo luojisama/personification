@@ -176,8 +176,15 @@ def test_plugin_knowledge_routes_expose_full_input_coverage(tmp_path: Path) -> N
     body = detail.json()
     assert body["source_coverage"]["full_input"] is True
     assert body["source_coverage"]["source_chunk_count"] == 3
-    assert body["source_snapshot"]["source_truncated"] is False
-    assert body["diagnostic"]["code"] == "plugin_knowledge_detail_loaded"
+    assert "source_snapshot" not in body
+    assert "runtime_snapshot" not in body
+    assert body["snapshot_status"]["source"]["status"] == "ready"
+    assert body["diagnostic"]["code"] == "plugin_knowledge_detail_partial"
+
+    section = client.get("/api/plugin-knowledge/detail/demo/sections/features?page=1&page_size=20")
+    assert section.status_code == 200, section.text
+    assert section.json()["total"] == 1
+    assert section.json()["items"][0]["key"] == "chat"
 
 
 def test_plugin_knowledge_search_does_not_split_english_words_into_bigrams(tmp_path: Path) -> None:

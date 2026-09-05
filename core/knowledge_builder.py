@@ -7,6 +7,7 @@ from typing import Any
 import nonebot
 
 from .knowledge_store import PluginKnowledgeStore
+from .sensitive_data import sanitize_text
 from .plugin_inspector import (
     analyze_plugin_with_llm,
     compute_source_hash,
@@ -40,8 +41,8 @@ def _extract_failure_details(exc: Exception) -> dict[str, Any]:
     return {
         "phase": str(getattr(exc, "phase", "") or "unknown"),
         "error_type": exc.__class__.__name__,
-        "error_message": str(exc),
-        "raw_preview": str(getattr(exc, "raw_preview", "") or "").strip()[:600],
+        "error_message": sanitize_text(exc, limit=600),
+        "raw_preview": sanitize_text(getattr(exc, "raw_preview", "") or "", limit=600).strip(),
         "failed_batch_index": int(getattr(exc, "failed_batch_index", 0) or 0),
         "failed_batch_total": int(getattr(exc, "failed_batch_total", 0) or 0),
     }
@@ -199,9 +200,12 @@ async def maybe_start_plugin_knowledge_builder(
     set_knowledge_build_task: Any,
     trigger: str,
     force: bool = False,
+    allow_one_shot_disabled: bool = False,
 ) -> dict[str, Any]:
-    enabled = bool(getattr(plugin_config, "personification_plugin_knowledge_build_enabled", False))
-    if not enabled:
+    configured_enabled = bool(
+        getattr(plugin_config, "personification_plugin_knowledge_build_enabled", False)
+    )
+    if not configured_enabled and not allow_one_shot_disabled:
         if knowledge_store is not None:
             await _save_build_control_state(
                 knowledge_store,
@@ -221,7 +225,7 @@ async def maybe_start_plugin_knowledge_builder(
         logger.warning("[plugin_knowledge] tool_caller 不可用，跳过构建检查")
         await _save_build_control_state(
             knowledge_store,
-            enabled=True,
+            enabled=configured_enabled,
             trigger=trigger,
             result="tool_caller_unavailable",
             action="skip",
@@ -238,7 +242,7 @@ async def maybe_start_plugin_knowledge_builder(
     if current_task is not None and not current_task.done():
         await _save_build_control_state(
             knowledge_store,
-            enabled=True,
+            enabled=configured_enabled,
             trigger=trigger,
             result="already_running",
             action="skip",
@@ -256,7 +260,7 @@ async def maybe_start_plugin_knowledge_builder(
         if not inspection.get("needs_build"):
             await _save_build_control_state(
                 knowledge_store,
-                enabled=True,
+                enabled=configured_enabled,
                 trigger=trigger,
                 result="healthy_skip",
                 action="skip",
@@ -275,7 +279,7 @@ async def maybe_start_plugin_knowledge_builder(
         set_knowledge_build_task(task)
     await _save_build_control_state(
         knowledge_store,
-        enabled=True,
+        enabled=configured_enabled,
         trigger=trigger,
         result="started",
         action="start",
@@ -291,12 +295,14 @@ async def build_plugin_knowledge_async(
     knowledge_store: PluginKnowledgeStore,
     logger: Any,
 ) -> None:
+    build_state: dict[str, Any] = {}
+    state_plugins: dict[str, Any] = {}
+    active_plugin_name = ""
     try:
         if tool_caller is None:
             logger.warning("[knowledge_builder] tool_caller 不可用，跳过知识库构建")
             return
 
-        plugins = list(nonebot.get_loaded_plugins() or [])
         build_state = await knowledge_store.load_build_state()
         state_plugins = build_state.get("plugins", {})
         if not isinstance(state_plugins, dict):
@@ -304,6 +310,7 @@ async def build_plugin_knowledge_async(
             build_state["plugins"] = state_plugins
         build_state.setdefault("current", {})
         data_dir = get_personification_data_dir(plugin_config)
+        plugins = list(nonebot.get_loaded_plugins() or [])
 
         for plugin in plugins:
             plugin_name = ""
@@ -322,7 +329,6 @@ async def build_plugin_knowledge_async(
                     continue
                 if plugin_name == "personification" or module_name.endswith("personification"):
                     continue
-
                 plugin_root = get_plugin_root(plugin)
                 if plugin_root is None:
                     logger.warning(f"[knowledge_builder] 无法定位插件根目录: {plugin_name}")
@@ -347,6 +353,7 @@ async def build_plugin_knowledge_async(
                 if isinstance(previous, dict) and previous.get("status") == "failed" and retry_count >= 3:
                     continue
 
+                active_plugin_name = plugin_name
                 source_file_count = len(list(source_snapshot.get("files") or []))
                 source_chunk_count = len(list(source_snapshot.get("chunks") or []))
                 source_chars = int(source_snapshot.get("source_chars", 0) or 0)
@@ -460,6 +467,7 @@ async def build_plugin_knowledge_async(
                 }
                 build_state["current"] = {}
                 await knowledge_store.save_build_state(build_state)
+                active_plugin_name = ""
                 await asyncio.sleep(2.0)
             except Exception as exc:
                 previous = state_plugins.get(plugin_name, {}) if isinstance(state_plugins, dict) else {}
@@ -492,12 +500,47 @@ async def build_plugin_knowledge_async(
                 }
                 build_state["current"] = {}
                 await knowledge_store.save_build_state(build_state)
-                logger.warning(f"[knowledge_builder] 插件处理失败: {getattr(plugin, 'name', '?')} error={exc}")
+                active_plugin_name = ""
+                logger.warning(
+                    f"[knowledge_builder] 插件处理失败: {getattr(plugin, 'name', '?')} "
+                    f"error={sanitize_text(exc, limit=600)}"
+                )
 
         build_state["current"] = {}
+        await knowledge_store.save_build_state(build_state)
         logger.info("[knowledge_builder] 知识库构建完成")
     except Exception as exc:
-        logger.warning(f"[knowledge_builder] 未预期异常: {exc}")
+        logger.warning(f"[knowledge_builder] 未预期异常: {sanitize_text(exc, limit=600)}")
+        failure = _extract_failure_details(exc)
+        current = build_state.get("current", {}) if isinstance(build_state, dict) else {}
+        current_name = str((current or {}).get("plugin_name", "") or active_plugin_name).strip()
+        if current_name and isinstance(state_plugins, dict):
+            previous = state_plugins.get(current_name, {})
+            if not isinstance(previous, dict):
+                previous = {}
+            updated_at = _now_iso()
+            state_plugins[current_name] = {
+                **previous,
+                "status": "failed",
+                "phase": failure["phase"],
+                "error": failure["error_message"],
+                "error_type": failure["error_type"],
+                "error_message": failure["error_message"],
+                "raw_preview": failure["raw_preview"],
+                "retry_count": int(previous.get("retry_count", 0) or 0) + 1,
+                "updated_at": updated_at,
+                "recent_errors": _append_recent_error(previous, {**failure, "updated_at": updated_at}),
+            }
+        if isinstance(build_state, dict) and build_state:
+            build_state["plugins"] = state_plugins
+            build_state["current"] = {}
+            try:
+                await knowledge_store.save_build_state(build_state)
+            except Exception as save_exc:
+                logger.warning(
+                    f"[knowledge_builder] 异常状态保存失败: {sanitize_text(save_exc, limit=600)}"
+                )
+        raise
 
 
 def start_knowledge_builder(

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
+import sqlite3
 import time
 import uuid
 from typing import Any, NoReturn
@@ -32,6 +34,13 @@ _SELF_LOG_SOURCE_KINDS: frozenset[str] = frozenset({
 _SELF_LOG_MEMORY_TYPES: frozenset[str] = frozenset({
     "episodic",  # bot 视角的事件日志，绝大多数是它说过的话
 })
+
+_GRAPH_ENTITY_NODE_LIMIT = 300
+_GRAPH_USER_NODE_LIMIT = 200
+_GRAPH_EDGE_LIMIT = 1_000
+_PALACE_ZONE_LIMIT = 128
+_PALACE_AGGREGATE_ROW_LIMIT = 512
+_PALACE_COMPATIBILITY_ROW_LIMIT = 4_096
 
 _MEMORY_TYPE_LABELS: dict[str, str] = {
     "semantic": "长期语义",
@@ -725,8 +734,7 @@ def build_memory_router(*, runtime) -> APIRouter:
         decorated_related = [_decorate_memory_item(r) for r in related if isinstance(r, dict)]
         return {"memory_id": memory_id, "item": _decorate_memory_item(item), "related": decorated_related}
 
-    @router.get("/graph")
-    async def memory_graph(
+    def _memory_graph_sync(
         group_id: str = Query(default=""),
         limit: int = Query(default=80, ge=10, le=300),
         min_salience: float = Query(default=0.0, ge=0.0, le=1.0),
@@ -805,8 +813,10 @@ def build_memory_router(*, runtime) -> APIRouter:
                         SELECT entity, memory_id, entity_type, weight
                         FROM memory_entities
                         WHERE memory_id IN ({placeholder})
+                        ORDER BY weight DESC
+                        LIMIT ?
                         """,
-                        tuple(memory_ids),
+                        (*memory_ids, _GRAPH_EDGE_LIMIT),
                     ).fetchall()
                     for row in ent_rows:
                         ent = str(row["entity"] or "").strip()
@@ -839,8 +849,10 @@ def build_memory_router(*, runtime) -> APIRouter:
                         SELECT source_memory_id, target_ref, relation_type, weight
                         FROM memory_relations
                         WHERE source_memory_id IN ({placeholder})
+                        ORDER BY weight DESC
+                        LIMIT ?
                         """,
-                        tuple(memory_ids),
+                        (*memory_ids, _GRAPH_EDGE_LIMIT),
                     ).fetchall()
                     for row in rel_rows:
                         src_mid = f"m:{row['source_memory_id']}"
@@ -936,16 +948,49 @@ def build_memory_router(*, runtime) -> APIRouter:
             except Exception:
                 pass
 
+        memory_nodes = [node for node in nodes.values() if node.get("kind") == "memory"][:300]
+        entity_nodes = [node for node in nodes.values() if node.get("kind") == "entity"][:_GRAPH_ENTITY_NODE_LIMIT]
+        user_nodes = [node for node in nodes.values() if node.get("kind") == "user"][:_GRAPH_USER_NODE_LIMIT]
+        bounded_nodes = memory_nodes + entity_nodes + user_nodes
+        allowed_node_ids = {str(node.get("id") or "") for node in bounded_nodes}
+        bounded_edges = [
+            edge
+            for edge in edges
+            if str(edge.get("src") or "") in allowed_node_ids
+            and str(edge.get("dst") or "") in allowed_node_ids
+        ][:_GRAPH_EDGE_LIMIT]
         return {
-            "nodes": list(nodes.values()),
-            "edges": edges,
+            "nodes": bounded_nodes,
+            "edges": bounded_edges,
             "available": True,
             "group_id": group_id,
             "limit": limit,
+            "limits": {
+                "memory_nodes": 300,
+                "entity_nodes": _GRAPH_ENTITY_NODE_LIMIT,
+                "user_nodes": _GRAPH_USER_NODE_LIMIT,
+                "edges": _GRAPH_EDGE_LIMIT,
+            },
+            "truncated": len(bounded_nodes) < len(nodes) or len(bounded_edges) < len(edges),
+            "diagnostic_code": "memory_graph_bounded",
         }
 
-    @router.get("/palace-zones")
-    async def palace_zones(_: AdminIdentity = Depends(require_admin)) -> dict:
+    @router.get("/graph")
+    async def memory_graph(
+        group_id: str = Query(default=""),
+        limit: int = Query(default=80, ge=10, le=300),
+        min_salience: float = Query(default=0.0, ge=0.0, le=1.0),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        return await asyncio.to_thread(
+            _memory_graph_sync,
+            group_id=group_id,
+            limit=limit,
+            min_salience=min_salience,
+            _=_,
+        )
+
+    def _palace_zones_sync(_: AdminIdentity) -> dict:
         store = _memory_store(runtime)
         if store is None:
             return {
@@ -977,15 +1022,59 @@ def build_memory_router(*, runtime) -> APIRouter:
             }
         try:
             with _connect(db_path) as conn:
-                rows = conn.execute(
-                    """
-                    SELECT palace_zone, memory_type, payload, access_count,
-                           last_accessed_at, updated_at
-                    FROM memory_items
-                    WHERE palace_zone IS NOT NULL AND palace_zone != ''
-                    ORDER BY palace_zone ASC
-                    """
-                ).fetchall()
+                try:
+                    rows = conn.execute(
+                        """
+                        WITH ranked_zones AS (
+                            SELECT palace_zone, MAX(COALESCE(updated_at, 0)) AS latest
+                            FROM memory_items
+                            WHERE palace_zone IS NOT NULL AND palace_zone != ''
+                            GROUP BY palace_zone
+                            ORDER BY latest DESC
+                            LIMIT ?
+                        )
+                        SELECT items.palace_zone,
+                               COALESCE(NULLIF(items.memory_type, ''), 'unavailable') AS memory_type,
+                               COALESCE(NULLIF(json_extract(items.payload, '$.tier'), ''), 'unavailable') AS tier,
+                               COUNT(*) AS item_count,
+                               SUM(CASE WHEN items.access_count > 0 THEN items.access_count ELSE 0 END) AS total_access_count,
+                               MAX(COALESCE(items.last_accessed_at, 0)) AS last_accessed_at,
+                               MAX(COALESCE(items.updated_at, 0)) AS updated_at
+                        FROM memory_items AS items
+                        INNER JOIN ranked_zones ON ranked_zones.palace_zone = items.palace_zone
+                        GROUP BY items.palace_zone, memory_type, tier
+                        ORDER BY MAX(ranked_zones.latest) DESC, items.palace_zone ASC
+                        LIMIT ?
+                        """,
+                        (_PALACE_ZONE_LIMIT, _PALACE_AGGREGATE_ROW_LIMIT),
+                    ).fetchall()
+                    aggregation_mode = "sqlite_json"
+                except sqlite3.OperationalError as exc:
+                    if "no such function: json_extract" not in str(exc).lower():
+                        raise
+                    # Older SQLite builds may omit JSON1. Keep the compatibility
+                    # path bounded and in FastAPI's sync-worker thread.
+                    rows = conn.execute(
+                        """
+                        WITH ranked_zones AS (
+                            SELECT palace_zone, MAX(COALESCE(updated_at, 0)) AS latest
+                            FROM memory_items
+                            WHERE palace_zone IS NOT NULL AND palace_zone != ''
+                            GROUP BY palace_zone
+                            ORDER BY latest DESC
+                            LIMIT ?
+                        )
+                        SELECT items.palace_zone, items.memory_type,
+                               substr(COALESCE(items.payload, ''), 1, 4096) AS payload,
+                               items.access_count, items.last_accessed_at, items.updated_at
+                        FROM memory_items AS items
+                        INNER JOIN ranked_zones ON ranked_zones.palace_zone = items.palace_zone
+                        ORDER BY items.updated_at DESC
+                        LIMIT ?
+                        """,
+                        (_PALACE_ZONE_LIMIT, _PALACE_COMPATIBILITY_ROW_LIMIT),
+                    ).fetchall()
+                    aggregation_mode = "bounded_compatibility"
         except Exception as exc:
             report = _exception_report(
                 exc,
@@ -1021,16 +1110,18 @@ def build_memory_router(*, runtime) -> APIRouter:
                     "last_updated_at": 0.0,
                 },
             )
-            aggregate["item_count"] += 1
-            tier = _palace_tier_from_payload(row["payload"])
+            item_count = _safe_nonnegative_int(row["item_count"]) if aggregation_mode == "sqlite_json" else 1
+            aggregate["item_count"] += item_count
+            tier = str(row["tier"] or "unavailable") if aggregation_mode == "sqlite_json" else _palace_tier_from_payload(row["payload"])
             aggregate["tier_counts"][tier] = _safe_nonnegative_int(
                 aggregate["tier_counts"].get(tier)
-            ) + 1
+            ) + item_count
             memory_type = str(row["memory_type"] or "").strip() or "unavailable"
             aggregate["memory_type_counts"][memory_type] = _safe_nonnegative_int(
                 aggregate["memory_type_counts"].get(memory_type)
-            ) + 1
-            aggregate["total_access_count"] += _safe_nonnegative_int(row["access_count"])
+            ) + item_count
+            access_value = row["total_access_count"] if aggregation_mode == "sqlite_json" else row["access_count"]
+            aggregate["total_access_count"] += _safe_nonnegative_int(access_value)
             aggregate["last_accessed_at"] = max(
                 _safe_timestamp(aggregate["last_accessed_at"]),
                 _safe_timestamp(row["last_accessed_at"]),
@@ -1039,13 +1130,36 @@ def build_memory_router(*, runtime) -> APIRouter:
                 _safe_timestamp(aggregate["last_updated_at"]),
                 _safe_timestamp(row["updated_at"]),
             )
-        zones = sorted(aggregates)
+        zones = sorted(aggregates)[:_PALACE_ZONE_LIMIT]
+        row_limit = (
+            _PALACE_AGGREGATE_ROW_LIMIT
+            if aggregation_mode == "sqlite_json"
+            else _PALACE_COMPATIBILITY_ROW_LIMIT
+        )
+        truncated = len(rows) >= row_limit or len(aggregates) > len(zones)
         return {
             "zones": zones,
             "zone_details": [_palace_zone_detail(zone_id, aggregates[zone_id]) for zone_id in zones],
             "schema_version": 2,
             "available": True,
-            "diagnostic_code": "memory_zone_aggregation_complete",
+            "aggregation_mode": aggregation_mode,
+            "limits": {
+                "zones": _PALACE_ZONE_LIMIT,
+                "aggregate_rows": row_limit,
+                "payload_chars": 0 if aggregation_mode == "sqlite_json" else 4096,
+            },
+            "truncated": truncated,
+            "diagnostic_code": (
+                "memory_zone_aggregation_bounded"
+                if truncated
+                else "memory_zone_aggregation_complete"
+                if aggregation_mode == "sqlite_json"
+                else "memory_zone_aggregation_bounded_compatibility"
+            ),
         }
+
+    @router.get("/palace-zones")
+    async def palace_zones(_: AdminIdentity = Depends(require_admin)) -> dict:
+        return await asyncio.to_thread(_palace_zones_sync, _)
 
     return router

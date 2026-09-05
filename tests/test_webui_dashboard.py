@@ -397,6 +397,7 @@ def test_groups_list_and_detail(_runtime_with_data) -> None:
     )
     assert alias_res.status_code == 200, alias_res.text
     assert alias_res.json()["entry"]["aliases"] == ["阿尔法", "alpha哥"]
+    assert "aliases" not in alias_res.json()
     alias_only_res = client.put(
         "/personification/api/groups/g1/aliases/u_beta",
         json={"aliases": ["小贝"]},
@@ -406,10 +407,16 @@ def test_groups_list_and_detail(_runtime_with_data) -> None:
     res2 = client.get("/personification/api/groups/g1/personas")
     assert res2.status_code == 200
     detail = res2.json()
+    assert detail["page"] == 1
+    assert detail["page_size"] == 20
+    assert detail["total"] >= 2
+    assert "group_aliases" not in detail
     assert any(p["user_id"] == "u_alpha" for p in detail["profiles"])
     assert any(p["user_id"] == "u_beta" for p in detail["profiles"])
     assert detail["group_favorability"]["score"] == 88.0
     member = next(p for p in detail["profiles"] if p["user_id"] == "u_alpha")
+    assert "profile_text" not in member
+    assert len(member["snippet"]) <= 240
     assert member["favorability"]["score"] == 66.0
     assert member["aliases"] == ["阿尔法", "alpha哥"]
     assert member["alias_note"] == "常用外号"
@@ -419,9 +426,16 @@ def test_groups_list_and_detail(_runtime_with_data) -> None:
     beta = next(p for p in detail["profiles"] if p["user_id"] == "u_beta")
     assert beta["aliases"] == ["小贝"]
 
+    paged = client.get("/personification/api/groups/g1/personas", params={"page": 2, "page_size": 1})
+    assert paged.status_code == 200
+    assert paged.json()["page"] == 2
+    assert len(paged.json()["profiles"]) == 1
+
     aliases = client.get("/personification/api/groups/g1/aliases")
     assert aliases.status_code == 200
     assert {entry["user_id"] for entry in aliases.json()["aliases"]} >= {"u_alpha", "u_beta"}
+    assert aliases.json()["page_size"] == 20
+    assert aliases.json()["total"] >= 2
 
     alias_mod = load_personification_module("plugin.personification.core.group_member_aliases")
     block = alias_mod.render_group_alias_context("g1", user_id="u_alpha", known_names={"u_alpha": ["Alpha"]})

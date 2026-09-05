@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from typing import Any
 
@@ -18,6 +19,52 @@ from ...core.group_directory import discover_group_union
 from ...core.operation_diagnostics import OperationDetail, detail, diagnostic, step
 from ...core.protocol_adapter import ProtocolResult, get_protocol_adapter
 from ..deps import AdminIdentity, require_admin
+
+
+_GROUP_MEMBER_CACHE_TTL_SECONDS = 60.0
+_GROUP_MEMBER_CACHE_MAX_ENTRIES = 32
+_GROUP_MEMBER_CACHE: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
+_GROUP_MEMBER_INFLIGHT: dict[tuple[str, str], asyncio.Task[list[dict[str, Any]]]] = {}
+
+
+def _project_group_member(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    user_id = str(value.get("user_id", "") or "").strip()[:32]
+    if not user_id:
+        return None
+    role = str(value.get("role", "") or "member").strip().lower()
+    if role not in {"member", "admin", "owner"}:
+        role = "member"
+    return {
+        "user_id": user_id,
+        "nickname": str(value.get("nickname", "") or "").strip()[:100],
+        "card": str(value.get("card", "") or "").strip()[:100],
+        "role": role,
+        "title": str(value.get("title", value.get("special_title", "")) or "").strip()[:100],
+        "level": str(value.get("level", "") or "").strip()[:40],
+    }
+
+
+def _cached_group_members(bot_id: str, group_id: str) -> list[dict[str, Any]] | None:
+    now = time.monotonic()
+    expired = [key for key, (expires_at, _rows) in _GROUP_MEMBER_CACHE.items() if expires_at <= now]
+    for key in expired:
+        _GROUP_MEMBER_CACHE.pop(key, None)
+    cached = _GROUP_MEMBER_CACHE.get((bot_id, group_id))
+    if cached is None:
+        return None
+    return list(cached[1])
+
+
+def _remember_group_members(bot_id: str, group_id: str, rows: list[dict[str, Any]]) -> None:
+    if len(_GROUP_MEMBER_CACHE) >= _GROUP_MEMBER_CACHE_MAX_ENTRIES:
+        oldest = min(_GROUP_MEMBER_CACHE, key=lambda key: _GROUP_MEMBER_CACHE[key][0])
+        _GROUP_MEMBER_CACHE.pop(oldest, None)
+    _GROUP_MEMBER_CACHE[(bot_id, group_id)] = (
+        time.monotonic() + _GROUP_MEMBER_CACHE_TTL_SECONDS,
+        list(rows),
+    )
 
 
 def _target_bot_id(bot: Any, fallback: Any = None) -> str:
@@ -328,6 +375,41 @@ def _raise_protocol_result(
     )
 
 
+async def _load_group_members_singleflight(
+    adapter: Any,
+    *,
+    bot_id: str,
+    group_id: str,
+) -> list[dict[str, Any]]:
+    key = (bot_id, group_id)
+    task = _GROUP_MEMBER_INFLIGHT.get(key)
+    if task is None:
+        async def _load() -> list[dict[str, Any]]:
+            result = await adapter.get_group_member_list(group_id=group_id)
+            if not result.ok:
+                _raise_protocol_result(
+                    result,
+                    bot_id=bot_id,
+                    operation_id="",
+                    side_effect=False,
+                )
+            rows = [
+                projected
+                for raw in list(result.data or [])
+                if (projected := _project_group_member(raw)) is not None
+            ]
+            _remember_group_members(bot_id, group_id, rows)
+            return rows
+
+        task = asyncio.create_task(_load())
+        _GROUP_MEMBER_INFLIGHT[key] = task
+    try:
+        return list(await asyncio.shield(task))
+    finally:
+        if task.done() and _GROUP_MEMBER_INFLIGHT.get(key) is task:
+            _GROUP_MEMBER_INFLIGHT.pop(key, None)
+
+
 async def _fresh_group_profile(
     runtime: Any,
     bot: Any,
@@ -566,8 +648,10 @@ def build_qq_router(*, runtime) -> APIRouter:
     async def group_members(
         group_id: str,
         bot_id: str = "",
-        limit: int = 200,
+        limit: int = 50,
         offset: int = 0,
+        search: str = "",
+        refresh: bool = False,
         _: AdminIdentity = Depends(require_admin),
     ) -> dict:
         bot = _bot(runtime, bot_id, explicit=True, api="get_group_member_list")
@@ -578,25 +662,40 @@ def build_qq_router(*, runtime) -> APIRouter:
             bot_id=selected_bot_id,
             group_id=group_id,
         )
-        result = await adapter.get_group_member_list(group_id=group_id)
-        if not result.ok:
-            _raise_protocol_result(
-                result,
+        members = None if refresh else _cached_group_members(selected_bot_id, str(group_id))
+        cache_hit = members is not None
+        if members is None:
+            members = await _load_group_members_singleflight(
+                adapter,
                 bot_id=selected_bot_id,
-                operation_id="",
-                side_effect=False,
+                group_id=str(group_id),
             )
-        members = list(result.data or [])
-        safe_limit = max(1, min(500, int(limit)))
+        query = str(search or "").strip().casefold()[:120]
+        if query:
+            members = [
+                member
+                for member in members
+                if query
+                in " ".join(
+                    str(member.get(field, "") or "")
+                    for field in ("user_id", "nickname", "card")
+                ).casefold()
+            ]
+        safe_limit = max(1, min(100, int(limit)))
         safe_offset = max(0, int(offset))
+        selected = members[safe_offset : safe_offset + safe_limit]
         return {
             "bot_id": selected_bot_id,
             "group_id": str(group_id),
-            "members": members[safe_offset : safe_offset + safe_limit],
-            "count": len(members[safe_offset : safe_offset + safe_limit]),
+            "members": selected,
+            "count": len(selected),
             "total": len(members),
             "limit": safe_limit,
             "offset": safe_offset,
+            "has_more": safe_offset + len(selected) < len(members),
+            "search": query,
+            "cache_hit": cache_hit,
+            "cache_ttl_seconds": int(_GROUP_MEMBER_CACHE_TTL_SECONDS),
         }
 
     @router.get("/groups/{group_id}/announcements")

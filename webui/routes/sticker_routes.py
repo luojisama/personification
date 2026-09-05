@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 import time
 import uuid
@@ -60,6 +61,40 @@ _ALLOWED_UPLOAD_SUFFIXES: frozenset[str] = frozenset({
     ".jpg", ".jpeg", ".png", ".webp", ".gif",
 })
 _MAX_UPLOAD_BYTES = 4 * 1024 * 1024
+
+
+def _write_sticker_upload(
+    runtime: Any,
+    filename: str,
+    suffix: str,
+    payload: bytes,
+) -> tuple[Path, Path]:
+    sticker_dir = _sticker_dir(runtime)
+    target = _resolve_safe_file(filename, sticker_dir)
+    if target.exists():
+        target = _resolve_safe_file(
+            f"{Path(filename).stem}_{int(time.time())}{suffix}",
+            sticker_dir,
+        )
+    target.write_bytes(payload)
+    return sticker_dir, target
+
+
+def _save_uploaded_sticker_metadata(
+    sticker_dir: Path,
+    target: Path,
+    description: str,
+    payload: bytes,
+) -> dict[str, Any]:
+    _load_raw_manifest(sticker_dir, strict=True)
+    metadata = load_sticker_metadata(sticker_dir)
+    metadata[target.name] = normalize_sticker_entry(
+        {"description": description},
+        file_name=target.name,
+        file_hash=compute_file_hash(payload),
+    )
+    save_sticker_metadata_sync(sticker_dir, metadata)
+    return dict(metadata[target.name])
 
 
 def _operation_result(report: dict[str, Any], **fields: Any) -> dict[str, Any]:
@@ -653,7 +688,15 @@ def build_sticker_router(*, runtime) -> APIRouter:
                     ),
                 )
             try:
-                payload = await file.read()
+                chunks = bytearray()
+                while True:
+                    chunk = await file.read(min(256 * 1024, _MAX_UPLOAD_BYTES + 1 - len(chunks)))
+                    if not chunk:
+                        break
+                    chunks.extend(chunk)
+                    if len(chunks) > _MAX_UPLOAD_BYTES:
+                        break
+                payload = bytes(chunks)
             except Exception as exc:
                 report = _exception_report(
                     exc,
@@ -711,14 +754,13 @@ def build_sticker_router(*, runtime) -> APIRouter:
                     ),
                 )
             try:
-                sticker_dir = _sticker_dir(runtime)
-                target = _resolve_safe_file(filename, sticker_dir)
-                if target.exists():
-                    target = _resolve_safe_file(
-                        f"{Path(filename).stem}_{int(time.time())}{suffix}",
-                        sticker_dir,
-                    )
-                target.write_bytes(payload)
+                sticker_dir, target = await asyncio.to_thread(
+                    _write_sticker_upload,
+                    runtime,
+                    filename,
+                    suffix,
+                    payload,
+                )
             except Exception as exc:
                 report = _exception_report(
                     exc,
@@ -738,14 +780,13 @@ def build_sticker_router(*, runtime) -> APIRouter:
                 )
                 _raise_operation(500, report)
             try:
-                _load_raw_manifest(sticker_dir, strict=True)
-                metadata = load_sticker_metadata(sticker_dir)
-                metadata[target.name] = normalize_sticker_entry(
-                    {"description": description},
-                    file_name=target.name,
-                    file_hash=compute_file_hash(payload),
+                uploaded_entry = await asyncio.to_thread(
+                    _save_uploaded_sticker_metadata,
+                    sticker_dir,
+                    target,
+                    description,
+                    payload,
                 )
-                save_sticker_metadata_sync(sticker_dir, metadata)
             except Exception as exc:
                 report = _exception_report(
                     exc,
@@ -803,7 +844,7 @@ def build_sticker_router(*, runtime) -> APIRouter:
                 suggestion="等待 labeler 处理待打标文件；已有描述的文件无需重复上传。",
                 operation_id=operation_id,
             )
-            _project_sticker(runtime, target, metadata[target.name], labeled=bool(description))
+            _project_sticker(runtime, target, uploaded_entry, labeled=bool(description))
             return _operation_result(
                 report,
                 success=True,
