@@ -3685,7 +3685,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 elif bool(getattr(runtime.plugin_config, "personification_enable_llm_splitter", False)):
                     from ...core.message_splitter import split_reply_with_llm
 
-                    segments = await split_reply_with_llm(final_reply, runtime)
+                    segments = await split_reply_with_llm(
+                        final_reply,
+                        runtime,
+                        response_deadline=response_deadline,
+                    )
                 else:
                     segments = runtime.split_text_into_segments(final_reply)
                     max_seg = getattr(runtime.plugin_config, "personification_max_segment_chars", 0)

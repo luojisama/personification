@@ -484,6 +484,38 @@ def _normalize_parsed_message_texts(parsed: Dict[str, Any]) -> Dict[str, Any]:
     return copied
 
 
+def _project_parsed_messages_to_canonical_text(
+    parsed: Dict[str, Any],
+    canonical_text: str,
+) -> Dict[str, Any]:
+    """Retain structured side effects while giving text delivery one reviewed source.
+
+    YAML messages may carry independent sticker/image authorizations.  Keep
+    those records and their ordering, but only one text-bearing record may
+    carry the final reviewed text; otherwise the pre-review message bodies can
+    be sent or the same reviewed segments can be replayed once per record.
+    """
+
+    copied = _normalize_parsed_message_texts(parsed)
+    messages = list(copied.get("messages") or [])
+    text_slot = next(
+        (
+            index
+            for index, item in enumerate(messages)
+            if isinstance(item, dict) and str(item.get("text", "") or "").strip()
+        ),
+        None,
+    )
+    if text_slot is None:
+        messages.insert(0, {"text": str(canonical_text or "").strip(), "sticker": ""})
+        text_slot = 0
+    for index, item in enumerate(messages):
+        if isinstance(item, dict):
+            item["text"] = str(canonical_text or "").strip() if index == text_slot else ""
+    copied["messages"] = messages
+    return copied
+
+
 def _build_tts_user_hint(*, is_private: bool) -> str:
     scene = "私聊" if is_private else "群聊"
     return f"这是{scene}场景下的回复，请自然朗读，整体语速略快一点。"
@@ -3006,6 +3038,7 @@ async def process_yaml_response_logic(
         else:
             assistant_text = f"{assistant_text}{qq_auto_marker}".strip()
             parsed = {"messages": [{"text": assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
+    parsed = _project_parsed_messages_to_canonical_text(parsed, assistant_text)
 
     if not is_private_session:
         raw_command_candidates = [assistant_text]
@@ -3292,7 +3325,11 @@ async def process_yaml_response_logic(
                             lite_tool_caller=lite_tool_caller,
                             agent_tool_caller=agent_tool_caller,
                         )
-                        merged_segments = await split_reply_with_llm(text, splitter_runtime)
+                        merged_segments = await split_reply_with_llm(
+                            text,
+                            splitter_runtime,
+                            response_deadline=response_deadline,
+                        )
                     else:
                         raw_segs = split_text_into_segments(text)
                         max_seg = getattr(plugin_config, "personification_max_segment_chars", 0)

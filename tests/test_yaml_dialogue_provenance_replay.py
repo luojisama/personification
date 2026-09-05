@@ -54,6 +54,8 @@ def _run_yaml_turn(
     candidate: str,
     review_call,
     final_gate_enabled: bool,
+    parse_yaml_response=None,
+    tts_service=None,
 ) -> tuple[_Bot, list[list[dict[str, object]]], list[list[dict[str, object]]], list[dict[str, object]]]:  # noqa: ANN001
     primary_prompts: list[list[dict[str, object]]] = []
     review_prompts: list[list[dict[str, object]]] = []
@@ -107,12 +109,12 @@ def _run_yaml_turn(
             build_grounding_context=lambda *_args, **_kwargs: "",
             call_ai_api=_call_ai_api,
             review_call_ai_api=_review_call,
-            parse_yaml_response=lambda text: {
+            parse_yaml_response=parse_yaml_response or (lambda text: {
                 "status": "",
                 "think": "",
                 "action": "",
                 "messages": [{"text": str(text), "sticker": ""}],
-            },
+            }),
             message_segment_cls=_Segments,
             sanitize_history_text=str,
             private_session_prefix="private_",
@@ -130,6 +132,7 @@ def _run_yaml_turn(
             message_target="bot",
             recent_context_hint="",
             reply_required=True,
+            tts_service=tts_service,
         )
     )
     return bot, primary_prompts, review_prompts, stages
@@ -247,3 +250,108 @@ def test_yaml_real_user_quote_can_pass_attribution_review_and_send(monkeypatch) 
     # The configured terminal-punctuation policy removes the final full stop
     # at dispatch; the accepted human-quote reply still reaches outbound send.
     assert bot.sent == ["那就两组，洞里拐弯容易漏"]
+
+
+def test_yaml_accept_projects_multi_messages_to_reviewed_text_once(monkeypatch) -> None:  # noqa: ANN001
+    """Structured sticker records survive, but only canonical reviewed text is sent."""
+
+    async def _review(_messages, **_kwargs):  # noqa: ANN001
+        return (
+            '{"action":"accept","text":"","reason":"safe",'
+            '"flags":[],"segments":["第一句","第二句"]}'
+        )
+
+    def _parse(_text):  # noqa: ANN001
+        return {
+            "status": "",
+            "think": "",
+            "action": "",
+            "messages": [
+                {"text": "第一句", "sticker": ""},
+                {"text": "第二句", "sticker": "approved-sticker"},
+            ],
+        }
+
+    async def _no_sleep(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        return None
+
+    monkeypatch.setattr(yaml_processor.asyncio, "sleep", _no_sleep)
+    bot, _primary_prompts, _review_prompts, _stages = _run_yaml_turn(
+        monkeypatch,
+        history=[],
+        event=_event(text="继续", message_id="human-current"),
+        candidate="unused",
+        review_call=_review,
+        final_gate_enabled=True,
+        parse_yaml_response=_parse,
+    )
+
+    # Before projection the accepted review segments would have been replayed
+    # once for each YAML message.  The second record still exists for its
+    # sticker authorization, but it cannot carry stale text.
+    assert bot.sent == ["第一句", "第二句"]
+
+
+def test_yaml_canonical_projection_keeps_authorized_structured_records() -> None:
+    projected = yaml_processor._project_parsed_messages_to_canonical_text(
+        {
+            "messages": [
+                {"text": "旧文本", "sticker": ""},
+                {
+                    "text": "[IMAGE_B64]cGF5bG9hZA==[/IMAGE_B64]",
+                    "sticker": "approved-sticker",
+                    "media_authorized": True,
+                },
+            ]
+        },
+        "已审文本[IMAGE_B64]cGF5bG9hZA==[/IMAGE_B64]",
+    )
+
+    assert projected["messages"] == [
+        {"text": "已审文本[IMAGE_B64]cGF5bG9hZA==[/IMAGE_B64]", "sticker": ""},
+        {"text": "", "sticker": "approved-sticker", "media_authorized": True},
+    ]
+
+
+def test_yaml_tts_uses_the_same_reviewed_canonical_text(monkeypatch) -> None:  # noqa: ANN001
+    class _VoiceService:
+        def __init__(self) -> None:
+            self.texts: list[str] = []
+
+        async def decide_tts_delivery(self, **_kwargs):  # noqa: ANN003, ANN202
+            return SimpleNamespace(action="voice", style_hint="")
+
+        async def send_tts(self, **kwargs):  # noqa: ANN003, ANN202
+            self.texts.append(kwargs["text"])
+            kwargs["on_delivery_started"]()
+            kwargs["on_delivery_confirmed"]()
+            return True
+
+    async def _review(_messages, **_kwargs):  # noqa: ANN001
+        return (
+            '{"action":"accept","text":"","reason":"safe",'
+            '"flags":[],"segments":["第一句","第二句"]}'
+        )
+
+    voice = _VoiceService()
+    bot, _primary_prompts, _review_prompts, _stages = _run_yaml_turn(
+        monkeypatch,
+        history=[],
+        event=_event(text="继续", message_id="human-current"),
+        candidate="unused",
+        review_call=_review,
+        final_gate_enabled=True,
+        parse_yaml_response=lambda _text: {
+            "status": "",
+            "think": "",
+            "action": "",
+            "messages": [
+                {"text": "第一句", "sticker": ""},
+                {"text": "第二句", "sticker": ""},
+            ],
+        },
+        tts_service=voice,
+    )
+
+    assert voice.texts == ["第一句 第二句"]
+    assert bot.sent == []

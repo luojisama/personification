@@ -1,4 +1,5 @@
 import asyncio
+import time
 import pytest
 from types import SimpleNamespace
 from plugin.personification.handlers.event_rules import split_segment_if_long
@@ -84,7 +85,7 @@ def test_split_reply_with_llm_success():
     async def run():
         class DummyCaller:
             async def chat_with_tools(self, messages, tools, stream):
-                return SimpleNamespace(content='["呜……中、中间那个……虽然长得有点像", "但我才没有那么可爱呢……！"]')
+                return SimpleNamespace(content='["呜……中、中间那个……虽然长得有点像，", "但我才没有那么可爱呢……！"]')
 
         runtime = SimpleNamespace(
             plugin_config=SimpleNamespace(
@@ -129,5 +130,80 @@ def test_split_reply_with_llm_timeout_fallback():
         res = await split_reply_with_llm(text, runtime, timeout_seconds=0.1)
         assert len(res) >= 1
         assert "测试超时降级逻辑" in res[0]
+
+    asyncio.run(run())
+
+
+def test_split_reply_with_llm_rejects_same_length_word_substitution():
+    async def run():
+        class RewritingCaller:
+            async def chat_with_tools(self, messages, tools, stream):  # noqa: ANN001
+                return SimpleNamespace(content='["我只回应当前这句，别把旧话算给你。"]')
+
+        runtime = SimpleNamespace(
+            plugin_config=SimpleNamespace(
+                personification_enable_llm_splitter=True,
+                personification_splitter_min_chars=1,
+                personification_splitter_max_segments=3,
+                personification_splitter_provider="",
+                personification_splitter_model="",
+                personification_max_segment_chars=0,
+            ),
+            logger=None,
+            lite_tool_caller=RewritingCaller(),
+        )
+        reviewed = "我只回应当前这句，别把旧话算给我。"
+        assert await split_reply_with_llm(reviewed, runtime) == [reviewed]
+
+    asyncio.run(run())
+
+
+def test_split_reply_with_llm_does_not_start_call_after_response_deadline():
+    async def run():
+        class MustNotCall:
+            async def chat_with_tools(self, messages, tools, stream):  # noqa: ANN001
+                raise AssertionError("expired turn must not start a splitter provider call")
+
+        runtime = SimpleNamespace(
+            plugin_config=SimpleNamespace(
+                personification_enable_llm_splitter=True,
+                personification_splitter_min_chars=1,
+                personification_splitter_max_segments=3,
+                personification_splitter_provider="",
+                personification_splitter_model="",
+                personification_max_segment_chars=0,
+            ),
+            logger=None,
+            lite_tool_caller=MustNotCall(),
+        )
+        reviewed = "这是一条已审阅、但现在已经超过回合截止时间的回复。"
+        assert await split_reply_with_llm(
+            reviewed,
+            runtime,
+            response_deadline=time.monotonic() - 0.01,
+        ) == [reviewed]
+
+    asyncio.run(run())
+
+
+def test_split_reply_with_llm_merges_excess_approved_segments_without_dropping_text():
+    async def run():
+        class ManySegmentsCaller:
+            async def chat_with_tools(self, messages, tools, stream):  # noqa: ANN001
+                return SimpleNamespace(content='["甲", "乙", "丙"]')
+
+        runtime = SimpleNamespace(
+            plugin_config=SimpleNamespace(
+                personification_enable_llm_splitter=True,
+                personification_splitter_min_chars=1,
+                personification_splitter_max_segments=2,
+                personification_splitter_provider="",
+                personification_splitter_model="",
+                personification_max_segment_chars=0,
+            ),
+            logger=None,
+            lite_tool_caller=ManySegmentsCaller(),
+        )
+        assert await split_reply_with_llm("甲乙丙", runtime) == ["甲", "乙丙"]
 
     asyncio.run(run())

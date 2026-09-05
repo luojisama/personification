@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import Any, List
 
 from .model_router import MODEL_ROLE_SPLITTER, get_model_override_for_role
@@ -65,6 +66,7 @@ async def split_reply_with_llm(
     max_segments: int | None = None,
     min_chars: int | None = None,
     timeout_seconds: float = 2.5,
+    response_deadline: float | None = None,
 ) -> List[str]:
     raw_text = str(text or "").strip()
     if not raw_text:
@@ -135,20 +137,37 @@ async def split_reply_with_llm(
         },
     ]
 
+    # A caller factory may have spent part of the shared turn budget.  Measure
+    # again immediately before creating its network coroutine: an expired turn
+    # must not begin a new provider request.
+    remaining_timeout = float(timeout_seconds)
+    if isinstance(response_deadline, (int, float)):
+        remaining_timeout = min(remaining_timeout, float(response_deadline) - time.monotonic())
+        if remaining_timeout <= 0:
+            return _rule_based_fallback(raw_text, max_seg_chars)
+
     try:
         response = await asyncio.wait_for(
             caller.chat_with_tools(messages, [], False),
-            timeout=timeout_seconds,
+            timeout=remaining_timeout,
         )
         content = str(getattr(response, "content", "") or "").strip()
         parsed_segments = _parse_splitter_json_output(content)
         if parsed_segments:
-            # 校验拼接后文本是否涵盖主要内容
+            # The splitter runs after final review.  It may choose bubble
+            # boundaries only; even a same-length word substitution is not an
+            # approved visible reply.
             combined_parsed = "".join(re.sub(r"\s+", "", s) for s in parsed_segments)
             combined_raw = re.sub(r"\s+", "", raw_text)
-            # 允许标点符号微调，但字符长度差异不应过大（如丢失大量内容）
-            if abs(len(combined_parsed) - len(combined_raw)) <= max(6, int(len(combined_raw) * 0.15)):
-                return parsed_segments[:effective_max_segments]
+            if combined_parsed == combined_raw:
+                if len(parsed_segments) <= effective_max_segments:
+                    return parsed_segments
+                # A count limit cannot justify discarding reviewed text.  Keep
+                # the approved order and merge the tail into the last bubble.
+                return [
+                    *parsed_segments[: effective_max_segments - 1],
+                    "".join(parsed_segments[effective_max_segments - 1 :]),
+                ]
             elif logger:
                 logger.debug("[message_splitter] 模型分段结果内容与原文差异过大，降级规则分段")
     except asyncio.TimeoutError:
