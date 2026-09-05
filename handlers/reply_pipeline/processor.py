@@ -2203,6 +2203,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             trigger_reason=trigger_reason,
             current_image_urls=tool_image_urls,
             media_transport_aliases=media_transport_aliases,
+            prepared_visual_projection=visual_projection,
             get_configured_api_providers=runtime.get_configured_api_providers,
             vision_caller=runtime.vision_caller,
             disable_network_hooks=disable_network_hooks,

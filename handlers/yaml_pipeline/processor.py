@@ -141,6 +141,7 @@ from ...core.target_inference import TARGET_OTHERS
 from ...core.tts_service import extract_persona_tts_config
 from ...core.visible_output import guard_visible_text
 from ...core.turn_media import (
+    VisualMediaProjection,
     attach_per_media_visual_summaries,
     attach_safe_visual_summary,
     build_media_availability,
@@ -609,6 +610,7 @@ async def process_yaml_response_logic(
     review_call_ai_api: Callable[..., Awaitable[Any]] | None = None,
     current_image_urls: List[str] | None = None,
     media_transport_aliases: Dict[str, str] | None = None,
+    prepared_visual_projection: VisualMediaProjection | None = None,
     vision_caller: Any = None,
     tts_service: Any = None,
     extract_forward_content: Callable[..., Any] = None,
@@ -955,11 +957,19 @@ async def process_yaml_response_logic(
     # History is context, not an authorization to attach old quoted/background
     # media to a new model call.  Only current or LLM-selected referent media
     # enters this process-local visual projection.
-    visual_projection = project_visual_media_inputs(
-        turn_media_refs,
-        image_refs=current_image_urls,
-        transport_aliases=media_transport_aliases,
-    )
+    # The normal pipeline may have already selected and materialized visual
+    # occurrences after follow-up referent resolution.  Keep that in-memory
+    # projection through this handoff: serializing TurnMediaRef intentionally
+    # strips data URLs, so rebuilding here would otherwise lose its authorized
+    # transport.  Standalone YAML calls still construct their own projection.
+    if isinstance(prepared_visual_projection, VisualMediaProjection):
+        visual_projection = prepared_visual_projection
+    else:
+        visual_projection = project_visual_media_inputs(
+            turn_media_refs,
+            image_refs=current_image_urls,
+            transport_aliases=media_transport_aliases,
+        )
     last_images = list(visual_projection.transport_refs)
     if not turn_media_refs and last_images:
         turn_media_refs = extract_media_from_message(
@@ -4034,6 +4044,7 @@ def build_yaml_response_processor(
             lite_tool_caller=runtime_overrides.get("lite_tool_caller", lite_tool_caller),
             current_image_urls=current_image_urls,
             media_transport_aliases=runtime_overrides.get("media_transport_aliases"),
+            prepared_visual_projection=runtime_overrides.get("prepared_visual_projection"),
             vision_caller=runtime_overrides.get("vision_caller", vision_caller),
             tts_service=runtime_overrides.get("tts_service", tts_service),
             extract_forward_content=runtime_overrides.get(
