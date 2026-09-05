@@ -88,7 +88,7 @@ def _origin(url: str) -> tuple[str, str, int]:
     return parsed.scheme.lower(), (parsed.hostname or "").lower().rstrip("."), parsed.port or (443 if parsed.scheme == "https" else 80)
 
 
-async def download_public_image(
+async def download_public_resource(
     url: str,
     *,
     headers: dict[str, str] | None = None,
@@ -139,32 +139,66 @@ async def download_public_image(
                     raise SafeImageDownloadError(f"image server returned HTTP {response.status_code}")
                 mime = str(response.headers.get("content-type", "") or "").split(";", 1)[0].strip().lower()
                 if mime not in allowed_mimes:
-                    raise SafeImageDownloadError("response MIME is not an allowed image type")
+                    raise SafeImageDownloadError("response MIME is not an allowed resource type")
                 try:
                     length = int(response.headers.get("content-length", "0") or 0)
                 except (TypeError, ValueError) as exc:
                     raise SafeImageDownloadError("invalid image Content-Length") from exc
                 if length > max_bytes:
-                    raise SafeImageDownloadError("image Content-Length is too large")
+                    raise SafeImageDownloadError("resource Content-Length is too large")
                 chunks: list[bytes] = []
                 size = 0
                 async for chunk in response.aiter_bytes():
                     size += len(chunk)
                     if size > max_bytes:
-                        raise SafeImageDownloadError("image response exceeded size limit")
+                        raise SafeImageDownloadError("resource response exceeded size limit")
                     chunks.append(chunk)
                 content = b"".join(chunks)
                 if not content:
-                    raise SafeImageDownloadError("image body is empty")
+                    raise SafeImageDownloadError("resource body is empty")
                 return DownloadedImage(content, mime, original_url)
             finally:
                 await response.aclose()
-    raise SafeImageDownloadError("too many image redirects")
+    raise SafeImageDownloadError("too many resource redirects")
+
+
+async def download_public_image(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: float = 12.0,
+    connect_timeout: float = 4.0,
+    max_bytes: int,
+    allowed_mimes: set[str],
+    max_redirects: int = 4,
+    resolver: Resolver | None = None,
+    proxy: str = "",
+    sensitive_headers_origin: str = "",
+    client_factory: ClientFactory = httpx.AsyncClient,
+    url_validator: UrlValidator | None = None,
+) -> DownloadedImage:
+    """Backward-compatible image wrapper around pinned public resources."""
+
+    return await download_public_resource(
+        url,
+        headers=headers,
+        timeout=timeout,
+        connect_timeout=connect_timeout,
+        max_bytes=max_bytes,
+        allowed_mimes=allowed_mimes,
+        max_redirects=max_redirects,
+        resolver=resolver,
+        proxy=proxy,
+        sensitive_headers_origin=sensitive_headers_origin,
+        client_factory=client_factory,
+        url_validator=url_validator,
+    )
 
 
 __all__ = [
     "DownloadedImage",
     "SafeImageDownloadError",
+    "download_public_resource",
     "download_public_image",
     "resolve_public_url",
 ]

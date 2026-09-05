@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +29,91 @@ class _Logger:
 
     def warning(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
         return None
+
+
+def _write_skill_zip(path: Path, entries: list[tuple[str, bytes]]) -> None:
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, content in entries:
+            archive.writestr(name, content)
+
+
+@pytest.mark.parametrize(
+    ("entries", "expected"),
+    [
+        ([("../escape.py", b"x")], "path"),
+        ([("skill.py:payload", b"x")], "illegal Windows character"),
+        ([("CON.txt", b"x")], "reserved Windows device"),
+        ([("folder /skill.py", b"x")], "Windows-trimmed"),
+        ([("folder/skill?.py", b"x")], "illegal Windows character"),
+        ([("same.py", b"a"), ("same.py", b"b")], "duplicate"),
+    ],
+)
+def test_skill_archive_rejects_unsafe_or_duplicate_members_atomically(
+    tmp_path: Path,
+    entries: list[tuple[str, bytes]],
+    expected: str,
+) -> None:
+    archive = tmp_path / "source.zip"
+    destination = tmp_path / "extracted"
+    destination.mkdir()
+    (destination / "existing.txt").write_text("keep", encoding="utf-8")
+    _write_skill_zip(archive, entries)
+
+    with pytest.raises(ValueError, match=expected):
+        source_resolver._extract_zip_file(archive, destination, _Logger(), force=True)
+
+    assert (destination / "existing.txt").read_text(encoding="utf-8") == "keep"
+    assert not list(tmp_path.glob(".tmp-extract-*"))
+
+
+def test_skill_archive_rejects_symlink_and_expansion_limit_before_replacing_destination(tmp_path: Path) -> None:
+    archive = tmp_path / "source.zip"
+    destination = tmp_path / "extracted"
+    destination.mkdir()
+    (destination / "existing.txt").write_text("keep", encoding="utf-8")
+    symlink = zipfile.ZipInfo("link")
+    symlink.create_system = 3
+    symlink.external_attr = 0o120777 << 16
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr(symlink, "target")
+
+    with pytest.raises(ValueError, match="symlink"):
+        source_resolver._extract_zip_file(archive, destination, _Logger(), force=True)
+    assert (destination / "existing.txt").exists()
+
+
+def test_skill_archive_restores_old_cache_when_final_replace_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "source.zip"
+    destination = tmp_path / "extracted"
+    destination.mkdir()
+    (destination / "existing.txt").write_text("keep", encoding="utf-8")
+    _write_skill_zip(archive, [("skill.py", b"new content")])
+    original_replace = Path.replace
+
+    def _fail_final_replace(self: Path, target: Path):  # noqa: ANN001
+        if self.name.startswith(".tmp-extract-") and Path(target) == destination:
+            raise OSError("simulated Windows scanner lock")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", _fail_final_replace)
+    with pytest.raises(OSError, match="scanner lock"):
+        source_resolver._extract_zip_file(archive, destination, _Logger(), force=True)
+
+    assert (destination / "existing.txt").read_text(encoding="utf-8") == "keep"
+    assert not list(tmp_path.glob(".tmp-extract-*"))
+    assert not list(tmp_path.glob(".previous-extract-*"))
+
+    oversized = tmp_path / "oversized.zip"
+    _write_skill_zip(
+        oversized,
+        [("large.bin", b"x" * (source_resolver._MAX_SKILL_ARCHIVE_ENTRY_BYTES + 1))],
+    )
+    with pytest.raises(ValueError, match="entry too large"):
+        source_resolver._extract_zip_file(oversized, destination, _Logger(), force=True)
+    assert (destination / "existing.txt").exists()
 
 
 def _config(tmp_path: Path, source_dir: Path) -> SimpleNamespace:

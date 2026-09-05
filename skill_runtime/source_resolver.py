@@ -20,6 +20,8 @@ import httpx
 import yaml
 import socket
 
+from ..core.safe_image_download import SafeImageDownloadError, download_public_resource
+
 
 _SKILL_PAGE_HOSTS = {"clawhub.ai", "skillhub.tencent.com", "skillhub.cn"}
 _MAX_REMOTE_ZIP_BYTES = 50 * 1024 * 1024
@@ -34,6 +36,14 @@ _BLOCKED_REMOTE_HOSTS = {
 }
 _MAX_SKILL_DIGEST_FILES = 10_000
 _MAX_SKILL_DIGEST_BYTES = 100 * 1024 * 1024
+_MAX_SKILL_ARCHIVE_FILES = 10_000
+_MAX_SKILL_ARCHIVE_TOTAL_BYTES = 100 * 1024 * 1024
+_MAX_SKILL_ARCHIVE_ENTRY_BYTES = 25 * 1024 * 1024
+_WINDOWS_RESERVED_ARCHIVE_BASENAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +96,8 @@ async def _is_safe_remote_url(url: str, logger: Any) -> bool:
             socket.SOCK_STREAM,
         )
     except socket.gaierror:
-        return True
+        logger.warning(f"[skill_source]解析地址失败，已拒绝 {host}")
+        return False
     except Exception as e:
         logger.warning(f"[skill_source]解析地址失败，已拒绝 {host}: {e}")
         return False
@@ -457,10 +468,20 @@ async def _resolve_remote_download_url(url: str) -> str:
     if not any(domain == host or host.endswith(f".{domain}") for domain in _SKILL_PAGE_HOSTS):
         return url
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-        html_text = response.text
+    try:
+        page = await download_public_resource(
+            url,
+            timeout=30.0,
+            connect_timeout=8.0,
+            max_bytes=2 * 1024 * 1024,
+            allowed_mimes={"text/html", "application/xhtml+xml"},
+            max_redirects=_MAX_REMOTE_REDIRECTS,
+            url_validator=_remote_url_policy,
+        )
+    except SafeImageDownloadError as exc:
+        raise RuntimeError(f"unsafe remote skill page: {exc}") from exc
+    current_url = page.final_url
+    html_text = page.content.decode("utf-8", errors="replace")
 
     anchor_pattern = re.compile(
         r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
@@ -469,7 +490,7 @@ async def _resolve_remote_download_url(url: str) -> str:
     for href, text in anchor_pattern.findall(html_text):
         anchor_text = re.sub(r"<[^>]+>", " ", text)
         anchor_text = html.unescape(re.sub(r"\s+", " ", anchor_text)).strip().lower()
-        candidate = urljoin(url, html.unescape(href).strip())
+        candidate = urljoin(current_url, html.unescape(href).strip())
         if not candidate:
             continue
         if "download zip" in anchor_text or "下载 zip" in anchor_text or "下载zip" in anchor_text:
@@ -486,48 +507,151 @@ async def _resolve_remote_download_url(url: str) -> str:
 
 
 async def _download_zip(url: str, target: Path, logger: Any) -> None:
-    async with httpx.AsyncClient(follow_redirects=False, timeout=60.0) as client:
-        current_url = url
-        for _ in range(_MAX_REMOTE_REDIRECTS):
-            if not await _is_safe_remote_url(current_url, logger):
-                raise RuntimeError(f"unsafe remote zip url: {current_url}")
-            async with client.stream("GET", current_url) as response:
-                if response.status_code in {301, 302, 303, 307, 308}:
-                    location = str(response.headers.get("location") or "").strip()
-                    if not location:
-                        raise RuntimeError("redirect without location")
-                    current_url = urljoin(current_url, location)
-                    continue
-                response.raise_for_status()
-                target.parent.mkdir(parents=True, exist_ok=True)
-                total = 0
-                with open(target, "wb") as fh:
-                    async for chunk in response.aiter_bytes():
-                        total += len(chunk)
-                        if total > _MAX_REMOTE_ZIP_BYTES:
-                            raise RuntimeError("remote zip too large")
-                        fh.write(chunk)
-                return
-        raise RuntimeError("too many redirects while downloading remote zip")
+    try:
+        archive = await download_public_resource(
+            url,
+            timeout=60.0,
+            connect_timeout=10.0,
+            max_bytes=_MAX_REMOTE_ZIP_BYTES,
+            allowed_mimes={
+                "application/zip",
+                "application/x-zip-compressed",
+                "application/octet-stream",
+            },
+            max_redirects=_MAX_REMOTE_REDIRECTS,
+            url_validator=_remote_url_policy,
+        )
+    except SafeImageDownloadError as exc:
+        logger.warning(f"[skill_source] rejected remote zip: {exc}")
+        raise RuntimeError("unsafe remote zip") from exc
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.parent / f".tmp-download-{uuid.uuid4().hex}"
+    try:
+        temporary.write_bytes(archive.content)
+        temporary.replace(target)
+    finally:
+        if temporary.exists():
+            temporary.unlink(missing_ok=True)
+
+
+def _remote_url_policy(url: str) -> bool:
+    """Synchronous URL-shape policy; public DNS and pinned TCP are shared."""
+
+    try:
+        parsed = urlparse(str(url or "").strip())
+    except Exception:
+        return False
+    host = (parsed.hostname or "").strip().lower()
+    return bool(
+        parsed.scheme in {"http", "https"}
+        and host
+        and not parsed.username
+        and not parsed.password
+        and host not in _BLOCKED_REMOTE_HOSTS
+        and not host.endswith(_BLOCKED_REMOTE_HOST_SUFFIXES)
+    )
 
 
 def _extract_zip_file(archive_path: Path, dest_dir: Path, logger: Any, *, force: bool = False) -> None:
-    if force and dest_dir.exists():
-        shutil.rmtree(dest_dir, ignore_errors=True)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    root = dest_dir.resolve()
-    with zipfile.ZipFile(archive_path) as zf:
-        for member in zf.infolist():
-            member_name = member.filename.replace("\\", "/")
-            target_path = (dest_dir / member_name).resolve()
-            try:
-                if os.path.commonpath([str(root), str(target_path)]) != str(root):
-                    logger.warning(f"[skill_source] skip unsafe archive member: {member.filename}")
+    """Validate then atomically extract a bounded, regular-file-only archive."""
+
+    def _safe_member_name(member: zipfile.ZipInfo) -> tuple[str, bool]:
+        name = str(member.filename or "")
+        normalized = name.replace("\\", "/")
+        if not normalized or normalized.startswith("/") or re.match(r"^[a-zA-Z]:", normalized):
+            raise ValueError("archive member path is absolute or empty")
+        is_dir = member.is_dir() or normalized.endswith("/")
+        relative_name = normalized.rstrip("/")
+        if not relative_name:
+            raise ValueError("archive member path is empty")
+        parts = relative_name.split("/")
+        if any(not part or part in {".", ".."} for part in parts):
+            raise ValueError("archive member path is unsafe")
+        for part in parts:
+            if part.rstrip(". ") != part:
+                raise ValueError("archive member path has Windows-trimmed component")
+            if any(ord(character) < 32 or character in '<>:"|?*' for character in part):
+                raise ValueError("archive member path has illegal Windows character")
+            basename = part.split(".", 1)[0].upper()
+            if basename in _WINDOWS_RESERVED_ARCHIVE_BASENAMES:
+                raise ValueError("archive member path uses reserved Windows device name")
+        mode = (int(member.external_attr) >> 16) & 0o170000
+        if mode == 0o120000:
+            raise ValueError("archive symlink forbidden")
+        if member.flag_bits & 0x1:
+            raise ValueError("encrypted archive member forbidden")
+        if not is_dir and mode not in {0, 0o100000}:
+            raise ValueError("archive special file forbidden")
+        return relative_name, is_dir
+
+    archive_path = archive_path.resolve()
+    dest_dir = dest_dir.resolve()
+    temporary = dest_dir.parent / f".tmp-extract-{uuid.uuid4().hex}"
+    previous = dest_dir.parent / f".previous-extract-{uuid.uuid4().hex}"
+    validated: list[tuple[zipfile.ZipInfo, str, bool]] = []
+    try:
+        with zipfile.ZipFile(archive_path) as zf:
+            seen: set[str] = set()
+            total_size = 0
+            for member in zf.infolist():
+                if len(validated) >= _MAX_SKILL_ARCHIVE_FILES:
+                    raise ValueError("archive has too many entries")
+                normalized, is_dir = _safe_member_name(member)
+                key = normalized.casefold()
+                if key in seen:
+                    raise ValueError("archive has duplicate entry")
+                seen.add(key)
+                if not is_dir:
+                    if member.file_size < 0 or member.file_size > _MAX_SKILL_ARCHIVE_ENTRY_BYTES:
+                        raise ValueError("archive entry too large")
+                    total_size += int(member.file_size)
+                    if total_size > _MAX_SKILL_ARCHIVE_TOTAL_BYTES:
+                        raise ValueError("archive expanded size too large")
+                validated.append((member, normalized, is_dir))
+
+            temporary.mkdir(parents=True, exist_ok=False)
+            total_written = 0
+            for member, normalized, is_dir in validated:
+                target = temporary / normalized
+                if is_dir:
+                    target.mkdir(parents=True, exist_ok=True)
                     continue
-            except Exception:
-                logger.warning(f"[skill_source] skip unsafe archive member: {member.filename}")
-                continue
-            zf.extract(member, dest_dir)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                written = 0
+                with zf.open(member, "r") as source, target.open("xb") as output:
+                    while chunk := source.read(64 * 1024):
+                        written += len(chunk)
+                        total_written += len(chunk)
+                        if written > _MAX_SKILL_ARCHIVE_ENTRY_BYTES:
+                            raise ValueError("archive entry expanded beyond limit")
+                        if total_written > _MAX_SKILL_ARCHIVE_TOTAL_BYTES:
+                            raise ValueError("archive expanded beyond limit")
+                        output.write(chunk)
+                if written != int(member.file_size):
+                    raise ValueError("archive entry size mismatch")
+        if dest_dir.exists() and not force:
+            raise FileExistsError(f"archive destination exists: {dest_dir}")
+        if dest_dir.exists():
+            # Rename is atomic within this cache volume.  Unlike rmtree(), it
+            # leaves the known-good cache recoverable if Windows refuses the
+            # final replacement because a scanner or another process holds it.
+            dest_dir.replace(previous)
+        try:
+            temporary.replace(dest_dir)
+        except Exception:
+            if previous.exists() and not dest_dir.exists():
+                previous.replace(dest_dir)
+            raise
+        if previous.exists():
+            shutil.rmtree(previous, ignore_errors=True)
+    except Exception as exc:
+        logger.warning(f"[skill_source] rejected archive {archive_path.name}: {type(exc).__name__}")
+        raise
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary, ignore_errors=True)
+        if previous.exists() and dest_dir.exists():
+            shutil.rmtree(previous, ignore_errors=True)
 
 
 def _apply_subdir(root: Path, subdir: str, logger: Any) -> Path | None:
