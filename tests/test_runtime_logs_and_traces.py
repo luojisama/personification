@@ -837,3 +837,35 @@ def test_process_view_uses_explicit_stage_elapsed_without_changing_visible_detai
     assert view["items"][0]["detail"] == "实际可见回复"
     assert view["items"][0]["duration_ms"] == 0
     assert view["items"][1]["duration_ms"] == 2500
+
+
+def test_process_view_keeps_legacy_schema_prepare_out_of_tool_and_network_duration() -> None:
+    traces = load_personification_module("plugin.personification.core.reply_turn_trace")
+    view = traces.build_process_view(
+        {
+            "trace_id": "trace-legacy-schema-prepare",
+            "stages": [
+                {
+                    "ts": 100.0,
+                    "key": "tool_schema_prepare",
+                    "label": "工具 Schema 兼容处理",
+                    "status": "ok",
+                    "detail": "tools=1/1 schema=abcdef123456",
+                },
+                {
+                    "ts": 141.0,
+                    "key": "provider_request",
+                    "label": "Provider 请求",
+                    "status": "error",
+                    "detail": "http=400 code=provider_request_rejected",
+                    "elapsed_ms": 9000,
+                },
+            ],
+        }
+    )
+
+    assert view["items"][0]["category"] == "provider"
+    assert view["items"][0]["duration_ms"] is None
+    assert view["items"][1]["category"] == "provider"
+    assert view["items"][1]["duration_ms"] == 9000
+    assert [item["key"] for item in view["summary"]["slow_stages"]] == ["provider_request"]

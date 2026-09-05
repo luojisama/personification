@@ -9,6 +9,7 @@ from ._loader import load_personification_module
 
 ai_routes = load_personification_module("plugin.personification.core.ai_routes")
 llm_context = load_personification_module("plugin.personification.core.llm_context")
+reply_turn_trace = load_personification_module("plugin.personification.core.reply_turn_trace")
 tool_impl = load_personification_module("plugin.personification.skills.skillpacks.tool_caller.scripts.impl")
 
 
@@ -23,7 +24,7 @@ class _FakeCaller:
         self.messages_seen.append(list(messages or []))
         self.calls_seen.append((list(messages or []), list(tools or []), use_builtin_search))
         response = self._responses.pop(0)
-        if isinstance(response, Exception):
+        if isinstance(response, BaseException):
             raise response
         return response
 
@@ -552,6 +553,141 @@ def test_routed_tool_caller_records_safe_request_shape() -> None:
     assert caught.value.wire_tools_count == 0
     assert caught.value.tool_names_hash == attempt["tool_names_hash"]
     assert "private description" not in str(attempt)
+
+
+def test_routed_tool_caller_traces_schema_prepare_and_real_multimodal_request(monkeypatch) -> None:  # noqa: ANN001
+    stages: list[dict[str, object]] = []
+    monotonic_values = iter((10.0, 10.0, 20.0, 20.037))
+    monkeypatch.setattr(ai_routes, "time", SimpleNamespace(monotonic=lambda: next(monotonic_values)))
+    monkeypatch.setattr(reply_turn_trace, "record_stage", lambda **kwargs: stages.append(kwargs))
+    response = tool_impl.ToolCallerResponse("stop", "done", [], {})
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[_FakeCaller("primary", [response])],
+        fallback_caller=None,
+        logger=None,
+        route_descriptors=[{"name": "safe-route", "api_type": "openai", "model": "safe-model"}],
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "private prompt"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,SECRET"}},
+                {"type": "image_file", "image_file": {"path": "D:/private.png"}},
+                {"type": "image", "source": {"type": "base64", "data": "ANTHROPIC_SECRET"}},
+                {"type": "input_audio", "input_audio": {"data": "AUDIO_SECRET", "format": "wav"}},
+                {"inlineData": {"mimeType": "video/mp4", "data": "GEMINI_SECRET"}},
+                {"type": "video_url", "video_url": {"url": "https://private.invalid/video"}},
+            ],
+        }
+    ]
+
+    actual = asyncio.run(routed.chat_with_tools(messages, [], False))
+
+    assert actual.content == "done"
+    assert [stage["key"] for stage in stages] == ["provider_schema_prepare", "provider_request"]
+    assert stages[0]["elapsed_ms"] == 0
+    assert stages[1]["elapsed_ms"] == 36
+    detail = str(stages[1]["detail"])
+    assert "image_count=3" in detail
+    assert "multimodal=anthropic_image,gemini_inline_data,image_file,image_url,input_audio,video_url" in detail
+    assert "multimodal_counts=anthropic_image:1,gemini_inline_data:1,image_file:1,image_url:1,input_audio:1,video_url:1" in detail
+    assert "private prompt" not in detail
+    assert "private.invalid" not in detail
+    assert "SECRET" not in detail
+    assert "ANTHROPIC_SECRET" not in detail
+    assert "AUDIO_SECRET" not in detail
+    assert "GEMINI_SECRET" not in detail
+
+
+def test_routed_tool_caller_keeps_safe_shape_across_503_then_400(monkeypatch) -> None:  # noqa: ANN001
+    stages: list[dict[str, object]] = []
+    monkeypatch.setattr(reply_turn_trace, "record_stage", lambda **kwargs: stages.append(kwargs))
+    primary_error = RuntimeError("private 503 body")
+    primary_error.status_code = 503
+    fallback_error = RuntimeError("private 400 body")
+    fallback_error.status_code = 400
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[_FakeCaller("primary", [primary_error])],
+        fallback_caller=_FakeCaller("fallback", [fallback_error]),
+        logger=None,
+        route_descriptors=[
+            {"name": "primary", "api_type": "gemini", "model": "model-a"},
+            {"name": "fallback", "api_type": "openai", "model": "model-b"},
+        ],
+    )
+    messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://private.invalid/a"}}]}]
+
+    with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+        asyncio.run(routed.chat_with_tools(messages, [], False))
+
+    assert [item["status_code"] for item in caught.value.route_attempts] == [503, 400]
+    assert [item["code"] for item in caught.value.route_attempts] == [
+        "provider_call_failed",
+        "provider_request_rejected",
+    ]
+    request_stages = [item for item in stages if item["key"] == "provider_request"]
+    assert len(request_stages) == 2
+    assert all(item["status"] == "error" for item in request_stages)
+    combined = " ".join(str(item["detail"]) for item in request_stages)
+    assert "http=503" in combined
+    assert "http=400" in combined
+    assert "image_count=1" in combined
+    assert "private.invalid" not in combined
+    assert "private 503" not in combined
+    assert "private 400" not in combined
+
+
+def test_routed_tool_caller_cancellation_propagates_without_fallback_or_retry(monkeypatch) -> None:  # noqa: ANN001
+    stages: list[dict[str, object]] = []
+    monkeypatch.setattr(reply_turn_trace, "record_stage", lambda **kwargs: stages.append(kwargs))
+    primary = _FakeCaller("primary", [asyncio.CancelledError()])
+    fallback = _FakeCaller("fallback", [AssertionError("cancellation must not fallback")])
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[primary],
+        fallback_caller=fallback,
+        logger=None,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(routed.chat_with_tools([], [], False))
+
+    assert len(primary.calls_seen) == 1
+    assert fallback.calls_seen == []
+    request_stages = [item for item in stages if item["key"] == "provider_request"]
+    assert len(request_stages) == 1
+    assert request_stages[0]["status"] == "warn"
+    assert "code=provider_cancelled" in str(request_stages[0]["detail"])
+
+
+def test_routed_tool_caller_vision_fallback_success_pins_synthetic_continuation(monkeypatch) -> None:  # noqa: ANN001
+    stages: list[dict[str, object]] = []
+    monkeypatch.setattr(reply_turn_trace, "record_stage", lambda **kwargs: stages.append(kwargs))
+    unavailable = tool_impl.ToolCallerResponse("stop", "", [], {}, vision_unavailable=True)
+    fallback_first = tool_impl.ToolCallerResponse("stop", "视觉补救已接手", [], {})
+    fallback_continuation = tool_impl.ToolCallerResponse("stop", "最终结果", [], {})
+    primary = _FakeCaller("primary", [unavailable, AssertionError("synthetic continuation lost its fallback binding")])
+    fallback = _FakeCaller("fallback", [fallback_first, fallback_continuation])
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[primary],
+        fallback_caller=fallback,
+        logger=None,
+        route_descriptors=[
+            {"name": "primary", "api_type": "openai", "model": "model-a"},
+            {"name": "fallback", "api_type": "gemini", "model": "model-b"},
+        ],
+    )
+
+    first = asyncio.run(routed.chat_with_tools([], [], False))
+    synthetic = routed.build_synthetic_tool_evidence_message(first, "vision_analyze", {}, "safe evidence")
+    final = asyncio.run(routed.chat_with_tools([synthetic], [], False))
+
+    assert first.route_key == synthetic["_personification_routed_caller"]
+    assert final.content == "最终结果"
+    assert len(primary.calls_seen) == 1
+    assert len(fallback.calls_seen) == 2
+    request_stages = [item for item in stages if item["key"] == "provider_request"]
+    assert "code=provider_vision_unavailable" in str(request_stages[0]["detail"])
 
 
 def test_runtime_builder_wraps_legacy_caller_when_provider_list_is_empty(monkeypatch) -> None:  # noqa: ANN001

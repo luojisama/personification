@@ -23,6 +23,7 @@ _SIGNAL_KEY_RE = re.compile(
 )
 _TRACE_TRUNCATION_KEY = "trace_truncated"
 _CRITICAL_STAGE_KEYS = frozenset({"incoming_message", "outgoing_message"})
+_PREPARE_STAGE_KEYS = frozenset({"tool_schema_prepare", "provider_schema_prepare"})
 _MAX_STAGES = 80
 _SEMANTIC_ENUMS: dict[str, frozenset[str]] = {
     "action": frozenset({"reply", "silence", "ask_clarify"}),
@@ -580,6 +581,11 @@ def _stage_category(stage: dict[str, Any]) -> str:
     key = str(stage.get("key") or "").strip().lower()
     label = str(stage.get("label") or "").strip()
     text = f"{key} {label}"
+    # Schema preparation is local request assembly, never an Agent tool
+    # invocation.  Keep the legacy key here so old persisted traces render
+    # correctly after the route event was renamed.
+    if key in _PREPARE_STAGE_KEYS or key.startswith("provider_") or "Provider 请求" in label:
+        return "provider"
     if "tool" in key or "工具" in label:
         return "tool"
     if key.startswith("agent_") or "agent" in text.lower():
@@ -838,7 +844,17 @@ def build_process_view(trace: dict[str, Any] | None, *, logs: list[dict[str, Any
             elapsed_ms = None
         if elapsed_ms is None:
             elapsed_ms = _elapsed_from_detail(detail)
-        if elapsed_ms is None and ts > 0 and next_ts > ts:
+        if elapsed_ms is None and str(stage.get("key") or "").strip().lower() in _PREPARE_STAGE_KEYS:
+            # Older traces recorded preparation without a duration.  Unknown
+            # must stay unknown: it must neither absorb the following
+            # Provider/network wait nor be presented as a measured zero.
+            elapsed_ms = None
+        if (
+            elapsed_ms is None
+            and str(stage.get("key") or "").strip().lower() not in _PREPARE_STAGE_KEYS
+            and ts > 0
+            and next_ts > ts
+        ):
             elapsed_ms = int((next_ts - ts) * 1000)
         item = {
             "index": index + 1,

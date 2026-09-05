@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
@@ -34,6 +35,7 @@ _CANONICAL_PROVIDER_CODES = {
     "provider_safety_block",
     "provider_timeout",
     "provider_type_removed",
+    "provider_vision_unavailable",
     "providers_exhausted",
 }
 _MODEL_UNAVAILABLE_ERROR_CODES = {
@@ -42,6 +44,17 @@ _MODEL_UNAVAILABLE_ERROR_CODES = {
     "model_not_available",
     "model_not_found",
     "unsupported_model",
+}
+_SAFE_MULTIMODAL_PART_TYPES = {
+    "image_url": "image_url",
+    "image_file": "image_file",
+    "input_image": "input_image",
+    "image": "anthropic_image",
+    "input_audio": "input_audio",
+    "video_url": "video_url",
+    "video_file": "video_file",
+    "audio_url": "audio_url",
+    "audio_file": "audio_file",
 }
 
 
@@ -90,6 +103,9 @@ class RoutedToolCallerError(RuntimeError):
         self.tool_names_hash = str(selected.get("tool_names_hash") or "")[:16]
         self.tool_schema_hash = str(selected.get("tool_schema_hash") or "")[:16]
         self.builtin_search = bool(selected.get("builtin_search", False))
+        self.image_count = max(0, int(selected.get("image_count") or 0))
+        self.multimodal_types = str(selected.get("multimodal_types") or "")[:160]
+        self.multimodal_type_counts = str(selected.get("multimodal_type_counts") or "")[:160]
         self.upstream_status = str(selected.get("upstream_status") or "")[:48]
         self.upstream_reason = str(selected.get("upstream_reason") or "")[:48]
         self.upstream_detail_code = str(selected.get("upstream_detail_code") or "")[:64]
@@ -342,6 +358,38 @@ def _request_tool_name(tool: Any) -> str:
     return str(function.get("name", "") or "").strip()
 
 
+def _request_multimodal_shape(messages: list[dict]) -> tuple[int, str, str]:
+    """Return bounded multimodal facts without inspecting media payloads."""
+
+    image_count = 0
+    observed: dict[str, int] = {}
+    for message in list(messages or []):
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            raw_type = str(part.get("type") or "").strip().lower()
+            part_type = _SAFE_MULTIMODAL_PART_TYPES.get(
+                raw_type
+            )
+            if not part_type and ("inlineData" in part or "inline_data" in part):
+                # Gemini transport can carry inline data without a generic type.
+                # Its payload is never inspected or logged.
+                part_type = "gemini_inline_data"
+            if not part_type:
+                continue
+            observed[part_type] = observed.get(part_type, 0) + 1
+            if part_type in {"image_url", "image_file", "input_image", "anthropic_image"}:
+                image_count += 1
+    types = ",".join(sorted(observed))
+    type_counts = ",".join(f"{key}:{observed[key]}" for key in sorted(observed))
+    return image_count, types, type_counts
+
+
 def _safe_request_shape(
     messages: list[dict],
     tools: list[dict],
@@ -358,6 +406,7 @@ def _safe_request_shape(
     )
     schema_hash = hashlib.sha256(schema_json.encode("utf-8")).hexdigest()[:12] if tools else ""
     purpose = str(current_llm_context().get("purpose") or "").strip()[:64]
+    image_count, multimodal_types, multimodal_type_counts = _request_multimodal_shape(messages)
     return {
         "request_kind": "function_calling" if tools else "text",
         "request_purpose": purpose,
@@ -367,6 +416,9 @@ def _safe_request_shape(
         "tool_names_hash": names_hash,
         "tool_schema_hash": schema_hash,
         "builtin_search": bool(use_builtin_search),
+        "image_count": image_count,
+        "multimodal_types": multimodal_types,
+        "multimodal_type_counts": multimodal_type_counts,
     }
 
 
@@ -1111,50 +1163,209 @@ class RoutedToolCaller:
         messages: list[dict],
         use_builtin_search: bool,
     ) -> tuple[list[dict], dict[str, Any]]:
+        started_at = time.monotonic()
         descriptor = self._caller_route_descriptors.get(id(caller), {})
-        if not self._caller_schema_profiles_enabled.get(id(caller), False):
-            return list(tools or []), _safe_request_shape(messages, tools, use_builtin_search)
-        prepared = prepare_tools_for_provider(
-            tools,
-            provider=descriptor.get("provider", ""),
-            api_type=descriptor.get("api_type", ""),
-            model=descriptor.get("model", ""),
-            route_fingerprint=descriptor.get("route_fingerprint", ""),
-        )
-        diagnostics = prepared.diagnostics.to_safe_dict()
-        shape = _safe_request_shape(messages, list(prepared.tools), use_builtin_search)
-        shape.update(
-            {
-                "input_tools_count": diagnostics["input_tool_count"],
-                "schema_chars": diagnostics["schema_chars"],
-                "schema_bytes": diagnostics["schema_bytes"],
-                "schema_profile": diagnostics["profile"],
-                "schema_excluded_count": diagnostics["excluded_count"],
-                "schema_excluded": diagnostics["excluded_tools"],
-                "schema_downgraded": diagnostics["downgraded_tools"],
-            }
-        )
+        diagnostics: dict[str, Any] = {}
+        shape: dict[str, Any] = {}
+        wire_tools: list[dict] = []
+        status = "ok"
+        error_code = ""
+        try:
+            if not self._caller_schema_profiles_enabled.get(id(caller), False):
+                wire_tools = list(tools or [])
+                shape = _safe_request_shape(messages, wire_tools, use_builtin_search)
+            else:
+                prepared = prepare_tools_for_provider(
+                    tools,
+                    provider=descriptor.get("provider", ""),
+                    api_type=descriptor.get("api_type", ""),
+                    model=descriptor.get("model", ""),
+                    route_fingerprint=descriptor.get("route_fingerprint", ""),
+                )
+                diagnostics = prepared.diagnostics.to_safe_dict()
+                wire_tools = list(prepared.tools)
+                shape = _safe_request_shape(messages, wire_tools, use_builtin_search)
+                shape.update(
+                    {
+                        "input_tools_count": diagnostics["input_tool_count"],
+                        "schema_chars": diagnostics["schema_chars"],
+                        "schema_bytes": diagnostics["schema_bytes"],
+                        "schema_profile": diagnostics["profile"],
+                        "schema_excluded_count": diagnostics["excluded_count"],
+                        "schema_excluded": diagnostics["excluded_tools"],
+                        "schema_downgraded": diagnostics["downgraded_tools"],
+                    }
+                )
+                if diagnostics["excluded_count"]:
+                    status = "warn"
+        except asyncio.CancelledError:
+            status = "warn"
+            error_code = "provider_cancelled"
+            raise
+        except Exception:
+            status = "error"
+            error_code = "schema_prepare_failed"
+            raise
+        finally:
+            self._record_schema_prepare(
+                descriptor,
+                shape=shape,
+                status=status,
+                error_code=error_code,
+                elapsed_ms=max(0, int((time.monotonic() - started_at) * 1000)),
+            )
+        return wire_tools, shape
+
+    @staticmethod
+    def _record_schema_prepare(
+        descriptor: dict[str, Any],
+        *,
+        shape: dict[str, Any],
+        status: str,
+        error_code: str,
+        elapsed_ms: int,
+    ) -> None:
         try:
             from .reply_turn_trace import record_stage
 
             record_stage(
-                key="tool_schema_prepare",
-                label="工具 Schema 兼容处理",
-                status="warn" if diagnostics["excluded_count"] else "ok",
+                key="provider_schema_prepare",
+                label="Provider 请求 Schema 准备",
+                status=status,
                 detail=(
-                    f"provider={diagnostics['provider']} api={diagnostics['api_type']} "
-                    f"model={diagnostics['model']} route={diagnostics['route_fingerprint']} "
-                    f"tools={diagnostics['tool_count']}/{diagnostics['input_tool_count']} "
-                    f"chars={diagnostics['schema_chars']} bytes={diagnostics['schema_bytes']} "
-                    f"names_hash={diagnostics['tool_names_hash']} "
-                    f"schema_hash={diagnostics['tool_schema_hash']} "
-                    f"excluded={diagnostics['excluded_count']}"
+                    f"provider={descriptor.get('provider', '-')} api={descriptor.get('api_type', '-')} "
+                    f"model={descriptor.get('model', '-')} route={descriptor.get('route_fingerprint', '-')} "
+                    f"tools={shape.get('tools_count', 0)}/{shape.get('input_tools_count', shape.get('tools_count', 0))} "
+                    f"schema={shape.get('tool_schema_hash', '-')} "
+                    f"excluded={shape.get('schema_excluded_count', 0)} "
+                    f"status={status} code={error_code or 'schema_prepare_complete'}"
                 ),
                 hint="完整参数、工具结果和凭据不会写入追踪。",
+                elapsed_ms=elapsed_ms,
             )
         except Exception:
             pass
-        return list(prepared.tools), shape
+
+    @staticmethod
+    def _shape_for_call(
+        request_shape: dict[str, Any],
+        messages: list[dict],
+        wire_tools: list[dict],
+        use_builtin_search: bool,
+    ) -> dict[str, Any]:
+        shape = dict(request_shape)
+        shape.update(_safe_request_shape(messages, wire_tools, use_builtin_search))
+        return shape
+
+    def _record_provider_request(
+        self,
+        caller: ToolCaller,
+        *,
+        request_shape: dict[str, Any],
+        elapsed_ms: int,
+        response: ToolCallerResponse | None = None,
+        error: BaseException | None = None,
+        cancelled: bool = False,
+        reframe: bool = False,
+    ) -> None:
+        """Emit one content-free trace event for a real Provider request."""
+
+        try:
+            descriptor = self._caller_route_descriptors.get(
+                id(caller), {"caller": type(caller).__name__[:80]}
+            )
+            shape = dict(request_shape)
+            if cancelled:
+                status = "warn"
+                code = "provider_cancelled"
+                status_code = 0
+                wire_tools_count = max(0, int(shape.get("tools_count") or 0))
+            elif error is not None:
+                attempt = self._route_attempt(caller, error, request_shape=shape)
+                status = "error"
+                code = str(attempt.get("code") or "provider_call_failed")
+                status_code = max(0, int(attempt.get("status_code") or 0))
+                wire_tools_count = max(0, int(attempt.get("wire_tools_count") or 0))
+            else:
+                if bool(getattr(response, "vision_unavailable", False)):
+                    status = "warn"
+                    code = "provider_vision_unavailable"
+                elif detect_route_safety_issue(response):
+                    status = "warn"
+                    code = "provider_safety_block"
+                elif _is_invalid_tool_response(response):
+                    status = "warn"
+                    code = "provider_invalid_response"
+                else:
+                    status = "ok"
+                    code = "provider_success"
+                status_code = 0
+                wire_tools_count = _response_wire_tools_count(
+                    response, max(0, int(shape.get("tools_count") or 0))
+                )
+            from .reply_turn_trace import record_stage
+
+            record_stage(
+                key="provider_request",
+                label="Provider 请求",
+                status=status,
+                detail=(
+                    f"provider={descriptor.get('provider', '-')} api={descriptor.get('api_type', '-')} "
+                    f"model={descriptor.get('model', '-')} route={descriptor.get('route_fingerprint', '-')} "
+                    f"phase={'safety_reframe' if reframe else 'initial'} status={status} code={code} "
+                    f"http={status_code} request_kind={shape.get('request_kind', 'text')} "
+                    f"messages={max(0, int(shape.get('message_count') or 0))} "
+                    f"prompt_chars={max(0, int(shape.get('prompt_chars') or 0))} "
+                    f"tools={max(0, int(shape.get('tools_count') or 0))} wire_tools={wire_tools_count} "
+                    f"schema={shape.get('tool_schema_hash', '-')} "
+                    f"image_count={max(0, int(shape.get('image_count') or 0))} "
+                    f"multimodal={shape.get('multimodal_types') or 'none'} "
+                    f"multimodal_counts={shape.get('multimodal_type_counts') or 'none'} "
+                    f"builtin_search={str(bool(shape.get('builtin_search'))).lower()}"
+                ),
+                hint="仅记录安全路由描述、枚举与计数；不记录正文、媒体引用、URL、Base64 或凭据。",
+                elapsed_ms=max(0, int(elapsed_ms)),
+            )
+        except Exception:
+            pass
+
+    async def _call_provider_with_trace(
+        self,
+        caller: ToolCaller,
+        messages: list[dict],
+        wire_tools: list[dict],
+        use_builtin_search: bool,
+        request_shape: dict[str, Any],
+        *,
+        reframe: bool = False,
+    ) -> ToolCallerResponse:
+        started_at = time.monotonic()
+        response: ToolCallerResponse | None = None
+        error: BaseException | None = None
+        cancelled = False
+        try:
+            response = await caller.chat_with_tools(
+                self._strip_route_markers(messages),
+                wire_tools,
+                use_builtin_search,
+            )
+            return response
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            self._record_provider_request(
+                caller,
+                request_shape=request_shape,
+                elapsed_ms=max(0, int((time.monotonic() - started_at) * 1000)),
+                response=response,
+                error=error,
+                cancelled=cancelled,
+                reframe=reframe,
+            )
 
     def _record_route_success(
         self,
@@ -1240,10 +1451,12 @@ class RoutedToolCaller:
                 use_builtin_search,
             )
             try:
-                response = await caller.chat_with_tools(
-                    self._strip_route_markers(messages),
+                response = await self._call_provider_with_trace(
+                    caller,
+                    messages,
                     wire_tools,
                     use_builtin_search,
+                    self._shape_for_call(request_shape, messages, wire_tools, use_builtin_search),
                 )
             except asyncio.CancelledError:
                 raise
@@ -1260,17 +1473,27 @@ class RoutedToolCaller:
                     _attach_response_wire_tools_count(last_error, response, len(wire_tools))
                     route_attempts.append(self._route_attempt(caller, last_error, request_shape=request_shape))
                     continue
+                reframe_messages = build_safe_reframe_messages(messages)
+                reframe_shape = self._shape_for_call(
+                    request_shape,
+                    reframe_messages,
+                    wire_tools,
+                    use_builtin_search,
+                )
                 try:
-                    response = await caller.chat_with_tools(
-                        self._strip_route_markers(build_safe_reframe_messages(messages)),
+                    response = await self._call_provider_with_trace(
+                        caller,
+                        reframe_messages,
                         wire_tools,
                         use_builtin_search,
+                        reframe_shape,
+                        reframe=True,
                     )
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     last_error = exc
-                    route_attempts.append(self._route_attempt(caller, exc, request_shape=request_shape))
+                    route_attempts.append(self._route_attempt(caller, exc, request_shape=reframe_shape))
                     continue
                 _response_wire_tools_count(response, len(wire_tools))
                 if detect_route_safety_issue(response):
