@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from ..agent.tool_registry import AgentTool, ToolRegistry
+from .expression_policy import expression_source_enabled
 from .qq_expression_library import semantic_text_for_qq_expression_segment
 from .qq_face_names import QQ_FACE_NAMES
 
@@ -276,7 +277,15 @@ def build_send_qq_expression_tools(*, executor: Any, bot: Any = None, plugin_con
     effective_bot = bot or getattr(executor, "bot", None)
     effective_config = plugin_config or getattr(executor, "config", None)
 
+    def _runtime_config() -> Any:
+        # Tool objects can outlive a hot config reload.  Dispatch decisions
+        # must therefore read the executor's current config, not the snapshot
+        # used when schemas were exposed to the model.
+        return getattr(executor, "config", None) or effective_config
+
     async def _send_face(face_id: Any = None, face_name: str = "", text: str = "") -> str:
+        if not expression_source_enabled(_runtime_config(), "native"):
+            return _action_result(ok=False, reason="QQ 内置表情来源已关闭")
         resolved_id, label = resolve_qq_face_id(face_id, face_name)
         if resolved_id is None:
             return _action_result(ok=False, reason=label)
@@ -299,7 +308,9 @@ def build_send_qq_expression_tools(*, executor: Any, bot: Any = None, plugin_con
         )
 
     async def _send_favorite(index: int = 1, random_pick: bool = False, count: int = 20, text: str = "") -> str:
-        if _extensions_disabled(effective_config):
+        if not expression_source_enabled(_runtime_config(), "qq_favorite"):
+            return _action_result(ok=False, reason="QQ 收藏表情来源已关闭")
+        if _extensions_disabled(_runtime_config()):
             return _action_result(ok=False, reason="协议扩展能力已关闭，无法调用 fetch_custom_face")
         if effective_bot is None:
             return _action_result(ok=False, reason="当前 bot 上下文不可用")
@@ -324,6 +335,7 @@ def build_send_qq_expression_tools(*, executor: Any, bot: Any = None, plugin_con
                 "text": _compact_text(text),
                 "summary": summary,
                 "history_text": f"[QQ收藏表情:{summary}]" if summary else "[QQ收藏表情]",
+                "expression_source": "qq_favorite",
             },
         ):
             return _action_result(ok=False, reason="当前发送上下文不可用")
@@ -337,7 +349,9 @@ def build_send_qq_expression_tools(*, executor: Any, bot: Any = None, plugin_con
         )
 
     async def _send_recommended(query: str, index: int = 1, random_pick: bool = False, text: str = "") -> str:
-        if _extensions_disabled(effective_config):
+        if not expression_source_enabled(_runtime_config(), "qq_recommended"):
+            return _action_result(ok=False, reason="QQ 推荐表情来源已关闭")
+        if _extensions_disabled(_runtime_config()):
             return _action_result(ok=False, reason="协议扩展能力已关闭，无法调用 get_recommend_face")
         if effective_bot is None:
             return _action_result(ok=False, reason="当前 bot 上下文不可用")
@@ -364,6 +378,7 @@ def build_send_qq_expression_tools(*, executor: Any, bot: Any = None, plugin_con
                 "text": _compact_text(text),
                 "summary": summary or q,
                 "history_text": f"[QQ推荐表情:{q}]",
+                "expression_source": "qq_recommended",
             },
         ):
             return _action_result(ok=False, reason="当前发送上下文不可用")
@@ -385,7 +400,7 @@ def build_send_qq_expression_tools(*, executor: Any, bot: Any = None, plugin_con
         "latency_class": "fast",
         "risk_level": "low",
     }
-    return [
+    tools = [
         AgentTool(
             name="send_qq_face",
             description=(
@@ -449,6 +464,12 @@ def build_send_qq_expression_tools(*, executor: Any, bot: Any = None, plugin_con
             metadata=dict(metadata),
         ),
     ]
+    source_by_name = {
+        "send_qq_face": "native",
+        "send_qq_favorite_expression": "qq_favorite",
+        "send_qq_recommended_expression": "qq_recommended",
+    }
+    return [tool for tool in tools if expression_source_enabled(effective_config, source_by_name[tool.name])]
 
 
 def register_send_qq_expression_tools(registry: ToolRegistry, *, executor: Any, bot: Any = None, plugin_config: Any = None) -> None:

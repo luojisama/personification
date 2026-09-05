@@ -74,7 +74,10 @@ def test_action_executor_fake_ledger_wraps_every_send_surface() -> None:
         await executor.send_image_b64("QUJD")
         await executor.execute("send_sticker", {"path": "sticker.png"})
         await executor.execute("send_qq_face", {"face_id": 182})
-        await executor.execute("send_qq_image_expression", {"url": "https://example.test/a.png"})
+        await executor.execute(
+            "send_qq_image_expression",
+            {"url": "https://example.test/a.png", "expression_source": "qq_favorite"},
+        )
         await executor.execute("send_image_url", {"url": "https://example.test/b.png"})
         await executor.execute("send_qq_mface", {"data": {"emoji_id": "face-1"}})
         await executor.execute("poke_user", {"user_id": "10002"})

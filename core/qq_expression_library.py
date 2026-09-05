@@ -9,6 +9,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from .expression_policy import expression_source_enabled
+
 
 ASSET_PATH = Path(__file__).with_name("qq_expression_assets.json")
 _MARKER_RE = re.compile(
@@ -206,7 +208,10 @@ def _extensions_disabled(plugin_config: Any) -> bool:
 
 
 def qq_expression_enabled(plugin_config: Any) -> bool:
-    return bool(getattr(plugin_config, "personification_qq_expression_enabled", True))
+    return any(
+        expression_source_enabled(plugin_config, source)
+        for source in ("native", "qq_favorite", "qq_recommended")
+    )
 
 
 @lru_cache(maxsize=1)
@@ -524,6 +529,14 @@ async def _resolve_request_to_segment(
     plugin_config: Any = None,
     logger: Any = None,
 ) -> tuple[list[Any], str, str]:
+    source_for_request = {
+        "favorite": "qq_favorite",
+        "recommended": "qq_recommended",
+        "face": "native",
+        "super_face": "native",
+    }.get(request.kind, "")
+    if not expression_source_enabled(plugin_config, source_for_request):
+        return [], "", ""
     try:
         if request.kind in {"face", "super_face"}:
             super_face = request.kind == "super_face"
@@ -641,6 +654,12 @@ async def render_qq_expression_cq_text(
         if isinstance(part, str):
             rendered.append(_cq_escape(part))
             history_parts.append(part)
+            continue
+        source_for_request = {
+            "favorite": "qq_favorite", "recommended": "qq_recommended",
+            "face": "native", "super_face": "native",
+        }.get(part.kind, "")
+        if not expression_source_enabled(plugin_config, source_for_request):
             continue
         try:
             if part.kind in {"face", "super_face"}:

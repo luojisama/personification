@@ -7,6 +7,7 @@ from nonebot.adapters.onebot.v11 import MessageSegment
 from ..core.qq_outbound import QQOutboundLedger, SendReceipt, build_outbound_context
 from ..core.qq_recall import QQRecallService
 from ..core.visible_output import guard_visible_text
+from ..core.expression_policy import expression_action_allowed
 
 
 class ActionExecutor:
@@ -88,6 +89,8 @@ class ActionExecutor:
 
     async def execute(self, action: str, params: dict) -> str:
         self.last_delivery_confirmed = False
+        if not expression_action_allowed(self.config, action, params):
+            return "表情发送已被当前来源开关拦截"
         match action:
             case "recall_latest_qq_operation":
                 if self.qq_recall_service is None:

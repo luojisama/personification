@@ -13,6 +13,7 @@ planner_mod = load_personification_module("plugin.personification.agent.runtime.
 qq_library = load_personification_module("plugin.personification.core.qq_expression_library")
 qq_diagnostics = load_personification_module("plugin.personification.core.qq_expression_diagnostics")
 qq_tools = load_personification_module("plugin.personification.core.qq_expression_tools")
+persona_contract = load_personification_module("plugin.personification.core.persona_contract")
 event_rules = load_personification_module("plugin.personification.handlers.event_rules")
 reply_buffer = load_personification_module("plugin.personification.handlers.reply_buffer")
 tool_catalog = load_personification_module("plugin.personification.agent.runtime.tool_catalog")
@@ -46,10 +47,11 @@ class _Seg:
         self.data = data
 
 
-def _config(mode: str = "auto", *, qq_expression_enabled: bool = True):
+def _config(mode: str = "auto", *, qq_expression_enabled: bool = True, **overrides):
     return SimpleNamespace(
         personification_protocol_extensions=mode,
         personification_qq_expression_enabled=qq_expression_enabled,
+        **overrides,
     )
 
 
@@ -119,6 +121,7 @@ def test_send_favorite_expression_fetches_url_and_queues_image() -> None:
                 "text": "",
                 "summary": "",
                 "history_text": "[QQ收藏表情]",
+                "expression_source": "qq_favorite",
             },
         }
     ]
@@ -428,6 +431,129 @@ def test_expression_tool_result_queued() -> None:
 
     assert qq_tools.expression_tool_result_queued(result) is True
     assert qq_tools.expression_tool_result_queued('{"ok": false, "queued": true}') is False
+
+
+def test_recommended_source_disabled_neither_exposes_tool_nor_calls_api() -> None:
+    async def _run() -> tuple[set[str], list[tuple[str, dict]], list[dict]]:
+        bot = FakeBot()
+        executor = action_executor_mod.ActionExecutor(
+            bot,
+            object(),
+            _config(personification_qq_recommended_expression_enabled=False),
+            _Logger(),
+        )
+        queued: list[dict] = []
+        executor.bind_pending_actions(queued)
+        tools = _tool_map(executor, bot)
+        # Exercise the handler too: an already-held reference must not bypass
+        # the source gate when a runtime config change happens after exposure.
+        stale = qq_tools.build_send_qq_expression_tools(
+            executor=executor, bot=bot, plugin_config=_config()
+        )
+        recommend = next(tool for tool in stale if tool.name == "send_qq_recommended_expression")
+        await recommend.handler(query="开心")
+        return set(tools), bot.calls, queued
+
+    names, calls, queued = asyncio.run(_run())
+
+    assert "send_qq_recommended_expression" not in names
+    assert calls == []
+    assert queued == []
+
+
+def test_final_dispatch_rechecks_recommended_source_after_queue() -> None:
+    async def _run() -> tuple[str, list[str]]:
+        bot = FakeBot()
+        config = _config()
+        executor = action_executor_mod.ActionExecutor(bot, object(), config, _Logger())
+        result = await executor.execute(
+            "send_qq_image_expression",
+            {"url": "https://example.test/a.png", "expression_source": "qq_recommended"},
+        )
+        config.personification_qq_recommended_expression_enabled = False
+        blocked = await executor.execute(
+            "send_qq_image_expression",
+            {"url": "https://example.test/b.png", "expression_source": "qq_recommended"},
+        )
+        return result + "|" + blocked, bot.sent
+
+    result, sent = asyncio.run(_run())
+
+    assert "已发送 QQ 图片表情" in result
+    assert "拦截" in result
+    assert len(sent) == 1
+
+
+def test_final_dispatch_rejects_untrusted_image_expression_source() -> None:
+    async def _run() -> tuple[str, list[str]]:
+        bot = FakeBot()
+        executor = action_executor_mod.ActionExecutor(bot, object(), _config(), _Logger())
+        result = await executor.execute("send_qq_image_expression", {"url": "https://example.test/a.png"})
+        return result, bot.sent
+
+    result, sent = asyncio.run(_run())
+
+    assert "拦截" in result
+    assert sent == []
+
+
+def test_legacy_remote_probability_zero_is_preserved_unless_source_explicitly_enabled() -> None:
+    inherited = _config(personification_qq_favorite_expression_probability=0)
+    explicit = _config(
+        personification_qq_favorite_expression_probability=0,
+        personification_qq_recommended_expression_enabled=True,
+    )
+
+    assert "send_qq_favorite_expression" not in {
+        tool.name
+        for tool in qq_tools.build_send_qq_expression_tools(
+            executor=SimpleNamespace(config=inherited), plugin_config=inherited
+        )
+    }
+    assert "send_qq_recommended_expression" not in {
+        tool.name
+        for tool in qq_tools.build_send_qq_expression_tools(
+            executor=SimpleNamespace(config=inherited), plugin_config=inherited
+        )
+    }
+    assert "send_qq_recommended_expression" in {
+        tool.name
+        for tool in qq_tools.build_send_qq_expression_tools(
+            executor=SimpleNamespace(config=explicit), plugin_config=explicit
+        )
+    }
+
+
+def test_legacy_native_probability_zero_is_preserved_unless_explicitly_enabled() -> None:
+    inherited = _config(personification_qq_expression_probability=0)
+    explicit = _config(
+        personification_qq_expression_probability=0,
+        personification_native_expression_enabled=True,
+    )
+
+    assert "send_qq_face" not in {
+        tool.name for tool in qq_tools.build_send_qq_expression_tools(
+            executor=SimpleNamespace(config=inherited), plugin_config=inherited
+        )
+    }
+    assert "send_qq_face" in {
+        tool.name for tool in qq_tools.build_send_qq_expression_tools(
+            executor=SimpleNamespace(config=explicit), plugin_config=explicit
+        )
+    }
+
+
+def test_persona_contract_keeps_admin_core_above_dynamic_state() -> None:
+    contract = persona_contract.build_persona_contract(
+        "管理员设定：克制、可爱、自然。",
+        emotion="当前有点委屈",
+        relationship="熟人之间开玩笑",
+        memories="用户偏好短句",
+    )
+
+    assert "核心人格" in contract
+    assert contract.index("核心人格") < contract.index("当前情绪")
+    assert "绝不能改写核心人格" in contract
 
 
 def test_tool_catalog_expression_intent_exposes_only_expression_tools() -> None:

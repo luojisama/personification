@@ -574,6 +574,13 @@ class Config(BaseModel):
     personification_sticker_second_judge_enabled: bool = False
     personification_sticker_curator_enabled: bool = False
     personification_sticker_curator_interval_days: int = 3
+    # Source policy.  The legacy QQ switch/probability remains authoritative
+    # when it was explicitly disabled in an existing deployment.
+    personification_expression_enabled: bool = True
+    personification_local_expression_enabled: Optional[bool] = None
+    personification_native_expression_enabled: Optional[bool] = None
+    personification_qq_favorite_expression_enabled: Optional[bool] = None
+    personification_qq_recommended_expression_enabled: Optional[bool] = None
     personification_qq_expression_enabled: bool = True
     personification_qq_expression_probability: float = 0.08
     personification_qq_expression_cooldown_seconds: int = 180
