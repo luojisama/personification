@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, Optional, Union
 import yaml
 
 from .context_policy import ensure_prompt_injection_guard
+from .persona_contract import PERSONA_CONTRACT_MARKER, build_persona_contract
 
 
 AGENT_GUIDANCE_TEMPLATE = """=== 轻量工具约束（对用户不可见）===
@@ -153,10 +154,15 @@ def _append_prompt_guidance(
 ) -> Union[str, Dict[str, Any], None]:
     guided = _append_agent_guidance(_append_core_values(content, plugin_config), plugin_config)
     if isinstance(guided, str):
-        return ensure_prompt_injection_guard(guided)
+        secured = ensure_prompt_injection_guard(guided)
+        if PERSONA_CONTRACT_MARKER not in secured:
+            secured = build_persona_contract(secured)
+        return secured
     if isinstance(guided, dict):
         copied = dict(guided)
         copied["system"] = ensure_prompt_injection_guard(copied.get("system", ""))
+        if PERSONA_CONTRACT_MARKER not in copied["system"]:
+            copied["system"] = build_persona_contract(copied["system"])
         return copied
     return guided
 

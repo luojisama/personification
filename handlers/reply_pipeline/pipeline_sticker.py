@@ -21,6 +21,8 @@ from ...core.gif_understanding import (
 from ...core.media_understanding import analyze_images_with_route_or_fallback
 from ...core.metrics import record_counter
 from ...core.qq_expression_library import semantic_text_for_qq_expression_segment
+from ...core.expression_policy import expression_source_enabled
+from ...core.persona_contract import build_persona_contract, persona_version
 from ...core.safe_image_download import (
     DownloadedImage,
     SafeImageDownloadError,
@@ -28,11 +30,14 @@ from ...core.safe_image_download import (
 )
 from ...core.sticker_library import (
     analyze_sticker_image,
+    compute_file_hash,
+    get_persona_adaptation,
     image_bytes_to_data_url,
     judge_sticker_against_library,
     list_local_sticker_files,
     load_sticker_metadata,
     normalize_sticker_entry,
+    put_persona_adaptation,
     recall_similar_stickers,
     render_sticker_semantic_summary,
     resolve_sticker_dir,
@@ -105,6 +110,7 @@ class IncomingStickerCandidate:
     mime_type: str
     source_kind: str
     summary_hint: str = ""
+    source_message_id: str = ""
 
 
 def _gif_placeholder(summary_hint: str = "") -> str:
@@ -376,7 +382,15 @@ async def auto_collect_stickers(
     group_id: str,
     user_id: str,
     candidates: List[IncomingStickerCandidate],
+    core_persona: str = "",
+    platform: str = "",
+    bot_id: str = "",
+    source_message_id: str = "",
 ) -> None:
+    # The real RuntimeDeps has no persona loader or Bot.  The trusted reply
+    # entry point supplies the effective persona and adapter identity.
+    if not str(core_persona or "").strip() or not platform or not bot_id:
+        return
     sticker_dir = resolve_sticker_dir(getattr(runtime.plugin_config, "personification_sticker_path", None), create=True)
     if not candidates:
         return
@@ -389,7 +403,8 @@ async def auto_collect_stickers(
     sample_rate = max(0.0, min(1.0, sample_rate))
     min_confidence = float(getattr(runtime.plugin_config, "personification_sticker_collect_min_confidence", 0.7) or 0.0)
     min_confidence = max(0.0, min(1.0, min_confidence))
-    second_judge_enabled = bool(getattr(runtime.plugin_config, "personification_sticker_second_judge_enabled", False))
+    # Collection is a durable side effect: visual/persona review is mandatory
+    # and fail closed, regardless of an obsolete optional second-judge flag.
     for candidate in candidates:
         try:
             current_files = list_local_sticker_files(sticker_dir, include_gif=True)
@@ -401,8 +416,26 @@ async def auto_collect_stickers(
             if not _can_collect_after_cooldown(group_id, user_id, cooldown_seconds):
                 record_counter("sticker.collect_skipped", reason="cooldown")
                 continue
-            if sample_rate < 1.0 and random.random() >= sample_rate:
-                record_counter("sticker.collect_skipped", reason="sample_rate")
+            # Preserve a legacy explicit disable; semantic choice is model-led.
+            if sample_rate <= 0.0:
+                record_counter("sticker.collect_skipped", reason="sampling_disabled")
+                continue
+            _validate_downloaded_image_payload(candidate.payload, candidate.mime_type)
+            metadata = load_sticker_metadata(sticker_dir)
+            scope = persona_version(core_persona, platform=platform, bot_id=bot_id, group_id=group_id)
+            content_hash = compute_file_hash(candidate.payload)
+            cache_key = f"{content_hash}:{scope}"
+            occurrence = {
+                "platform": platform, "bot_id": bot_id,
+                "source_group_id": str(group_id), "source_user_id": str(user_id),
+                "source_message_id": str(candidate.source_message_id or source_message_id),
+                "source_kind": candidate.source_kind,
+            }
+            cached = get_persona_adaptation(metadata, cache_key)
+            if cached is not None:
+                put_persona_adaptation(metadata, cache_key, {**cached, **occurrence})
+                await save_sticker_metadata(sticker_dir, metadata)
+                record_counter("sticker.collect_skipped", reason="persona_cached_decision")
                 continue
             result = await analyze_sticker_image(
                 runtime=runtime,
@@ -410,16 +443,15 @@ async def auto_collect_stickers(
                 fallback_vision_caller=runtime.vision_caller,
             )
             record_counter("sticker.collect_attempt", style=result.style)
-            if not result.is_sticker or not result.should_collect:
+            if not result.is_sticker or result.style == "unknown" or not result.summary:
                 if result.style == "meme" and meme_policy == "reject":
                     record_counter("sticker.collect_meme_rejected")
                 continue
-            if min_confidence > 0.0 and result.collect_confidence > 0.0 and result.collect_confidence < min_confidence:
+            if result.collect_confidence < min_confidence:
                 record_counter("sticker.collect_skipped", reason="low_confidence")
                 continue
             if file_count >= soft_limit:
                 runtime.logger.info(f"拟人插件：表情包库已达软上限 {soft_limit} 张，仍接受高质量收集但建议触发整理。")
-            metadata = load_sticker_metadata(sticker_dir)
             mood_over_limit = False
             for mood_tag in result.mood_tags:
                 mood_count = sum(
@@ -435,7 +467,7 @@ async def auto_collect_stickers(
             if mood_over_limit:
                 continue
 
-            if second_judge_enabled and result.style != "meme":
+            if result.style in {"anime", "meme", "other"}:
                 metadata = load_sticker_metadata(sticker_dir)
                 similar = recall_similar_stickers(
                     metadata,
@@ -443,29 +475,41 @@ async def auto_collect_stickers(
                     scene_tags=result.scene_tags,
                     top_k=12,
                 )
-                if similar:
-                    judge = await judge_sticker_against_library(
+                judge = await judge_sticker_against_library(
                         runtime=runtime,
                         sticker_data_url=candidate.data_url,
                         sticker_summary=result.summary,
                         sticker_description=result.description,
                         sticker_mood_tags=result.mood_tags,
                         sticker_scene_tags=result.scene_tags,
-                        similar_candidates=similar,
-                    )
-                    decision = str(judge.get("decision", "collect") or "collect")
-                    record_counter(f"sticker.second_judge_{decision}")
-                    if decision != "collect":
-                        runtime.logger.debug(f"拟人插件：表情包二次判断 {decision}，跳过收集。原因：{judge.get('reason', '')}")
-                        continue
-                    tag_correction = judge.get("tag_correction", {})
-                    if isinstance(tag_correction, dict):
-                        corrected_mood = tag_correction.get("mood_tags", [])
-                        corrected_scene = tag_correction.get("scene_tags", [])
-                        if isinstance(corrected_mood, list) and corrected_mood:
-                            result = result.__class__(**{**result.__dict__, "mood_tags": [str(t) for t in corrected_mood[:4]]})
-                        if isinstance(corrected_scene, list) and corrected_scene:
-                            result = result.__class__(**{**result.__dict__, "scene_tags": [str(t) for t in corrected_scene[:4]]})
+                    similar_candidates=similar,
+                    persona_contract=build_persona_contract(core_persona),
+                    legacy_preference=meme_policy,
+                )
+                decision = str(judge.get("decision", "skip_unknown") or "skip_unknown")
+                record_counter(f"sticker.second_judge_{decision}")
+                if decision != "collect":
+                    if decision != "skip_unknown":
+                        put_persona_adaptation(metadata, cache_key, {
+                            **occurrence,
+                            "decision": decision,
+                            "content_hash": content_hash,
+                            "persona_scope_hash": scope,
+                            "source_group_id": str(group_id),
+                            "source_user_id": str(user_id),
+                            "evidence_summary": result.summary[:160],
+                        })
+                        await save_sticker_metadata(sticker_dir, metadata)
+                    runtime.logger.debug(f"拟人插件：表情包人格审查 {decision}，跳过收集。原因：{judge.get('reason', '')}")
+                    continue
+                tag_correction = judge.get("tag_correction", {})
+                if isinstance(tag_correction, dict):
+                    corrected_mood = tag_correction.get("mood_tags", [])
+                    corrected_scene = tag_correction.get("scene_tags", [])
+                    if isinstance(corrected_mood, list) and corrected_mood:
+                        result = result.__class__(**{**result.__dict__, "mood_tags": [str(t) for t in corrected_mood[:4]]})
+                    if isinstance(corrected_scene, list) and corrected_scene:
+                        result = result.__class__(**{**result.__dict__, "scene_tags": [str(t) for t in corrected_scene[:4]]})
 
             saved_path, created, file_hash = await save_collected_sticker(
                 sticker_dir,
@@ -474,6 +518,13 @@ async def auto_collect_stickers(
                 file_name_hint=result.summary or result.description or "sticker",
             )
             if not created:
+                put_persona_adaptation(metadata, cache_key, {
+                    **occurrence,
+                    "decision": "collect", "content_hash": content_hash,
+                    "persona_scope_hash": scope, "source_group_id": str(group_id),
+                    "source_user_id": str(user_id), "evidence_summary": result.summary[:160],
+                })
+                await save_sticker_metadata(sticker_dir, metadata)
                 record_counter("sticker.collect_dedup", reason="hash_duplicate")
                 continue
             _mark_collect_cooldown(group_id, user_id)
@@ -496,6 +547,12 @@ async def auto_collect_stickers(
                 source_user_id=user_id,
                 collected_at=time.strftime("%Y-%m-%d %H:%M"),
             )
+            put_persona_adaptation(metadata, cache_key, {
+                **occurrence,
+                "decision": "collect", "content_hash": content_hash,
+                "persona_scope_hash": scope, "source_group_id": str(group_id),
+                "source_user_id": str(user_id), "evidence_summary": result.summary[:160],
+            })
             await save_sticker_metadata(sticker_dir, metadata)
             runtime.logger.info(f"拟人插件：已自动收藏表情包 {saved_path.name}")
         except Exception as exc:
@@ -509,6 +566,10 @@ def spawn_auto_collect_stickers(
     user_id: str,
     candidates: List[IncomingStickerCandidate],
     task_exc_logger: Callable[[str, Any], Any],
+    core_persona: str = "",
+    platform: str = "",
+    bot_id: str = "",
+    source_message_id: str = "",
 ) -> None:
     if not candidates:
         return
@@ -518,6 +579,10 @@ def spawn_auto_collect_stickers(
             group_id=group_id,
             user_id=user_id,
             candidates=list(candidates),
+            core_persona=core_persona,
+            platform=platform,
+            bot_id=bot_id,
+            source_message_id=source_message_id,
         )
     )
     task.add_done_callback(task_exc_logger("auto_collect_stickers", runtime.logger))
@@ -1027,6 +1092,9 @@ async def maybe_choose_reply_sticker(
     should_get_sticker = False
     if not bool(getattr(semantic_frame, "sticker_appropriate", True)):
         record_counter("reply_sticker.skipped_total", reason="semantic_gate")
+        return None, ""
+    if not expression_source_enabled(getattr(runtime, "plugin_config", None), "local"):
+        record_counter("reply_sticker.skipped_total", reason="local_source_disabled")
         return None, ""
 
     is_sticker_enabled = group_config.get("sticker_enabled", True)

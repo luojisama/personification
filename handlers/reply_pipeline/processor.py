@@ -1942,12 +1942,25 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     )
     if not is_private_session and sticker_candidates:
         if _batch_media_owner_matches_selected_user(batched_events, user_id):
+            occurrence_transports = dict(visual_projection.occurrence_transport_refs)
+            attributed_candidates = [
+                replace(candidate, source_message_id=media.message_id)
+                for candidate in sticker_candidates
+                for media in visual_projection.media
+                if media.owner_user_id == user_id and media.message_id
+                and occurrence_transports.get(media.media_id) == candidate.data_url
+                and media.origin == "current"
+            ]
+            collection_prompt = persona.load_prompt(str(group_id))
             _spawn_auto_collect_stickers(
                 runtime=runtime,
                 group_id=str(group_id),
                 user_id=user_id,
-                candidates=sticker_candidates,
+                candidates=attributed_candidates,
                 task_exc_logger=_task_exc_logger,
+                core_persona=str(collection_prompt.get("system", "") if isinstance(collection_prompt, dict) else collection_prompt or ""),
+                platform="onebot",
+                bot_id=bot_self_id,
             )
         else:
             record_counter("sticker.collect_skipped", reason="ambiguous_batch_owner")
