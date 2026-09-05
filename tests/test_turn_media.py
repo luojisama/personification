@@ -779,3 +779,89 @@ def test_media_availability_counts_video_audio_and_media_only_turn() -> None:
         "usable_audio_count": 1,
         "media_only_turn": True,
     }
+
+
+def test_visual_projection_binds_download_alias_and_excludes_unselected_quote() -> None:
+    current = turn_media.TurnMediaRef(
+        media_id="current", ref="https://cdn.example/current", origin="current",
+        owner_user_id="alice", message_id="m-current", kind="image",
+    )
+    quote = turn_media.TurnMediaRef(
+        media_id="quote", ref="https://cdn.example/quote", origin="quoted",
+        owner_user_id="bob", message_id="m-quote", kind="image", reference_role="address_only",
+    )
+    current_data = "data:image/png;base64,Y3VycmVudA=="
+    quote_data = "data:image/png;base64,cXVvdGU="
+
+    projection = turn_media.project_visual_media_inputs(
+        [current, quote],
+        image_refs=[current_data, quote_data],
+        transport_aliases={current.ref: current_data, quote.ref: quote_data},
+    )
+
+    assert [(item.owner_user_id, item.message_id, item.reference_role) for item in projection.media] == [
+        ("alice", "m-current", "current"),
+    ]
+    assert projection.transport_refs == (current_data,)
+    assert turn_media.build_media_availability(
+        projection.media,
+        image_refs=projection.transport_refs,
+    ).image_count == 1
+
+
+def test_visual_projection_manifest_with_no_active_media_rejects_materialized_quote() -> None:
+    quoted = turn_media.TurnMediaRef(
+        media_id="quote-only", ref="https://cdn.example/quote", origin="quoted",
+        owner_user_id="bob", message_id="m-quote", kind="image", reference_role="address_only",
+    )
+    quote_data = "data:image/png;base64,cXVvdGU="
+
+    projection = turn_media.project_visual_media_inputs(
+        [quoted],
+        image_refs=[quote_data],
+        transport_aliases={quoted.ref: quote_data},
+    )
+
+    assert projection.media == ()
+    assert projection.transport_refs == ()
+    assert projection.occurrence_transport_refs == ()
+
+
+def test_media_availability_does_not_mark_a_failed_media_ref_usable() -> None:
+    failed = turn_media.TurnMediaRef(
+        media_id="failed-image", ref="opaque-image-token", origin="current",
+        owner_user_id="alice", message_id="m-current", kind="image",
+        resolution_code="onebot_image_download_failed",
+    )
+
+    availability = turn_media.build_media_availability([failed], text="")
+
+    assert availability.image_count == 1
+    assert availability.usable_image_count == 0
+    assert availability.media_only_turn is True
+
+
+def test_visual_projection_deduplicates_payload_but_keeps_distinct_occurrences() -> None:
+    first = turn_media.TurnMediaRef(
+        media_id="first", ref="https://cdn.example/a", origin="current",
+        owner_user_id="alice", message_id="m-a", kind="image",
+    )
+    second = turn_media.TurnMediaRef(
+        media_id="second", ref="https://cdn.example/b", origin="antecedent",
+        owner_user_id="bob", message_id="m-b", kind="image", reference_role="selected_referent",
+    )
+    data_ref = "data:image/png;base64,c2FtZS1ieXRlcw=="
+
+    projection = turn_media.project_visual_media_inputs(
+        [first, second],
+        transport_aliases={first.ref: data_ref, second.ref: data_ref},
+    )
+
+    assert [(item.owner_user_id, item.message_id, item.reference_role) for item in projection.media] == [
+        ("alice", "m-a", "current"),
+        ("bob", "m-b", "selected_referent"),
+    ]
+    assert projection.transport_refs == (data_ref,)
+    assert projection.occurrence_transport_refs == (("first", data_ref), ("second", data_ref))
+    availability = turn_media.build_media_availability(projection.media, image_refs=projection.transport_refs)
+    assert availability.image_count == 2

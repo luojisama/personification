@@ -149,6 +149,7 @@ from ...core.turn_media import (
     media_summary_timeout_seconds,
     materialize_onebot_media_refs,
     normalize_safe_visual_summary,
+    project_visual_media_inputs,
     register_turn_media_lease,
     render_turn_media_grounding,
     serialize_turn_media,
@@ -605,6 +606,7 @@ async def process_yaml_response_logic(
     lite_call_ai_api: Callable[..., Awaitable[Any]] | None = None,
     review_call_ai_api: Callable[..., Awaitable[Any]] | None = None,
     current_image_urls: List[str] | None = None,
+    media_transport_aliases: Dict[str, str] | None = None,
     vision_caller: Any = None,
     tts_service: Any = None,
     extract_forward_content: Callable[..., Any] = None,
@@ -945,25 +947,15 @@ async def process_yaml_response_logic(
     elif not history_last_text:
         history_last_text = str(last_msg["content"])
 
-    last_images = list(current_image_urls or [])
-    for media_ref in turn_media_refs:
-        if (
-            media_ref.reference_role in {"current", "selected_referent"}
-            and media_ref.kind in {"image", "sticker", "gif", "mface"}
-            and str(media_ref.ref or "").strip()
-            and media_ref.ref not in last_images
-        ):
-            last_images.append(media_ref.ref)
-    if isinstance(last_msg["content"], list):
-        for item in last_msg["content"]:
-            if item["type"] == "image_url":
-                img_url_obj = item.get("image_url", {})
-                if isinstance(img_url_obj, dict):
-                    url = img_url_obj.get("url")
-                    if url and url not in last_images:
-                        last_images.append(url)
-                elif isinstance(img_url_obj, str) and img_url_obj not in last_images:
-                    last_images.append(img_url_obj)
+    # History is context, not an authorization to attach old quoted/background
+    # media to a new model call.  Only current or LLM-selected referent media
+    # enters this process-local visual projection.
+    visual_projection = project_visual_media_inputs(
+        turn_media_refs,
+        image_refs=current_image_urls,
+        transport_aliases=media_transport_aliases,
+    )
+    last_images = list(visual_projection.transport_refs)
     if not turn_media_refs and last_images:
         turn_media_refs = extract_media_from_message(
             [
@@ -1006,7 +998,8 @@ async def process_yaml_response_logic(
                         await _shared_build_per_media_visual_summaries(
                             runtime=runtime_proxy,
                             image_urls=last_images,
-                            media_refs=turn_media_refs,
+                            media_refs=list(visual_projection.media),
+                            occurrence_transport_refs=dict(visual_projection.occurrence_transport_refs),
                             sticker_like=False,
                         )
                     )
@@ -1045,8 +1038,17 @@ async def process_yaml_response_logic(
         turn_media_refs,
         summary=safe_visual_summary,
     ) or str(media_grounding or "").strip()
+    availability_media = [
+        *visual_projection.media,
+        *(
+            item
+            for item in turn_media_refs
+            if item.kind not in {"image", "sticker", "gif", "mface"}
+            and item.reference_role in {"current", "selected_referent"}
+        ),
+    ]
     media_availability = build_media_availability(
-        turn_media_refs,
+        availability_media,
         image_refs=last_images,
         text=raw_message_text,
     )
@@ -4000,6 +4002,7 @@ def build_yaml_response_processor(
             agent_tool_caller=runtime_overrides.get("agent_tool_caller", agent_tool_caller),
             lite_tool_caller=runtime_overrides.get("lite_tool_caller", lite_tool_caller),
             current_image_urls=current_image_urls,
+            media_transport_aliases=runtime_overrides.get("media_transport_aliases"),
             vision_caller=runtime_overrides.get("vision_caller", vision_caller),
             tts_service=runtime_overrides.get("tts_service", tts_service),
             extract_forward_content=runtime_overrides.get(

@@ -55,6 +55,7 @@ from ...skills.skillpacks.sticker_tool.scripts.impl import build_send_sticker_to
 _FRIEND_IDS_CACHE: Dict[str, tuple[float, set[str]]] = {}
 _IMAGE_CLASSIFY_CACHE: Dict[str, IncomingImageClassification] = {}
 _IMAGE_CLASSIFY_CACHE_MAX = 256
+_IMAGE_CLASSIFIER_VERSION = "incoming-visual-v2"
 _DEFAULT_RESPONSE_TIMEOUT_SECONDS = 180.0
 _AGENT_TIME_BUDGET_RESERVE_SECONDS = 30.0
 
@@ -117,7 +118,10 @@ class IncomingImageClassification:
 
     @property
     def is_sticker_like(self) -> bool:
-        return self.kind != "photo"
+        # Unknown is not a sticker verdict.  Preserve it as ordinary visual
+        # input so a later reply/vision path may still understand the image;
+        # only protocol or model-confirmed stickers enter collection.
+        return self.kind == "sticker"
 
     @property
     def text_label(self) -> str:
@@ -145,7 +149,7 @@ def _parse_image_classifier_payload(raw: Any) -> IncomingImageClassification | N
     if not isinstance(payload, dict):
         return None
     kind = str(payload.get("kind", "") or "").strip().lower()
-    if kind not in {"photo", "sticker"}:
+    if kind not in {"photo", "sticker", "unknown"}:
         return None
     try:
         confidence = float(payload.get("confidence", 0.0) or 0.0)
@@ -164,20 +168,7 @@ def _parse_image_classifier_kind(raw: Any) -> str | None:
     if parsed is not None:
         return parsed.kind
     text = str(raw or "").strip().lower()
-    if not text:
-        return None
-    if re.search(r"\bphoto\b", text):
-        return "photo"
-    if re.search(r"\bsticker\b", text):
-        return "sticker"
-    return None
-
-
-def _int_or_zero(value: Any) -> int:
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError):
-        return 0
+    return text if text in {"photo", "sticker", "unknown"} else None
 
 
 def clear_image_classify_cache() -> None:
@@ -340,6 +331,19 @@ def _classifier_caller_supports_vision(runtime: Any, caller_label: str) -> bool:
     return primary_route_supports_vision(runtime, VISUAL_ROUTE_REPLY_PLAIN)
 
 
+def _classifier_route_fingerprint(runtime: Any, caller_label: str) -> str:
+    """Stable, secret-free identity for a classifier route cache entry."""
+
+    plugin_config = _runtime_plugin_config(runtime)
+    api_type, primary_model = get_primary_provider_signature(runtime)
+    model = (
+        str(getattr(plugin_config, "personification_lite_model", "") or "").strip()
+        if caller_label == "lite_tool_caller"
+        else primary_model
+    )
+    return f"{caller_label}:{api_type}:{model or '-'}"
+
+
 async def classify_incoming_image(
     *,
     runtime: Any,
@@ -350,10 +354,6 @@ async def classify_incoming_image(
     file_id: str = "",
 ) -> IncomingImageClassification:
     normalized_source_kind = str(source_kind or "").strip().lower()
-    normalized_url = str(image_url or "").strip().lower()
-    image_width = _int_or_zero(width)
-    image_height = _int_or_zero(height)
-
     if normalized_source_kind == "mface":
         return IncomingImageClassification(
             kind="sticker",
@@ -361,17 +361,30 @@ async def classify_incoming_image(
             reason="mface_short_circuit",
             source="rule",
         )
-    if ".gif" in normalized_url or "anim" in normalized_url:
-        return IncomingImageClassification(
-            kind="sticker",
-            confidence=1.0,
-            reason="gif_short_circuit",
-            source="rule",
-        )
-    normalized_file_id = str(file_id or "").strip()
-    ref_fingerprint = image_fingerprint(str(image_url or "")) if str(image_url or "").strip() else ""
-    cache_key = f"file:{normalized_file_id}" if normalized_file_id else (
-        f"ref:{ref_fingerprint}" if ref_fingerprint else ""
+    normalized_image_ref = str(image_url or "").strip()
+    # URL spelling is not image content.  This stage only caches payloads that
+    # have already been materialized into a bounded data URL by the safe
+    # downloader; remote URLs must be classified afresh after download.
+    ref_fingerprint = (
+        image_fingerprint(normalized_image_ref)
+        if normalized_image_ref.lower().startswith("data:image/")
+        else ""
+    )
+    # Cache is keyed by content digest plus the exact classifier route/version,
+    # never by a mutable OneBot file id, dimensions, or an arbitrary URL.
+    eligible_callers = [
+        (label, caller)
+        for label, caller in _image_classifier_callers(runtime)
+        if _classifier_caller_supports_vision(runtime, label)
+    ]
+    route_key = ",".join(
+        _classifier_route_fingerprint(runtime, label)
+        for label, _caller in eligible_callers
+    )
+    cache_key = (
+        f"{_IMAGE_CLASSIFIER_VERSION}:{route_key}:{ref_fingerprint}"
+        if route_key and ref_fingerprint
+        else ""
     )
     cached = _get_cached_image_classification(cache_key)
     if cached is not None:
@@ -385,10 +398,10 @@ async def classify_incoming_image(
     )
     prompt = (
         "你是聊天场景图片分类器。"
-        "只输出一个词：sticker 或 photo。"
+        "只输出 JSON：{\"kind\":\"sticker|photo|unknown\",\"confidence\":0到1之间数字,\"reason\":\"简短原因\"}。"
         "只有明确属于现实世界相机拍摄的人像、物体、风景或现场照片时才输出 photo。"
         "表情包、贴图、梗图、动漫插画、漫画、游戏截图、聊天截图、海报、配字图一律输出 sticker。"
-        "拿不准时务必输出 sticker。"
+        "看不清、无法判断或没有真实视觉依据时输出 unknown。"
     )
     request_messages = [
         {"role": "system", "content": prompt},
@@ -402,9 +415,7 @@ async def classify_incoming_image(
         },
     ]
     attempted_vision_classify = False
-    for caller_label, caller in _image_classifier_callers(runtime):
-        if not _classifier_caller_supports_vision(runtime, caller_label):
-            continue
+    for caller_label, caller in eligible_callers:
         attempted_vision_classify = True
         try:
             response = await caller.chat_with_tools(
@@ -424,40 +435,23 @@ async def classify_incoming_image(
             continue
         parsed_kind = _parse_image_classifier_kind(getattr(response, "content", "") or "")
         if parsed_kind is not None:
-            return _remember_image_classification(
-                cache_key,
-                IncomingImageClassification(
-                    kind=parsed_kind,
-                    confidence=0.9 if parsed_kind == "photo" else 0.8,
-                    reason="llm_classifier",
-                    source=caller_label,
-                ),
+            classification = IncomingImageClassification(
+                kind=parsed_kind,
+                confidence=0.9 if parsed_kind == "photo" else 0.8 if parsed_kind == "sticker" else 0.0,
+                reason="llm_classifier",
+                source=caller_label,
+            )
+            return (
+                _remember_image_classification(cache_key, classification)
+                if classification.kind in {"photo", "sticker"}
+                else classification
             )
 
-    if attempted_vision_classify:
-        return _remember_image_classification(cache_key, conservative_fallback)
-
-    if image_width == 0 and image_height == 0:
-        return _remember_image_classification(
-            cache_key,
-            IncomingImageClassification(
-                kind="unknown",
-                confidence=0.0,
-                reason="missing_size_fallback",
-                source="fallback",
-            ),
-        )
-
-    size_based_kind = "sticker" if max(image_width, image_height) <= 1280 else "photo"
-    return _remember_image_classification(
-        cache_key,
-        IncomingImageClassification(
-            kind=size_based_kind,
-            confidence=0.35,
-            reason="size_fallback",
-            source="size_fallback",
-        ),
-    )
+    # Failure and unavailable-vision outcomes are intentionally not cached:
+    # a later turn may have a healthy route.  Width/height and URL spelling are
+    # transport metadata, not semantic evidence of sticker vs. photograph.
+    del attempted_vision_classify, width, height, file_id
+    return conservative_fallback
 
 def private_history_window_limit(plugin_config: Any) -> int:
     raw = getattr(plugin_config, "personification_private_history_turns", DEFAULT_PRIVATE_HISTORY_TURNS)

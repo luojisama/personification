@@ -287,6 +287,105 @@ class TurnMediaRef:
         )
 
 
+@dataclass(frozen=True)
+class VisualMediaProjection:
+    """Process-local visual input chosen from explicit turn-media provenance.
+
+    ``media`` deliberately keeps every selected occurrence (and therefore its
+    owner/message/role).  ``transport_refs`` is merely the de-duplicated list
+    of payloads handed to a model.  Do not serialize this object: it can hold
+    temporary data URLs and OneBot transport URLs.
+    """
+
+    media: tuple[TurnMediaRef, ...]
+    transport_refs: tuple[str, ...]
+    # ``media_id -> transport`` bindings are intentionally explicit.  They
+    # let per-media vision summaries retain ownership even when several
+    # occurrences share a data URL after download/materialization.
+    occurrence_transport_refs: tuple[tuple[str, str], ...]
+
+
+_VISUAL_KINDS = frozenset({"image", "sticker", "gif", "mface"})
+_VISUAL_INPUT_ROLES = frozenset({"current", "selected_referent"})
+
+
+def project_visual_media_inputs(
+    values: Iterable[TurnMediaRef | dict[str, Any]] | None,
+    *,
+    image_refs: Iterable[Any] | None = None,
+    transport_aliases: dict[str, str] | None = None,
+) -> VisualMediaProjection:
+    """Select visual media and de-duplicate only its process-local transport.
+
+    A OneBot media occurrence has stable provenance in ``media_id`` while a
+    downloader may materialize it as a data URL.  ``transport_aliases`` is an
+    explicit, process-local ``original-ref -> materialized-ref`` binding made
+    at conversion time.  It is intentionally not inferred from URL text or
+    list position.  Selected occurrences remain separate even if they share a
+    transport payload; only the provider input is de-duplicated.
+    """
+
+    aliases = {
+        _text(original): _text(materialized)
+        for original, materialized in dict(transport_aliases or {}).items()
+        if _text(original) and _text(materialized)
+    }
+    originals_by_materialized: dict[str, set[str]] = {}
+    for original, materialized in aliases.items():
+        originals_by_materialized.setdefault(materialized, set()).add(original)
+    all_visual_media = tuple(
+        item for item in coerce_turn_media(values) if item.kind in _VISUAL_KINDS
+    )
+    media = tuple(
+        item
+        for item in all_visual_media
+        if item.kind in _VISUAL_KINDS and item.reference_role in _VISUAL_INPUT_ROLES
+    )
+    allowed_original_refs = {_text(item.ref) for item in media if _text(item.ref)}
+    has_visual_manifest = bool(all_visual_media)
+    transport_refs: list[str] = []
+    occurrence_transport_refs: list[tuple[str, str]] = []
+    seen_transport: set[str] = set()
+
+    def _append_transport(value: Any) -> None:
+        ref = _text(value)
+        if not ref:
+            return
+        # Values are compared only after an explicit alias lookup.  Never use
+        # URL syntax as evidence that two media occurrences are the same.
+        transport = aliases.get(ref, ref)
+        # At this point equality means the exact payload transport selected by
+        # an explicit alias (or an unchanged literal transport), never a URL
+        # similarity heuristic.  Occurrence provenance remains in ``media``.
+        if transport in seen_transport:
+            return
+        seen_transport.add(transport)
+        transport_refs.append(transport)
+
+    # Materialized current input is preferred over its raw OneBot ref.  This
+    # prevents an original URL and its data URL from being sent twice while
+    # keeping selected historical refs available when no materialization exists.
+    for value in image_refs or []:
+        raw_transport = _text(value)
+        original_refs = originals_by_materialized.get(raw_transport, {raw_transport})
+        if has_visual_manifest and not any(ref in allowed_original_refs for ref in original_refs):
+            # A quoted/history transport may have been materialized while the
+            # semantic resolver deliberately left that occurrence address-only.
+            continue
+        _append_transport(raw_transport)
+    for item in media:
+        raw_ref = _text(item.ref)
+        transport = aliases.get(raw_ref, raw_ref)
+        if item.media_id and transport:
+            occurrence_transport_refs.append((item.media_id, transport))
+        _append_transport(raw_ref)
+    return VisualMediaProjection(
+        media=media,
+        transport_refs=tuple(transport_refs),
+        occurrence_transport_refs=tuple(occurrence_transport_refs),
+    )
+
+
 @dataclass
 class ResolvedTurnMediaLease:
     """Process-local media refs plus an idempotent cleanup boundary.
@@ -607,26 +706,9 @@ def build_media_availability(
     usable_image_keys: set[str] = set()
     video_refs: list[TurnMediaRef] = []
     audio_refs: list[TurnMediaRef] = []
-    for item in refs:
-        if item.kind in {"image", "sticker", "gif", "mface"}:
-            key = item.media_id or item.content_hash or item.ref or item.file_id
-            if key:
-                image_keys.add(key)
-                if _text(item.ref) or _text(item.file_id):
-                    usable_image_keys.add(key)
-        elif item.kind == "video":
-            video_refs.append(item)
-        elif item.kind == "audio":
-            audio_refs.append(item)
-    for raw in image_refs or []:
-        value = _text(raw)
-        if value:
-            key = hashlib.sha256(value.encode("utf-8", errors="ignore")).hexdigest()
-            image_keys.add(key)
-            usable_image_keys.add(key)
-
     def _potentially_usable(item: TurnMediaRef) -> bool:
-        if _text(item.resolution_code) in {
+        resolution_code = _text(item.resolution_code)
+        if resolution_code in {
             "onebot_video_resolve_failed",
             "onebot_audio_download_failed",
             "onebot_video_download_failed",
@@ -634,9 +716,32 @@ def build_media_availability(
             "onebot_media_mime_rejected",
             "onebot_media_budget_exhausted",
             "onebot_media_download_timeout",
-        }:
+        } or resolution_code.endswith("_failed"):
             return False
         return bool(_text(item.ref) or _text(item.file_id))
+
+    for item in refs:
+        if item.kind in {"image", "sticker", "gif", "mface"}:
+            key = item.media_id or item.content_hash or item.ref or item.file_id
+            if key:
+                image_keys.add(key)
+                if _potentially_usable(item):
+                    usable_image_keys.add(key)
+        elif item.kind == "video":
+            video_refs.append(item)
+        elif item.kind == "audio":
+            audio_refs.append(item)
+    # ``image_refs`` are transports, not independent occurrences.  When a
+    # visual manifest exists, its occurrence identities own the count even if
+    # a downloader materialized the same bytes as a data URL.  Only legacy
+    # callers with no visual manifest may contribute transport-only images.
+    has_visual_manifest = bool(image_keys)
+    for raw in ([] if has_visual_manifest else (image_refs or [])):
+        value = _text(raw)
+        if value:
+            key = hashlib.sha256(value.encode("utf-8", errors="ignore")).hexdigest()
+            image_keys.add(key)
+            usable_image_keys.add(key)
 
     normalized_text = re.sub(r"\s+", " ", _text(text)).strip()
     return MediaAvailability(
@@ -1339,6 +1444,7 @@ __all__ = [
     "MediaReferenceRole",
     "ResolvedTurnMediaLease",
     "TurnMediaRef",
+    "VisualMediaProjection",
     "attach_safe_visual_summary",
     "attach_per_media_visual_summaries",
     "build_media_availability",
@@ -1352,6 +1458,7 @@ __all__ = [
     "media_summary_timeout_seconds",
     "materialize_onebot_media_refs",
     "normalize_safe_visual_summary",
+    "project_visual_media_inputs",
     "render_turn_media_grounding",
     "register_turn_media_lease",
     "resolve_onebot_audio_refs",

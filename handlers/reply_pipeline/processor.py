@@ -94,6 +94,7 @@ from ...core.turn_media import (
     media_summary_timeout_seconds,
     materialize_onebot_media_refs,
     normalize_safe_visual_summary,
+    project_visual_media_inputs,
     register_turn_media_lease,
     render_turn_media_grounding,
     serialize_turn_media,
@@ -924,6 +925,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     sender_name = ""
     trigger_reason = ""
     image_urls: List[str] = []
+    # Process-local only: bind a OneBot source ref to the data URL produced
+    # from that exact downloaded payload.  It must never enter history/Trace.
+    media_transport_aliases: Dict[str, str] = {}
     sticker_image_urls: List[str] = []
     sticker_candidates: List[IncomingStickerCandidate] = []
     stop_reply_due_to_gif = [False]
@@ -1054,6 +1058,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     stop_reply_ref=stop_reply_due_to_gif,
                     sticker_image_urls=sticker_image_urls,
                     gif_understanding_counter_ref=gif_understanding_counter,
+                    transport_aliases=media_transport_aliases,
                 )
             elif seg.type == "image":
                 await _extract_images_from_segment(
@@ -1067,6 +1072,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     stop_reply_ref=stop_reply_due_to_gif,
                     sticker_image_urls=sticker_image_urls,
                     gif_understanding_counter_ref=gif_understanding_counter,
+                    transport_aliases=media_transport_aliases,
                 )
             elif seg.type == "gif":
                 await _extract_gif_from_segment(
@@ -1094,6 +1100,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             stop_reply_ref=stop_reply_due_to_gif,
                             sticker_image_urls=sticker_image_urls,
                             gif_understanding_counter_ref=gif_understanding_counter,
+                            transport_aliases=media_transport_aliases,
                         )
                     elif getattr(seg, "type", None) == "gif":
                         await _extract_gif_from_segment(
@@ -1571,23 +1578,6 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     )
     direct_image_input = bool(image_urls) and image_input_mode in {"auto", "direct"} and plain_route_vision
     agent_direct_image_input = bool(image_urls) and image_input_mode in {"auto", "direct"} and agent_route_vision
-    if image_urls or sticker_image_urls:
-        try:
-            from ...core import reply_turn_trace
-
-            reply_turn_trace.record_stage(
-                key="vision_mode",
-                label="视觉路径",
-                status="ok" if (direct_image_input or agent_direct_image_input) else "warn",
-                detail=(
-                    f"mode={image_input_mode} plain_direct={direct_image_input} "
-                    f"agent_direct={agent_direct_image_input} images={len(image_urls)} "
-                    f"stickers={len(sticker_image_urls)} elapsed_ms=0"
-                ),
-                hint="" if (direct_image_input or agent_direct_image_input) else "将尝试视觉摘要 fallback 或文本占位",
-            )
-        except Exception:
-            pass
     image_summary_suffix = ""
     image_urls_for_text_model = list(image_urls)
     if image_urls:
@@ -1596,32 +1586,6 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         else:
             if not direct_image_input:
                 image_urls_for_text_model = []
-
-    # 非 gif 表情包：去重 + 限量后，仅在视觉可用时直传模型理解（多模态直传 / 非多模态降级为文本占位符，不打标）。
-    # summary / disabled 模式不直传：前者明确要走文本，后者关图；两种情况下表情都只留文本占位符。
-    if sticker_image_urls and image_input_mode in {"auto", "direct"}:
-        sticker_vision_max = int(
-            getattr(runtime.plugin_config, "personification_sticker_vision_max", 3) or 0
-        )
-        _seen_sticker: set[str] = set()
-        capped_stickers: List[str] = []
-        for _su in sticker_image_urls:
-            if _su and _su not in _seen_sticker:
-                _seen_sticker.add(_su)
-                capped_stickers.append(_su)
-            if sticker_vision_max > 0 and len(capped_stickers) >= sticker_vision_max:
-                break
-        if capped_stickers and (plain_route_vision or agent_route_vision):
-            for _su in capped_stickers:
-                if _su not in tool_image_urls:
-                    tool_image_urls.append(_su)
-            if plain_route_vision:
-                for _su in capped_stickers:
-                    if _su not in image_urls_for_text_model:
-                        image_urls_for_text_model.append(_su)
-                direct_image_input = True
-            if agent_route_vision:
-                agent_direct_image_input = True
 
     hook_ctx = HookContext(
         user_id=user_id,
@@ -1763,6 +1727,61 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 )
         except Exception:
             pass
+    # Referent selection may have activated an older image after the first
+    # current-message pass computed visual transport.  Rebuild after the
+    # resolver (and for private turns) from selected provenance instead of
+    # reusing stale flags or letting quoted/background history leak in.
+    visual_projection = project_visual_media_inputs(
+        turn_media_context,
+        image_refs=[*image_urls, *sticker_image_urls],
+        transport_aliases=media_transport_aliases,
+    )
+    selected_transports = set(visual_projection.transport_refs)
+
+    def _projected_transports(values: List[str]) -> List[str]:
+        resolved: List[str] = []
+        for value in values:
+            transport = media_transport_aliases.get(str(value or "").strip(), str(value or "").strip())
+            if transport and transport in selected_transports and transport not in resolved:
+                resolved.append(transport)
+        return resolved
+
+    # Keep the existing photo/sticker split and cap.  Projection authorizes
+    # each payload, but does not itself turn every selected sticker into an
+    # unrestricted direct-vision input.
+    image_urls = _projected_transports(image_urls)
+    tool_image_urls = list(image_urls)
+    if sticker_image_urls and image_input_mode in {"auto", "direct"} and (plain_route_vision or agent_route_vision):
+        sticker_vision_max = int(
+            getattr(runtime.plugin_config, "personification_sticker_vision_max", 3) or 0
+        )
+        capped_stickers = _projected_transports(sticker_image_urls)
+        if sticker_vision_max > 0:
+            capped_stickers = capped_stickers[:sticker_vision_max]
+        for sticker_transport in capped_stickers:
+            if sticker_transport not in tool_image_urls:
+                tool_image_urls.append(sticker_transport)
+    photo_image_urls = list(image_urls)
+    direct_image_input = bool(tool_image_urls) and image_input_mode in {"auto", "direct"} and plain_route_vision
+    agent_direct_image_input = bool(tool_image_urls) and image_input_mode in {"auto", "direct"} and agent_route_vision
+    image_urls_for_text_model = list(tool_image_urls) if direct_image_input else []
+    if tool_image_urls or sticker_image_urls:
+        try:
+            from ...core import reply_turn_trace
+
+            reply_turn_trace.record_stage(
+                key="vision_mode",
+                label="视觉路径",
+                status="ok" if (direct_image_input or agent_direct_image_input) else "warn",
+                detail=(
+                    f"mode={image_input_mode} plain_direct={direct_image_input} "
+                    f"agent_direct={agent_direct_image_input} images={len(tool_image_urls)} "
+                    f"stickers={len(sticker_image_urls)} elapsed_ms=0"
+                ),
+                hint="" if (direct_image_input or agent_direct_image_input) else "将尝试视觉摘要 fallback 或文本占位",
+            )
+        except Exception:
+            pass
     if not is_private_session:
         peer_bot_capability_prompt = render_peer_bot_capability_catalog(
             build_peer_bot_capability_catalog(
@@ -1809,7 +1828,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         per_media_text, per_media_visual_summaries = await _build_per_media_visual_summaries(
             runtime=runtime,
             image_urls=tool_image_urls,
-            media_refs=turn_media_context,
+            media_refs=list(visual_projection.media),
+            occurrence_transport_refs=dict(visual_projection.occurrence_transport_refs),
             sticker_like=False,
         )
         if per_media_text:
@@ -1878,8 +1898,17 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         turn_media_context,
         summary=safe_visual_summary,
     )
+    availability_media = [
+        *visual_projection.media,
+        *(
+            item
+            for item in turn_media_context
+            if item.kind not in {"image", "sticker", "gif", "mface"}
+            and item.reference_role in {"current", "selected_referent"}
+        ),
+    ]
     media_availability = build_media_availability(
-        turn_media_context,
+        availability_media,
         image_refs=tool_image_urls,
         text=raw_message_text or current_agent_message_content,
     )
@@ -2144,6 +2173,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             session_messages_for_model,
             trigger_reason=trigger_reason,
             current_image_urls=tool_image_urls,
+            media_transport_aliases=media_transport_aliases,
             get_configured_api_providers=runtime.get_configured_api_providers,
             vision_caller=runtime.vision_caller,
             disable_network_hooks=disable_network_hooks,

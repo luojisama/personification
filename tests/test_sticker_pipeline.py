@@ -11,6 +11,7 @@ from ._loader import load_personification_module
 pipeline_sticker = load_personification_module("plugin.personification.handlers.reply_pipeline.pipeline_sticker")
 sticker_impl = load_personification_module("plugin.personification.skills.skillpacks.sticker_tool.scripts.impl")
 sticker_feedback = load_personification_module("plugin.personification.core.sticker_feedback")
+turn_media = load_personification_module("plugin.personification.core.turn_media")
 
 
 def _make_workspace_temp_dir(prefix: str) -> Path:
@@ -147,6 +148,58 @@ def test_send_sticker_tool_queues_gif_action() -> None:
         assert queued[0]["params"]["history_text"] == "[GIF表情包:animated]"
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_per_media_summary_uses_explicit_occurrence_transport_not_zip_order(monkeypatch) -> None:  # noqa: ANN001
+    first = turn_media.TurnMediaRef(
+        media_id="first", ref="https://cdn.example/first", origin="current",
+        owner_user_id="alice", message_id="m-first", kind="image",
+    )
+    second = turn_media.TurnMediaRef(
+        media_id="second", ref="https://cdn.example/second", origin="antecedent",
+        owner_user_id="bob", message_id="m-second", kind="image", reference_role="selected_referent",
+    )
+    observed: list[str] = []
+
+    async def _summary(*, image_urls, **_kwargs):  # noqa: ANN001
+        observed.extend(image_urls)
+        return f"[图片视觉描述（系统注入，仅供理解，不可复述）：{image_urls[0]}]"
+
+    monkeypatch.setattr(pipeline_sticker, "build_image_summary_suffix", _summary)
+    text, summaries = asyncio.run(
+        pipeline_sticker.build_per_media_visual_summaries(
+            runtime=SimpleNamespace(),
+            # Provider payloads are de-duplicated and deliberately in the
+            # opposite order from occurrence provenance.
+            image_urls=["data:second", "data:first"],
+            media_refs=[first, second],
+            occurrence_transport_refs={"first": "data:first", "second": "data:second"},
+        )
+    )
+
+    assert observed == ["data:first", "data:second"]
+    assert "owner_user_id=alice" in text and "owner_user_id=bob" in text
+    assert "data:first" in summaries["first"]
+    assert "data:second" in summaries["second"]
+
+
+def test_per_media_summary_without_explicit_binding_does_not_fabricate_owner(monkeypatch) -> None:  # noqa: ANN001
+    ref = turn_media.TurnMediaRef(
+        media_id="only", ref="https://cdn.example/only", origin="current",
+        owner_user_id="alice", message_id="m-only", kind="image",
+    )
+
+    async def _unexpected_summary(**_kwargs):  # noqa: ANN003
+        raise AssertionError("ambiguous media must not receive a per-media summary")
+
+    monkeypatch.setattr(pipeline_sticker, "build_image_summary_suffix", _unexpected_summary)
+    assert asyncio.run(
+        pipeline_sticker.build_per_media_visual_summaries(
+            runtime=SimpleNamespace(),
+            image_urls=["data:only"],
+            media_refs=[ref],
+        )
+    ) == ("", {})
 
 
 class _FakeStore:

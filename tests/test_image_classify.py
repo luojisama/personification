@@ -95,11 +95,11 @@ def test_classify_incoming_image_missing_size_is_unknown_without_vision() -> Non
     )
 
     assert result.kind == "unknown"
-    assert result.reason == "missing_size_fallback"
+    assert result.reason == "classifier_fallback"
     assert result.confidence == 0.0
 
 
-def test_classify_incoming_image_gif_short_circuit() -> None:
+def test_classify_incoming_image_does_not_infer_sticker_from_url_text() -> None:
     pipeline_context.clear_image_classify_cache()
     runtime = _build_runtime()
 
@@ -113,11 +113,18 @@ def test_classify_incoming_image_gif_short_circuit() -> None:
         )
     )
 
-    assert result.kind == "sticker"
-    assert result.reason == "gif_short_circuit"
+    assert result.kind == "unknown"
+    assert result.reason == "classifier_fallback"
 
 
-def test_classify_incoming_image_uses_llm_and_hits_file_cache() -> None:
+def test_classifier_text_fallback_rejects_explanatory_or_negated_output() -> None:
+    assert pipeline_context._parse_image_classifier_kind("photo") == "photo"
+    assert pipeline_context._parse_image_classifier_kind("not photo") is None
+    assert pipeline_context._parse_image_classifier_kind("I think this is sticker") is None
+    assert pipeline_context._parse_image_classifier_kind('{"kind":"unknown","confidence":0}') == "unknown"
+
+
+def test_classify_incoming_image_uses_content_digest_cache_not_file_id() -> None:
     pipeline_context.clear_image_classify_cache()
     lite_caller = _FakeCaller("photo")
     runtime = _build_runtime(lite_caller)
@@ -135,11 +142,11 @@ def test_classify_incoming_image_uses_llm_and_hits_file_cache() -> None:
     second = asyncio.run(
         pipeline_context.classify_incoming_image(
             runtime=runtime,
-            image_url="data:image/png;base64,bbb",
+            image_url="data:image/png;base64,aaa",
             source_kind="image",
             width=1920,
             height=1080,
-            file_id="abc",
+            file_id="different-file-id",
         )
     )
 
@@ -148,6 +155,30 @@ def test_classify_incoming_image_uses_llm_and_hits_file_cache() -> None:
     assert second.kind == "photo"
     assert second.source == "cache"
     assert lite_caller.calls == 1
+
+
+def test_classify_incoming_remote_url_does_not_cache_url_digest() -> None:
+    pipeline_context.clear_image_classify_cache()
+    caller = _SequenceCaller(["photo", "sticker"])
+    runtime = _build_runtime(caller)
+
+    first = asyncio.run(
+        pipeline_context.classify_incoming_image(
+            runtime=runtime,
+            image_url="https://cdn.example.test/same-url.png",
+            source_kind="image",
+        )
+    )
+    second = asyncio.run(
+        pipeline_context.classify_incoming_image(
+            runtime=runtime,
+            image_url="https://cdn.example.test/same-url.png",
+            source_kind="image",
+        )
+    )
+
+    assert (first.kind, second.kind) == ("photo", "sticker")
+    assert caller.calls == 2
 
 
 def test_classify_incoming_image_falls_back_to_unknown_on_llm_failure() -> None:
@@ -167,6 +198,58 @@ def test_classify_incoming_image_falls_back_to_unknown_on_llm_failure() -> None:
 
     assert result.kind == "unknown"
     assert result.source == "fallback"
+
+
+def test_classify_incoming_image_does_not_cache_failure() -> None:
+    pipeline_context.clear_image_classify_cache()
+    caller = _FakeCaller(should_fail=True)
+    runtime = _build_runtime(caller)
+    first = asyncio.run(
+        pipeline_context.classify_incoming_image(
+            runtime=runtime,
+            image_url="data:image/png;base64,aaa",
+            source_kind="image",
+        )
+    )
+    caller._should_fail = False
+    caller._content = "photo"
+    second = asyncio.run(
+        pipeline_context.classify_incoming_image(
+            runtime=runtime,
+            image_url="data:image/png;base64,aaa",
+            source_kind="image",
+        )
+    )
+
+    assert first.kind == "unknown"
+    assert second.kind == "photo"
+    assert caller.calls == 2
+
+
+def test_classify_incoming_image_preserves_model_unknown_without_caching() -> None:
+    pipeline_context.clear_image_classify_cache()
+    caller = _SequenceCaller(["unknown", "photo"])
+    runtime = _build_runtime(caller)
+
+    first = asyncio.run(
+        pipeline_context.classify_incoming_image(
+            runtime=runtime,
+            image_url="data:image/png;base64,aaa",
+            source_kind="image",
+        )
+    )
+    second = asyncio.run(
+        pipeline_context.classify_incoming_image(
+            runtime=runtime,
+            image_url="data:image/png;base64,aaa",
+            source_kind="image",
+        )
+    )
+
+    assert first.kind == "unknown"
+    assert first.source == "lite_tool_caller"
+    assert second.kind == "photo"
+    assert caller.calls == 2
 
 
 def test_classify_incoming_image_same_dimensions_do_not_share_cache() -> None:
@@ -198,7 +281,7 @@ def test_classify_incoming_image_same_dimensions_do_not_share_cache() -> None:
     assert caller.calls == 2
 
 
-def test_classify_incoming_image_uses_size_fallback_when_no_vision_route() -> None:
+def test_classify_incoming_image_without_vision_is_unknown_even_when_large() -> None:
     pipeline_context.clear_image_classify_cache()
     runtime = _build_runtime(
         _FakeCaller("photo"),
@@ -218,5 +301,5 @@ def test_classify_incoming_image_uses_size_fallback_when_no_vision_route() -> No
         )
     )
 
-    assert result.kind == "photo"
-    assert result.source == "size_fallback"
+    assert result.kind == "unknown"
+    assert result.source == "fallback"
