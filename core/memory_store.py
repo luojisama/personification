@@ -815,6 +815,7 @@ class MemoryStore:
                 payload["revision"] = max(prev_revision + 1, next_revision)
             created_at = float(payload.get("time_created", time.time()) or time.time())
             updated_at = time.time()
+            payload["updated_at"] = updated_at
             before_changes = conn.total_changes
             conn.execute(
                 """
@@ -965,6 +966,8 @@ class MemoryStore:
         limit: int = 0,
         mode: str = "auto",
         context_type: str = "auto",
+        platform: str = "",
+        bot_id: str = "",
     ) -> list[dict[str, Any]]:
         configured_limit = int(
             getattr(self.plugin_config, "personification_memory_recall_top_k", MAX_RECALL_LIMIT) or MAX_RECALL_LIMIT
@@ -1018,18 +1021,24 @@ class MemoryStore:
                 user_id=user_id,
                 scope=scope,
                 query=normalized_query,
-                limit=limit,
+                # Gather a bounded surplus before identity/permission filtering
+                # so a different Bot's candidates cannot consume this request.
+                limit=max(limit * 4, 12),
                 scan_limit=scan_limit,
             )
-            if len(fallback) < limit:
+            if len(fallback) < max(limit * 4, 12):
                 fallback.extend(
                     self._recall_grouped_fallback(
                         group_id=group_id,
                         query=normalized_query,
-                        limit=limit - len(fallback),
+                        limit=max(limit * 4, 12) - len(fallback),
                     )
                 )
             fallback = self._filter_recalled_by_permission(fallback, context_type=normalized_context_type)
+            fallback = self._filter_recalled_by_identity(
+                fallback, platform=platform, bot_id=bot_id
+            )
+            fallback = fallback[:limit]
             self._record_search_stats(
                 query=normalized_query,
                 scope=scope,
@@ -1042,6 +1051,11 @@ class MemoryStore:
             )
             return fallback
 
+        ranked = [
+            candidate
+            for candidate in ranked
+            if self._payload_identity_visible(candidate.payload, platform=platform, bot_id=bot_id)
+        ]
         results: list[dict[str, Any]] = []
         used_ids: list[str] = []
         for candidate in ranked:
@@ -1100,7 +1114,7 @@ class MemoryStore:
         with _connect(self.memory_palace_dir / "memory_palace.db") as conn:
             rows = conn.execute(
                 """
-                SELECT payload
+                SELECT payload, updated_at
                 FROM memory_items
                 WHERE supports_recall=1
                 ORDER BY updated_at DESC
@@ -1391,7 +1405,7 @@ class MemoryStore:
         with _connect(self.memory_palace_dir / "memory_palace.db") as conn:
             rows = conn.execute(
                 f"""
-                SELECT payload
+                SELECT payload, updated_at
                 FROM memory_items
                 WHERE {' AND '.join(clauses)}
                 ORDER BY updated_at DESC
@@ -1403,6 +1417,7 @@ class MemoryStore:
         for row in rows:
             payload = _json_loads(row["payload"], {})
             if isinstance(payload, dict):
+                payload.setdefault("updated_at", safe_float(row["updated_at"], 0))
                 items.append(payload)
         return items
 
@@ -1417,6 +1432,8 @@ class MemoryStore:
         min_confidence: float = 0.0,
         source_kind: str = "",
         memory_type: str = "",
+        search: str = "",
+        status: str = "",
         include_self: bool = False,
     ) -> tuple[list[dict[str, Any]], int, int]:
         """Return a database-paged memory catalog and hidden self-log count."""
@@ -1440,6 +1457,20 @@ class MemoryStore:
         if memory_type:
             base_clauses.append("memory_type = ?")
             base_params.append(str(memory_type))
+        normalized_search = normalize_text(search)[:120]
+        if normalized_search:
+            # Keep search database-bounded and use indexed materialized fields;
+            # payload is intentionally not returned by catalog pagination.
+            search_like = f"%{normalized_search}%"
+            base_clauses.append("(summary LIKE ? OR aliases LIKE ? OR topic_tags LIKE ? OR entity_tags LIKE ?)")
+            base_params.extend([search_like, search_like, search_like, search_like])
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status == "active":
+            base_clauses.append("(expires_at <= 0 OR expires_at > ?)")
+            base_params.append(now_ts())
+        elif normalized_status == "expired":
+            base_clauses.append("expires_at > 0 AND expires_at <= ?")
+            base_params.append(now_ts())
         base_clauses.append("confidence >= ?")
         base_params.append(float(min_confidence))
 
@@ -1480,7 +1511,7 @@ class MemoryStore:
             )
             rows = conn.execute(
                 f"""
-                SELECT payload
+                SELECT payload, updated_at
                 FROM memory_items
                 WHERE {visible_where}
                 ORDER BY updated_at DESC, memory_id DESC
@@ -1492,6 +1523,7 @@ class MemoryStore:
         for row in rows:
             payload = _json_loads(row["payload"], {})
             if isinstance(payload, dict):
+                payload.setdefault("updated_at", safe_float(row["updated_at"], 0))
                 items.append(payload)
         return items, total, max(0, all_count - total)
 
@@ -1750,6 +1782,21 @@ class MemoryStore:
         payload["source_refs"] = list(payload.get("source_refs") or [])
         payload["user_id"] = str(payload.get("user_id") or "")
         payload["group_id"] = str(payload.get("group_id") or "")
+        # Empty identity denotes a legacy record.  It remains readable for
+        # backwards compatibility, while records with a known identity are
+        # never projected into another known platform/Bot namespace.
+        try:
+            from .llm_context import current_llm_context
+
+            trusted_context = current_llm_context()
+        except Exception:
+            trusted_context = {}
+        payload["platform"] = str(
+            trusted_context.get("platform") or payload.get("platform") or ""
+        ).strip()
+        payload["bot_id"] = str(
+            trusted_context.get("bot_id") or payload.get("bot_id") or ""
+        ).strip()
         payload["thread_id"] = str(payload.get("thread_id") or "")
         payload["time_created"] = safe_float(payload.get("time_created", now_ts()), now_ts())
         payload["last_accessed_at"] = safe_float(payload.get("last_accessed_at", 0), 0)
@@ -1864,6 +1911,40 @@ class MemoryStore:
             if payload is not None:
                 filtered.append(payload)
         return filtered
+
+    def _filter_recalled_by_identity(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        platform: str = "",
+        bot_id: str = "",
+    ) -> list[dict[str, Any]]:
+        requested_platform = str(platform or "").strip()
+        requested_bot_id = str(bot_id or "").strip()
+        visible: list[dict[str, Any]] = []
+        for item in list(items or []):
+            if not isinstance(item, dict):
+                continue
+            if self._payload_identity_visible(
+                item, platform=requested_platform, bot_id=requested_bot_id
+            ):
+                visible.append(item)
+        return visible
+
+    @staticmethod
+    def _payload_identity_visible(payload: dict[str, Any], *, platform: str = "", bot_id: str = "") -> bool:
+        requested_platform = str(platform or "").strip()
+        requested_bot_id = str(bot_id or "").strip()
+        item_platform = str(payload.get("platform") or "").strip()
+        item_bot_id = str(payload.get("bot_id") or "").strip()
+        if item_platform and item_platform != requested_platform:
+            return False
+        # Historical OneBot records predate platform storage and remain
+        # compatible only on OneBot.  They must not appear in Satori (or
+        # another future adapter) merely because their fields are blank.
+        if not item_platform and requested_platform and requested_platform != "onebot":
+            return False
+        return not item_bot_id or item_bot_id == requested_bot_id
 
     def _get_memory_payload(
         self,

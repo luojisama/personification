@@ -15,6 +15,8 @@ def set_llm_context(
     *,
     group_id: str = "",
     user_id: str = "",
+    platform: str = "",
+    bot_id: str = "",
     purpose: str = "",
     retry_policy: str = "",
 ) -> contextvars.Token:
@@ -22,6 +24,8 @@ def set_llm_context(
     value = {
         "group_id": str(group_id or ""),
         "user_id": str(user_id or ""),
+        "platform": str(platform or ""),
+        "bot_id": str(bot_id or ""),
         "purpose": str(purpose or ""),
     }
     if retry_policy:

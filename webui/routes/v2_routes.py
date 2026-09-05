@@ -4034,6 +4034,8 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
         user_id: str = Query(default="", max_length=64),
         palace_zone: str = Query(default="", max_length=64),
         source_kind: str = Query(default="", max_length=64),
+        search: str = Query(default="", max_length=120),
+        status: str = Query(default="", pattern="^(|active|expired)$"),
         include_self: bool = Query(default=False),
         _: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
@@ -4052,6 +4054,8 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             offset=params.offset,
             source_kind=source_kind,
             memory_type=memory_type,
+            search=search,
+            status=status,
             include_self=include_self,
         )
         safe_rows = [
@@ -4067,17 +4071,30 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                     enforce_role_integrity=False,
                 )[:300],
                 "source_kind": str(item.get("source_kind") or ""),
+                "permission_type": str(item.get("permission_type") or ""),
                 "tier": str(item.get("tier") or ""),
                 "palace_zone": str(item.get("palace_zone") or ""),
                 "confidence": float(item.get("confidence") or 0),
                 "salience": float(item.get("salience") or 0),
                 "updated_at": float(item.get("updated_at") or 0),
+                "expires_at": float(item.get("expires_at") or 0),
+                "status": (
+                    "expired"
+                    if float(item.get("expires_at") or 0) > 0
+                    and float(item.get("expires_at") or 0) <= time.time()
+                    else "active"
+                ),
             }
             for item in rows
             if isinstance(item, dict)
         ]
         payload = build_page(safe_rows, total=total, params=params).to_dict()
-        payload.update({"available": True, "hidden_self_count": hidden, "include_self": include_self})
+        payload.update({
+            "available": True,
+            "hidden_self_count": hidden,
+            "include_self": include_self,
+            "filters": {"search": search, "status": status, "group_id": group_id, "user_id": user_id, "palace_zone": palace_zone},
+        })
         return payload
 
     @router.get("/logs")

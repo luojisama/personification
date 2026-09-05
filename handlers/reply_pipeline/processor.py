@@ -608,6 +608,8 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
         token = set_llm_context(
             group_id=str(getattr(event, "group_id", "") or ""),
             user_id=str(getattr(event, "user_id", "") or ""),
+            platform="onebot",
+            bot_id=str(getattr(event, "self_id", "") or ""),
             purpose="reply",
         )
     except Exception:

@@ -15,6 +15,7 @@ from ..ai_routes import build_routed_tool_caller
 from ..file_sender import build_file_sender
 from ..generated_skills import register_generated_skills
 from ..llm_context import current_llm_context
+from ..memory_request_scope import MemoryRequestScope, memory_tools_enabled
 from ..model_router import (
     MODEL_ROLE_AGENT,
     MODEL_ROLE_INTENT,
@@ -485,32 +486,28 @@ def _format_memory_tool_items(items: list[dict[str, Any]], *, limit: int) -> lis
 
 
 def _memory_tools_enabled(memory_store: Any, plugin_config: Any) -> bool:
-    if not bool(getattr(plugin_config, "personification_memory_enabled", True)):
-        return False
-    try:
-        return bool(memory_store.palace_enabled())
-    except Exception:
-        return False
+    return memory_tools_enabled(plugin_config=plugin_config, memory_store=memory_store)
 
 
 def _build_recall_user_memory_tool(memory_store: Any, plugin_config: Any, logger: Any) -> AgentTool:
     import json as _json
 
     async def _handler(query: str, days: int = 30, limit: int = 12) -> str:
-        ctx = current_llm_context()
-        user_id = str(ctx.get("user_id", "") or "").strip()
+        request_scope = MemoryRequestScope.from_runtime(
+            plugin_config=plugin_config, memory_store=memory_store
+        )
+        user_id = request_scope.user_id
         resolved_limit = _memory_tool_limit(limit, default=12)
         resolved_days = _memory_days(days, default=30)
-        if not user_id:
+        if not request_scope.can_recall or not user_id:
             return _json.dumps({"query": query, "memories": [], "note": "无法确定当前用户，跳过记忆召回"}, ensure_ascii=False)
         try:
             memories = memory_store.recall_memories(
                 query=query,
                 scope="auto",
-                user_id=user_id,
+                **request_scope.actor_recall_kwargs(),
                 limit=resolved_limit,
                 mode="auto",
-                context_type="private",
             )
         except Exception as exc:
             logger.debug(f"[recall_user_memory] recall failed: {exc}")
@@ -545,20 +542,21 @@ def _build_recall_group_memory_tool(memory_store: Any, plugin_config: Any, logge
     import json as _json
 
     async def _handler(query: str, days: int = 30, limit: int = 12) -> str:
-        ctx = current_llm_context()
-        group_id = str(ctx.get("group_id", "") or "").strip()
+        request_scope = MemoryRequestScope.from_runtime(
+            plugin_config=plugin_config, memory_store=memory_store
+        )
+        group_id = request_scope.group_id
         resolved_limit = _memory_tool_limit(limit, default=12)
         resolved_days = _memory_days(days, default=30)
-        if not group_id:
+        if not request_scope.can_recall or not group_id:
             return _json.dumps({"query": query, "memories": [], "note": "当前不是群聊，无法召回群记忆"}, ensure_ascii=False)
         try:
             memories = memory_store.recall_memories(
                 query=query,
                 scope="auto",
-                group_id=group_id,
+                **request_scope.group_recall_kwargs(),
                 limit=resolved_limit,
                 mode="auto",
-                context_type="group",
             )
         except Exception as exc:
             logger.debug(f"[recall_group_memory] recall failed: {exc}")
@@ -613,6 +611,8 @@ def _build_remember_user_memory_tool(memory_store: Any, plugin_config: Any, logg
             "source_refs": [],
             "user_id": user_id,
             "group_id": "",
+            "platform": str(ctx.get("platform", "") or ""),
+            "bot_id": str(ctx.get("bot_id", "") or ""),
             "topic_tags": [],
             "entity_tags": [],
             "snippets": [text[:120]],
@@ -681,6 +681,8 @@ def _build_remember_group_memory_tool(memory_store: Any, plugin_config: Any, log
             "source_refs": [],
             "user_id": "",
             "group_id": group_id,
+            "platform": str(ctx.get("platform", "") or ""),
+            "bot_id": str(ctx.get("bot_id", "") or ""),
             "topic_tags": [],
             "entity_tags": [],
             "snippets": [text[:120]],

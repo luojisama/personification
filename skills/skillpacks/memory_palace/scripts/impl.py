@@ -5,6 +5,17 @@ from typing import Any
 
 from plugin.personification.agent.tool_registry import AgentTool
 from plugin.personification.core.memory_store import get_memory_store
+from plugin.personification.core.memory_request_scope import MemoryRequestScope, memory_tools_enabled
+
+
+def _tool_enabled(runtime: Any) -> bool:
+    try:
+        store = getattr(runtime, "memory_store", None) or get_memory_store()
+        return memory_tools_enabled(
+            plugin_config=getattr(runtime, "plugin_config", None), memory_store=store
+        )
+    except Exception:
+        return False
 
 
 async def recall_memory(
@@ -23,13 +34,34 @@ async def recall_memory(
             {"query": str(query or ""), "scope": str(scope or "auto"), "mode": str(mode or "auto"), "memories": []},
             ensure_ascii=False,
         )
+    plugin_config = getattr(runtime, "plugin_config", None)
+    request_scope = MemoryRequestScope.from_runtime(
+        plugin_config=plugin_config, memory_store=store
+    )
+    if not request_scope.can_recall:
+        return json.dumps(
+            {"query": str(query or ""), "scope": str(scope or "auto"), "mode": str(mode or "auto"), "memories": []},
+            ensure_ascii=False,
+        )
+    requested_user = str(user_id or "").strip()
+    requested_group = str(group_id or "").strip()
+    if (requested_user and requested_user != request_scope.user_id) or (
+        requested_group and requested_group != request_scope.group_id
+    ):
+        return json.dumps(
+            {"query": str(query or ""), "scope": str(scope or "auto"), "mode": str(mode or "auto"), "memories": [], "note": "请求的记忆范围与当前会话不一致"},
+            ensure_ascii=False,
+        )
+    recall_kwargs = (
+        request_scope.group_recall_kwargs()
+        if request_scope.context_type == "group"
+        else request_scope.actor_recall_kwargs()
+    )
     memories = store.recall_memories(
         query=str(query or ""),
         scope=str(scope or "auto"),
-        user_id=str(user_id or ""),
-        group_id=str(group_id or ""),
+        **recall_kwargs,
         mode=str(mode or "auto"),
-        context_type="group" if str(group_id or "").strip() else "private",
     )
     background_intelligence = getattr(runtime, "background_intelligence", None)
     if background_intelligence is not None:
@@ -73,12 +105,10 @@ def build_memory_recall_tool(runtime: Any) -> AgentTool:
             "properties": {
                 "query": {"type": "string", "description": "当前问题或回忆目标"},
                 "scope": {"type": "string", "description": "auto/recent_episode/person/group/topic/self/future"},
-                "user_id": {"type": "string", "description": "可选用户 ID"},
-                "group_id": {"type": "string", "description": "可选群 ID"},
                 "mode": {"type": "string", "description": "auto/fast/deep；其中 deep 当前是启发式深度重排，不是完整 LLM 深度策略"},
             },
             "required": ["query"],
         },
         handler=_handler,
-        enabled=lambda: True,
+        enabled=lambda: _tool_enabled(runtime),
     )

@@ -18,6 +18,8 @@ from ...core.operation_diagnostics import (
     exception_diagnostic,
     step as operation_step,
 )
+from ...core.pagination import build_page, normalize_pagination
+from ...core.visible_output import guard_visible_text
 from ..deps import AdminIdentity, require_admin
 
 
@@ -316,6 +318,47 @@ def _looks_like_bot_self_entry(item: dict[str, Any]) -> bool:
         return True
     return False
 
+
+def _memory_status(item: dict[str, Any]) -> str:
+    try:
+        expires_at = float(item.get("expires_at", 0) or 0)
+    except (TypeError, ValueError):
+        expires_at = 0.0
+    return "expired" if expires_at > 0 and expires_at <= time.time() else "active"
+
+
+def _memory_admin_dto(item: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
+    """Bounded admin projection; do not expose raw storage payloads or vectors."""
+    rendered = {
+        "memory_id": str(item.get("memory_id", "") or ""),
+        "memory_type": str(item.get("memory_type", "") or ""),
+        "group_id": str(item.get("group_id", "") or ""),
+        "user_id": str(item.get("user_id", "") or ""),
+        "summary": guard_visible_text(item.get("summary", ""), surface="webui_memory_summary", allow_direct_media=False, enforce_role_integrity=False)[: (800 if detail else 300)],
+        "source_kind": str(item.get("source_kind", "") or ""),
+        "permission_type": str(item.get("permission_type", "") or ""),
+        "tier": str(item.get("tier", "") or ""),
+        "palace_zone": str(item.get("palace_zone", "") or ""),
+        "confidence": float(item.get("confidence", 0) or 0),
+        "salience": float(item.get("salience", 0) or 0),
+        "updated_at": float(item.get("updated_at", item.get("time_created", 0)) or 0),
+        "expires_at": float(item.get("expires_at", 0) or 0),
+        "status": _memory_status(item),
+    }
+    if detail:
+        rendered.update({
+            "aliases": [guard_visible_text(value, surface="webui_memory_alias", allow_direct_media=False, enforce_role_integrity=False)[:120] for value in list(item.get("aliases") or [])[:12]],
+            "topic_tags": [guard_visible_text(value, surface="webui_memory_tag", allow_direct_media=False, enforce_role_integrity=False)[:80] for value in list(item.get("topic_tags") or [])[:12]],
+            "entity_tags": [guard_visible_text(value, surface="webui_memory_tag", allow_direct_media=False, enforce_role_integrity=False)[:80] for value in list(item.get("entity_tags") or [])[:12]],
+            "snippets": [guard_visible_text(value, surface="webui_memory_snippet", allow_direct_media=False, enforce_role_integrity=False)[:160] for value in list(item.get("snippets") or [])[:8]],
+            "supports_recall": bool(item.get("supports_recall", True)),
+            "supports_autofill": bool(item.get("supports_autofill", False)),
+            "time_created": float(item.get("time_created", 0) or 0),
+            "last_accessed_at": float(item.get("last_accessed_at", 0) or 0),
+            "access_count": int(item.get("access_count", 0) or 0),
+        })
+    return _decorate_memory_item(rendered)
+
 def build_memory_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/memory", tags=["memory"])
 
@@ -573,6 +616,52 @@ def build_memory_router(*, runtime) -> APIRouter:
             },
         }
 
+    @router.get("/page")
+    async def memory_page(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+        search: str = Query(default="", max_length=120),
+        status: str = Query(default="", pattern="^(|active|expired)$"),
+        group_id: str = Query(default="", max_length=64),
+        user_id: str = Query(default="", max_length=64),
+        palace_zone: str = Query(default="", max_length=64),
+        source_kind: str = Query(default="", max_length=64),
+        memory_type: str = Query(default="", max_length=64),
+        include_self: bool = Query(default=False),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        params = normalize_pagination(page=page, page_size=page_size)
+        store = _memory_store(runtime)
+        if store is None or not callable(getattr(store, "list_recent_memories_page", None)):
+            payload = build_page([], total=0, params=params).to_dict()
+            payload.update({"available": False, "hidden_self_count": 0})
+            return payload
+        try:
+            rows, total, hidden = await asyncio.to_thread(
+                store.list_recent_memories_page,
+                group_id=group_id, user_id=user_id, palace_zone=palace_zone,
+                source_kind=source_kind, memory_type=memory_type, search=search,
+                status=status, include_self=include_self,
+                limit=params.page_size, offset=params.offset,
+            )
+        except Exception as exc:
+            report = _exception_report(
+                exc, runtime=runtime, code="memory_page_read_failed", phase="memory_read",
+                title="无法读取记忆分页", message="服务器未取得可靠的记忆目录页。",
+                suggestion="根据 Trace ID 检查脱敏日志后重试。",
+                steps=(operation_step("read", "查询记忆分页", "error", "数据库查询未完成。"),),
+            )
+            _raise_operation(500, report)
+        payload = build_page(
+            [_memory_admin_dto(item) for item in rows if isinstance(item, dict)],
+            total=total, params=params,
+        ).to_dict()
+        payload.update({
+            "available": True, "hidden_self_count": hidden, "include_self": include_self,
+            "filters": {"search": search, "status": status, "group_id": group_id, "user_id": user_id, "palace_zone": palace_zone},
+        })
+        return payload
+
     @router.get("/raw-chat")
     async def raw_chat(
         group_id: str = Query(default=""),
@@ -731,8 +820,8 @@ def build_memory_router(*, runtime) -> APIRouter:
             related = list(store.list_related_memory_candidates(memory_id=memory_id, limit=8))
         except Exception:
             related = []
-        decorated_related = [_decorate_memory_item(r) for r in related if isinstance(r, dict)]
-        return {"memory_id": memory_id, "item": _decorate_memory_item(item), "related": decorated_related}
+        decorated_related = [_memory_admin_dto(r) for r in related if isinstance(r, dict)]
+        return {"memory_id": memory_id, "item": _memory_admin_dto(item, detail=True), "related": decorated_related}
 
     def _memory_graph_sync(
         group_id: str = Query(default=""),
@@ -1161,5 +1250,36 @@ def build_memory_router(*, runtime) -> APIRouter:
     @router.get("/palace-zones")
     async def palace_zones(_: AdminIdentity = Depends(require_admin)) -> dict:
         return await asyncio.to_thread(_palace_zones_sync, _)
+
+    @router.get("/palace-zones/{palace_zone}/memories")
+    async def palace_zone_page(
+        palace_zone: str,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+        search: str = Query(default="", max_length=120),
+        status: str = Query(default="", pattern="^(|active|expired)$"),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict:
+        """Drill into one palace zone with the same bounded catalog contract."""
+        params = normalize_pagination(page=page, page_size=page_size)
+        store = _memory_store(runtime)
+        if store is None or not callable(getattr(store, "list_recent_memories_page", None)):
+            payload = build_page([], total=0, params=params).to_dict()
+            payload.update({"available": False, "palace_zone": palace_zone})
+            return payload
+        rows, total, hidden = await asyncio.to_thread(
+            store.list_recent_memories_page,
+            palace_zone=str(palace_zone or "").strip(), search=search, status=status,
+            include_self=False, limit=params.page_size, offset=params.offset,
+        )
+        payload = build_page(
+            [_memory_admin_dto(item) for item in rows if isinstance(item, dict)],
+            total=total, params=params,
+        ).to_dict()
+        payload.update({
+            "available": True, "palace_zone": palace_zone,
+            "hidden_self_count": hidden, "filters": {"search": search, "status": status},
+        })
+        return payload
 
     return router

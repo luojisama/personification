@@ -87,11 +87,13 @@ def test_memory_router_remains_original_read_only_surface() -> None:
         ("/api/memory/vector-index/rebuild", "POST"),
         ("/api/memory/search-test", "GET"),
         ("/api/memory/recent", "GET"),
+        ("/api/memory/page", "GET"),
         ("/api/memory/raw-chat", "GET"),
         ("/api/memory/inner-state", "GET"),
         ("/api/memory/detail/{memory_id}", "GET"),
         ("/api/memory/graph", "GET"),
         ("/api/memory/palace-zones", "GET"),
+        ("/api/memory/palace-zones/{palace_zone}/memories", "GET"),
     }
 
 
