@@ -955,6 +955,28 @@ def test_review_honors_no_reply_for_required_private_turn() -> None:
     assert decision.text == ""
 
 
+def test_review_rewrite_without_usable_text_fails_closed() -> None:
+    for payload in (
+        '{"action":"rewrite","reason":"needs replacement","flags":[]}',
+        '{"action":"rewrite","text":"   ","reason":"needs replacement","flags":[]}',
+    ):
+        async def _fake_call(_messages, result=payload):  # noqa: ANN001
+            return result
+
+        decision = asyncio.run(
+            response_review.review_response_text(
+                _fake_call,
+                candidate_text="未经确认的原候选不能继续发送",
+                raw_message_text="当前消息",
+                reply_required=True,
+            )
+        )
+
+        assert decision.action == "no_reply"
+        assert decision.text == ""
+        assert decision.reason == "review_rewrite_empty"
+
+
 def test_required_reply_recovery_preserves_successful_actions() -> None:
     assert response_review.required_reply_needs_recovery(
         "[NO_REPLY]",

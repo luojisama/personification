@@ -1300,6 +1300,16 @@ async def review_response_text(
             reason="review_unparseable",
             flags=("review_unverified",),
         )
+    # A rewrite is an instruction to replace the candidate, not permission to
+    # retain it.  Valid JSON without a usable replacement therefore remains
+    # unverified and must fail closed instead of falling through to accept.
+    if parsed.action == "rewrite" and not parsed.text:
+        return ResponseReviewDecision(
+            action="no_reply",
+            text="",
+            reason="review_rewrite_empty",
+            flags=parsed.flags or ("review_unverified",),
+        )
     care_reject_flags = tuple(flag for flag in parsed.flags if flag in _CARE_REJECT_FLAGS)
     plugin_reject_flags = tuple(flag for flag in parsed.flags if flag in _PLUGIN_EPISODE_REJECT_FLAGS)
     role_reject_flags = tuple(flag for flag in parsed.flags if flag in _ROLE_INTEGRITY_REJECT_FLAGS)

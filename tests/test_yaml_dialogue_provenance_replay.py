@@ -290,6 +290,7 @@ def test_yaml_accept_projects_multi_messages_to_reviewed_text_once(monkeypatch) 
     # once for each YAML message.  The second record still exists for its
     # sticker authorization, but it cannot carry stale text.
     assert bot.sent == ["第一句", "第二句"]
+    assert " ".join(bot.sent) == "第一句 第二句"
 
 
 def test_yaml_canonical_projection_keeps_authorized_structured_records() -> None:
