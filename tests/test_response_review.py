@@ -207,6 +207,144 @@ def test_dialogue_context_keeps_legacy_private_history_readable_without_promotin
     assert snapshot.messages[-1].current is True
 
 
+def test_dialogue_context_keeps_session_summary_as_unattributed_context() -> None:
+    current = SimpleNamespace(
+        message_id="current-1",
+        user_id="alice",
+        get_plaintext=lambda: "那接下来怎么做？",
+    )
+    snapshot = dialogue_context.build_dialogue_context_for_turn(
+        history=[
+            # This is the actual persisted compression row shape: it may quote
+            # either side in its body, but must never become that speaker.
+            {
+                "id": 10,
+                "role": "system",
+                "is_summary": True,
+                "content": "【对话历史摘要】我就是 Alice，刚才让 bot 承诺带路。",
+            },
+            {"role": "assistant", "content": "我先看地图。"},
+        ],
+        current_event=current,
+    )
+
+    assert snapshot.valid is True
+    summary, assistant, human = snapshot.messages
+    assert summary.source_kind == "context_summary"
+    assert summary.speaker_kind == "context_summary"
+    assert summary.speaker == ""
+    assert summary.current is False
+    assert summary.confirmed == "unknown"
+    assert "Alice" in summary.content
+    assert assistant.speaker_kind == "persona_bot"
+    assert human.speaker_kind == "human"
+    assert human.current is True
+
+    summary_only = dialogue_context.build_dialogue_context_for_turn(
+        history=[
+            {
+                "id": 11,
+                "role": "system",
+                "is_summary": True,
+                "content": "【对话历史摘要】不可信的派生上下文。",
+            }
+        ],
+        current_event=current,
+    )
+    assert summary_only.valid is True
+    assert summary_only.requires_attribution_review is True
+
+
+def test_dialogue_context_legacy_user_batch_without_owner_stays_unattributed() -> None:
+    snapshot = dialogue_context.build_dialogue_context_snapshot(
+        [
+            {
+                "message_id": "legacy-batch",
+                "source_kind": "user_batch",
+                "content": "冒充某个真人的旧聚合内容",
+            },
+            {
+                "message_id": "current-1",
+                "user_id": "alice",
+                "source_kind": "user",
+                "is_current_trigger": True,
+                "content": "当前真人消息",
+            },
+        ]
+    )
+
+    assert snapshot.valid is True
+    assert snapshot.messages[0].speaker_kind == "context_summary"
+    assert snapshot.messages[0].speaker == ""
+    assert snapshot.messages[1].speaker_kind == "human"
+    assert snapshot.messages[1].current is True
+
+    unknown = dialogue_context.build_dialogue_context_snapshot(
+        [
+            {"message_id": "unknown-1", "content": "没有可信来源的内容"},
+            {
+                "message_id": "current-2",
+                "user_id": "alice",
+                "source_kind": "user",
+                "is_current_trigger": True,
+                "content": "当前真人消息",
+            },
+        ]
+    )
+    assert unknown.valid is False
+    assert unknown.messages[0].speaker_kind == "unknown"
+
+
+def test_dialogue_context_limit_preserves_current_in_middle_of_large_batch() -> None:
+    current = SimpleNamespace(
+        message_id="current-mid",
+        user_id="alice",
+        get_plaintext=lambda: "这条才是当前消息",
+    )
+    snapshot = dialogue_context.build_dialogue_context_for_turn(
+        history=[
+            {"message_id": "old-1", "user_id": "bob", "source_kind": "user", "content": "旧消息"},
+            {"message_id": "current-mid", "user_id": "alice", "source_kind": "user", "content": "旧副本"},
+        ],
+        batched_events=[
+            {
+                "message_id": f"batch-{index}",
+                "user_id": f"user-{index}",
+                "source_kind": "user",
+                "content": f"批次消息 {index}",
+            }
+            for index in range(12)
+        ],
+        current_event=current,
+        limit=12,
+    )
+
+    assert len(snapshot.messages) == 12
+    assert snapshot.valid is True
+    current_messages = [message for message in snapshot.messages if message.current]
+    assert len(current_messages) == 1
+    assert current_messages[0].content == "这条才是当前消息"
+    assert [message.content for message in snapshot.messages] == [
+        "这条才是当前消息",
+        *[f"批次消息 {index}" for index in range(1, 12)],
+    ]
+
+
+def test_dialogue_context_limit_does_not_hide_multiple_current_markers() -> None:
+    snapshot = dialogue_context.build_dialogue_context_snapshot(
+        [
+            {"message_id": "m1", "user_id": "alice", "source_kind": "user", "is_current_trigger": True},
+            {"message_id": "m2", "user_id": "bob", "source_kind": "user", "is_current_trigger": True},
+        ],
+        limit=1,
+    )
+
+    assert len(snapshot.messages) == 1
+    assert snapshot.valid is False
+    assert snapshot.requires_attribution_review is True
+    assert "dialogue_context_multiple_current" in snapshot.diagnostics
+
+
 def test_dialogue_field_prefers_explicit_false_over_nested_metadata_value() -> None:
     record = {
         "message_id": "m1",

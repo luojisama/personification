@@ -71,9 +71,25 @@ def _untrusted_content(record: Any, *, limit: int = 500) -> str:
     return "".join(rendered)[:limit]
 
 
+def _is_context_summary(record: Any) -> bool:
+    """Recognize persisted derived context from its trusted envelope only.
+
+    Session compression writes ``is_summary=True`` and ``role=system``.  A
+    legacy system row has the same non-speaker contract.  Its body is never
+    consulted: compressed prose may quote either party and must not acquire a
+    human or persona-Bot identity from that text.
+    """
+
+    return bool(_field(record, "is_summary", False)) or (
+        _text(_field(record, "role", "")).lower() == "system"
+    )
+
+
 def _source_category(record: Any) -> tuple[str, str]:
     """Map only trusted runtime provenance into a small review vocabulary."""
 
+    if _is_context_summary(record):
+        return "context_summary", "context_summary"
     source_kind = source_kind_of(record)
     if source_kind in _PERSONA_SOURCES:
         return source_kind, "persona_bot"
@@ -84,6 +100,13 @@ def _source_category(record: Any) -> tuple[str, str]:
     if source_kind in _DRAFT_SOURCES or bool(_field(record, "is_draft", False)):
         return source_kind or "draft", "draft"
     if source_kind in _HUMAN_SOURCES:
+        # Legacy private session aggregation can retain ``user_batch`` without
+        # an actual participant ID.  It is useful derived context, but cannot
+        # become a synthetic human speaker.
+        if source_kind == "user_batch" and not (
+            _text(_field(record, "user_id", "")) or _text(_field(record, "sender_id", ""))
+        ):
+            return source_kind, "context_summary"
         return source_kind, "human"
     # Older persisted history has no source_kind.  Keep it readable but mark
     # the source as legacy rather than trusting message-body role assertions.
@@ -101,6 +124,8 @@ def _source_category(record: Any) -> tuple[str, str]:
 
 
 def _confirmed_state(record: Any, *, category: str) -> str:
+    if category == "context_summary":
+        return "unknown"
     explicit = _field(record, "confirmed", None)
     if isinstance(explicit, bool):
         return "confirmed" if explicit else "unconfirmed"
@@ -176,7 +201,15 @@ class DialogueContextSnapshot:
     def audit_counts(self) -> dict[str, int | bool]:
         """Safe observability projection: counts only, never bodies or IDs."""
 
-        speaker_kinds = ("persona_bot", "human", "plugin", "peer_bot", "draft", "unknown")
+        speaker_kinds = (
+            "persona_bot",
+            "human",
+            "plugin",
+            "peer_bot",
+            "draft",
+            "context_summary",
+            "unknown",
+        )
         confirmed_states = ("confirmed", "unconfirmed", "unknown")
         counts: dict[str, int | bool] = {
             "valid": self.valid,
@@ -209,7 +242,42 @@ def build_dialogue_context_snapshot(
     """
 
     try:
-        records = list(values or [])[-max(1, min(int(limit or 12), 24)) :]
+        all_records = list(values or [])
+        bounded_limit = max(1, min(int(limit or 12), 24))
+        original_current_count = sum(
+            1
+            for record in all_records
+            if not _is_context_summary(record)
+            and bool(_field(record, "is_current_trigger", _field(record, "current", False)))
+        )
+        if len(all_records) <= bounded_limit:
+            records = all_records
+        else:
+            # The current runtime event may appear in the middle of an ordered
+            # batch.  Do not silently discard it merely because later batch
+            # rows fill the trailing window.  Keep current markers while they
+            # fit, then fill the remaining bounded slots with the most recent
+            # non-current records.  If there are more markers than fit, retain
+            # the multi-current diagnostic from the full input below.
+            current_indices = {
+                index
+                for index, record in enumerate(all_records)
+                if not _is_context_summary(record)
+                and bool(_field(record, "is_current_trigger", _field(record, "current", False)))
+            }
+            if len(current_indices) >= bounded_limit:
+                selected_indices = set(sorted(current_indices)[-bounded_limit:])
+            else:
+                remaining = bounded_limit - len(current_indices)
+                recent_noncurrent = [
+                    index
+                    for index in range(len(all_records) - 1, -1, -1)
+                    if index not in current_indices
+                ][:remaining]
+                selected_indices = current_indices | set(recent_noncurrent)
+            records = [
+                record for index, record in enumerate(all_records) if index in selected_indices
+            ]
     except Exception:
         return DialogueContextSnapshot(
             valid=False,
@@ -267,12 +335,14 @@ def build_dialogue_context_snapshot(
         raw_reply = _text(_field(record, "reply_to_msg_id", "")) or _text(_field(record, "reply_ref", ""))
         if raw_reply and raw_reply not in refs:
             refs[raw_reply] = f"external_message_{len(refs) + 1}"
-        current = bool(_field(record, "is_current_trigger", _field(record, "current", False)))
+        current = speaker_kind != "context_summary" and bool(
+            _field(record, "is_current_trigger", _field(record, "current", False))
+        )
         current_count += int(current)
         confirmed = _confirmed_state(record, category=speaker_kind)
         valid = bool(
-            raw_speaker
-            and speaker_kind != "unknown"
+            (speaker_kind == "context_summary" or raw_speaker)
+            and speaker_kind not in {"unknown"}
             and confirmed in {"confirmed", "unconfirmed", "unknown"}
         )
         if not valid:
@@ -280,7 +350,11 @@ def build_dialogue_context_snapshot(
         content = _untrusted_content(record)
         projected.append(
             DialogueMessageProjection(
-                speaker=aliases.get(raw_speaker, f"unknown_speaker_{index + 1}"),
+                speaker=(
+                    ""
+                    if speaker_kind == "context_summary"
+                    else aliases.get(raw_speaker, f"unknown_speaker_{index + 1}")
+                ),
                 source_kind=source_kind,
                 speaker_kind=speaker_kind,
                 message_ref=refs[raw_message],
@@ -293,11 +367,18 @@ def build_dialogue_context_snapshot(
         )
     if current_count == 0:
         diagnostics.append("dialogue_context_missing_current")
-    elif current_count > 1:
+    if original_current_count > 1 or current_count > 1:
         diagnostics.append("dialogue_context_multiple_current")
     current_human = any(message.current and message.speaker_kind == "human" for message in projected)
     nonhuman_context = any(
-        message.speaker_kind in {"persona_bot", "plugin", "peer_bot", "draft", "unknown"}
+        message.speaker_kind in {
+            "persona_bot",
+            "plugin",
+            "peer_bot",
+            "draft",
+            "context_summary",
+            "unknown",
+        }
         for message in projected
     )
     requires_review = bool(projected) and bool(
