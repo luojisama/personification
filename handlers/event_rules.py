@@ -9,6 +9,7 @@ from ..core.message_relations import (
     extract_reply_message_id,
 )
 from ..core.message_provenance import (
+    is_bot_self_message_event,
     is_human_chat_record,
     is_personification_reply_record,
 )
@@ -103,6 +104,11 @@ async def personification_rule(
     # plugin_invoker 代为执行其它插件命令时会用 handle_event 重新分发合成事件，
     # 这里短路，避免合成事件再次进入拟人回复流程造成递归。
     if getattr(event, "_personification_synthetic", False):
+        return False
+    # OneBot may echo this account's outbound messages as ordinary message
+    # events.  Stop before policy/model work; other plugins on the same QQ
+    # account are still recorded as plugin provenance by resolve_record_message.
+    if is_bot_self_message_event(event):
         return False
     user_id = str(event.user_id)
 

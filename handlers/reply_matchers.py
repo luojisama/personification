@@ -6,6 +6,7 @@ from nonebot import on_message, on_notice
 from nonebot.rule import Rule
 
 from ..core.group_mute import update_group_mute_from_notice
+from ..core.message_provenance import is_bot_self_message_event
 from ..core.reply_buffer_timing import resolve_reply_buffer_timing
 from ..core.runtime_performance import register_reply_reporter
 from .reply_buffer import ReplyConcurrencyController, buffer_runtime_snapshot
@@ -69,6 +70,9 @@ async def _evaluate_personification_rule(
     # 会命中下方的规则结果缓存而绕过 personification_rule 顶部的合成事件短路，
     # 因此这里必须在查缓存之前先短路，避免合成事件再次进入回复流程造成递归。
     if getattr(event, "_personification_synthetic", False):
+        state["is_random_chat"] = False
+        return {"matched": False, "is_random_chat": False}
+    if is_bot_self_message_event(event):
         state["is_random_chat"] = False
         return {"matched": False, "is_random_chat": False}
     if peer_bot_coordinator is not None:

@@ -115,6 +115,36 @@ def _same_thread_followup_history(event: _GroupEvent) -> list[dict]:
     ]
 
 
+def test_personification_rule_rejects_own_onebot_message_before_policy_or_model() -> None:
+    event = _GroupEvent("这是 bot 自己刚发出的消息", user_id="bot-1")
+    state: dict = {}
+    policy = _PolicyGate(_PolicyDecision(disposition="allow", allowed=True))
+
+    result = asyncio.run(
+        event_rules.personification_rule(
+            event,
+            state,
+            **_base_kwargs(user_policy_gate=policy),
+        )
+    )
+
+    assert result is False
+    assert policy.evaluate_calls == 0
+
+
+def test_self_message_guard_keeps_poke_notice_outside_message_loop() -> None:
+    poke = SimpleNamespace(
+        user_id="bot-1",
+        self_id="bot-1",
+        notice_type="notify",
+        sub_type="poke",
+        target_id="bot-1",
+        group_id="20001",
+    )
+
+    assert event_rules.is_bot_self_message_event(poke) is False
+
+
 def test_high_confidence_unprompted_followup_bypasses_random_participation(monkeypatch) -> None:  # noqa: ANN001
     event = _GroupEvent("那要带几组火把？")
     state: dict = {}

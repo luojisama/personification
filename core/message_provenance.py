@@ -21,7 +21,34 @@ def _field(record: Any, name: str, default: Any = None) -> Any:
 
 
 def source_kind_of(record: Any) -> str:
-    return str(_field(record, "source_kind", "") or "").strip().lower()
+    direct = _field(record, "source_kind", "")
+    if not str(direct or "").strip():
+        metadata = _field(record, "metadata", {})
+        if isinstance(metadata, dict):
+            direct = metadata.get("source_kind", "")
+    return str(direct or "").strip().lower()
+
+
+def is_bot_self_message_event(event: Any) -> bool:
+    """Return whether a real message event was emitted by this Bot account.
+
+    Notice events (notably poke) may also carry ``user_id`` and ``self_id``;
+    they must stay outside this message-loop guard.  This is deliberately
+    metadata-only and never consults message text or nicknames.
+    """
+
+    if event is None or str(_field(event, "notice_type", "") or "").strip():
+        return False
+    is_message_shape = bool(
+        _field(event, "message_id", None) is not None
+        or _field(event, "message", None) is not None
+        or callable(_field(event, "get_plaintext", None))
+    )
+    if not is_message_shape:
+        return False
+    self_id = str(_field(event, "self_id", "") or "").strip()
+    user_id = str(_field(event, "user_id", "") or "").strip()
+    return bool(self_id and user_id and self_id == user_id)
 
 
 def is_personification_reply_record(record: Any, bot_self_id: str = "") -> bool:
@@ -79,6 +106,7 @@ def is_human_chat_record(record: Any, bot_self_id: str = "") -> bool:
 __all__ = [
     "is_external_plugin_record",
     "is_human_chat_record",
+    "is_bot_self_message_event",
     "is_personification_reply_record",
     "is_peer_bot_record",
     "source_kind_of",
