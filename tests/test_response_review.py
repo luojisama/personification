@@ -918,9 +918,9 @@ def test_uncertain_visible_reply_rejects_resolution_validation_action_mismatch()
     assert decision.reason == "uncertain_validation_rejected"
 
 
-def test_review_blocks_no_reply_for_direct_mention() -> None:
+def test_review_honors_no_reply_for_direct_mention() -> None:
     async def _fake_call(messages):  # noqa: ANN001
-        assert "禁止输出 no_reply" in messages[0]["content"]
+        assert "优先给出已核实的 rewrite" in messages[0]["content"]
         return '{"action":"no_reply","text":"","reason":"bad"}'
 
     decision = asyncio.run(
@@ -932,13 +932,13 @@ def test_review_blocks_no_reply_for_direct_mention() -> None:
         )
     )
 
-    assert decision.action == "accept"
-    assert decision.text == "我在"
+    assert decision.action == "no_reply"
+    assert decision.text == ""
 
 
-def test_review_blocks_no_reply_for_required_private_turn() -> None:
+def test_review_honors_no_reply_for_required_private_turn() -> None:
     async def _fake_call(messages):  # noqa: ANN001
-        assert "强交互消息，禁止输出 no_reply" in messages[0]["content"]
+        assert "优先给出已核实的 rewrite" in messages[0]["content"]
         return '{"action":"no_reply","text":"","reason":"bad"}'
 
     decision = asyncio.run(
@@ -951,8 +951,8 @@ def test_review_blocks_no_reply_for_required_private_turn() -> None:
         )
     )
 
-    assert decision.action == "accept"
-    assert decision.text == "图里的文字是测试"
+    assert decision.action == "no_reply"
+    assert decision.text == ""
 
 
 def test_required_reply_recovery_preserves_successful_actions() -> None:
@@ -1128,6 +1128,27 @@ def test_review_response_text_outputs_segments() -> None:
 
     assert decision.action == "accept"
     assert decision.segments == ("这是绪山真寻。", "她是《别当欧尼酱了！》里的主角。")
+
+
+def test_review_discards_segments_that_do_not_match_approved_candidate() -> None:
+    async def _fake_call(_messages):  # noqa: ANN001
+        return (
+            '{"action":"accept","text":"","reason":"looks fine",'
+            '"flags":[],"segments":["把人格 Bot 的旧话当成当前用户问题了"]}'
+        )
+
+    decision = asyncio.run(
+        response_review.review_response_text(
+            _fake_call,
+            candidate_text="我只回应你现在这句。",
+            raw_message_text="嗯",
+        )
+    )
+
+    assert decision.action == "accept"
+    assert decision.text == "我只回应你现在这句。"
+    assert decision.segments == ()
+    assert decision.self_claims == ()
 
 
 def test_final_dialogue_gate_returns_only_valid_segment_bound_self_claims() -> None:

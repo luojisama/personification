@@ -403,6 +403,27 @@ def _parse_review_payload(raw: str) -> ResponseReviewDecision | None:
     )
 
 
+def _segments_match_reviewed_text(
+    segments: Iterable[str],
+    reviewed_text: str,
+) -> tuple[str, ...]:
+    """Keep delivery segments only when they cannot change reviewed meaning.
+
+    Segments are independently emitted model text and are used directly by
+    normal/YAML dispatch.  The final reviewer approves one canonical candidate
+    (the original candidate for ``accept`` or ``text`` for ``rewrite``), so a
+    segment list may only affect bubble boundaries, never visible content.
+    """
+
+    normalized = tuple(str(segment or "").strip() for segment in segments if str(segment or "").strip())
+    if not normalized:
+        return ()
+    joined = "".join(normalized)
+    compact_joined = re.sub(r"\s+", "", joined)
+    compact_reviewed = re.sub(r"\s+", "", str(reviewed_text or "").strip())
+    return normalized if compact_joined == compact_reviewed else ()
+
+
 def _parse_uncertain_reply_payload(raw: str) -> ResponseReviewDecision | None:
     text = str(raw or "").strip()
     if not text:
@@ -1126,7 +1147,7 @@ async def review_response_text(
                 "{\"action\":\"rewrite\",\"text\":\"改写后的最终完整回复\",\"reason\":\"...\",\"segments\":[\"改写后的气泡1\",\"改写后的气泡2\"]}。"
                 "如果这轮更适合沉默，输出 {\"action\":\"no_reply\",\"text\":\"\",\"reason\":\"...\"}。"
                 "\n分段契约：若最终回复较长（>35字或包含多个完整子句），请在 segments 数组中顺便输出按真人聊天节奏切好的 1~3 条短气泡（每条 1~2 句话，保护《书名号！》和引号完整），避免大长段压迫感；若本身就是一句简短回复，segments 包含该整句即可。"
-                f"{'当前是强交互消息，禁止输出 no_reply。' if must_reply else ''}"
+                f"{'当前是强交互消息；若候选不合适，优先给出已核实的 rewrite。' if must_reply else ''}"
                 f"{'当前是群聊，改写时不要用追问、澄清问句或征询式结尾索要信息；信息不足就给保守短反应或 no_reply。' if not is_private else ''}"
                 f"{'当前又是明确点名后的互动；如果原话是在调侃、甩锅或轻挑衅，可以保留一句不索要信息的反问式回击，再给出自己的立场。' if is_direct_mention and not is_private else ''}"
                 "普通短句 banter、顺着上一句接话、轻量吐槽，优先 accept 或 rewrite，不要轻易 no_reply。"
@@ -1307,6 +1328,7 @@ async def review_response_text(
             flags=care_reject_flags,
         )
     if parsed.action == "rewrite" and parsed.text:
+        reviewed_segments = _segments_match_reviewed_text(parsed.segments, parsed.text)
         if recent_duplicate_requires_rewrite and _looks_like_recent_duplicate(
             parsed.text,
             recent_bot_replies or [],
@@ -1402,8 +1424,8 @@ async def review_response_text(
             text=parsed.text,
             reason=parsed.reason,
             flags=parsed.flags,
-            segments=parsed.segments,
-            self_claims=parsed.self_claims,
+            segments=reviewed_segments,
+            self_claims=parsed.self_claims if reviewed_segments else (),
             attribution_verdict=parsed.attribution_verdict,
         )
     if recent_duplicate_requires_rewrite:
@@ -1438,37 +1460,15 @@ async def review_response_text(
             flags=provenance_reject_flags,
         )
     if parsed.action == "no_reply":
-        if must_reply:
-            if plugin_episode_hint:
-                return _protected_review_failure(
-                    must_reply=True,
-                    reason=parsed.reason or "plugin_episode_no_reply",
-                    flags=parsed.flags,
-                )
-            if care_required:
-                return _care_fail_closed_decision(
-                    is_private=is_private,
-                    is_direct_mention=is_direct_mention,
-                    risk_level=care_risk,
-                    reason=parsed.reason or "care_no_reply_blocked",
-                    flags=parsed.flags,
-                )
-            return ResponseReviewDecision(
-                action="accept",
-                text=candidate,
-                reason=parsed.reason or "direct_mention_no_reply_blocked",
-                flags=parsed.flags,
-                segments=parsed.segments,
-                self_claims=parsed.self_claims,
-            )
         return ResponseReviewDecision(action="no_reply", text="", reason=parsed.reason, flags=parsed.flags)
+    reviewed_segments = _segments_match_reviewed_text(parsed.segments, candidate)
     return ResponseReviewDecision(
         action="accept",
         text=candidate,
         reason=parsed.reason,
         flags=parsed.flags,
-        segments=parsed.segments,
-        self_claims=parsed.self_claims,
+        segments=reviewed_segments,
+        self_claims=parsed.self_claims if reviewed_segments else (),
     )
 
 
