@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from ._loader import load_personification_module
 
@@ -40,7 +44,7 @@ def test_clear_group_msgs_resets_messages_and_count(tmp_path: Path) -> None:
     assert len(cleared_msgs) == 0
 
 
-def test_safety_block_triggers_auto_clean_for_group(tmp_path: Path) -> None:
+def test_provider_safety_block_keeps_group_history_and_sends_nothing(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     _setup_env(tmp_path)
     group_id = "test_safety_group_auto"
     session_id = f"group_{group_id}"
@@ -54,14 +58,38 @@ def test_safety_block_triggers_auto_clean_for_group(tmp_path: Path) -> None:
     class _SafetyError(RuntimeError):
         code = "provider_safety_block"
 
-    err = _SafetyError("provider safety block")
-    code = processor_mod._provider_diagnosis_code(err)
-    assert code == "provider_safety_block"
+    class _Gate:
+        async def allows_current(self, _event) -> bool:  # noqa: ANN001
+            return True
 
-    # Simulate handling
-    if code == "provider_safety_block":
-        utils_mod.clear_group_msgs(str(group_id))
-        session_store.clear_session_history(session_id, legacy_session_id=str(group_id))
+    class _Bot:
+        def __init__(self) -> None:
+            self.sent: list[object] = []
 
-    assert len(utils_mod.get_recent_group_msgs(group_id, limit=10, expire_hours=0)) == 0
-    assert len(session_store.get_session_messages(session_id)) == 0
+        async def send(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            self.sent.append((args, kwargs))
+
+    async def _raise_safety_block(*_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
+        raise _SafetyError("provider safety block")
+
+    monkeypatch.setattr(processor_mod, "_process_response_logic_impl", _raise_safety_block)
+    bot = _Bot()
+    state: dict[str, object] = {}
+    deps = SimpleNamespace(
+        runtime=SimpleNamespace(
+            user_policy_gate=_Gate(),
+            plugin_config=SimpleNamespace(personification_turn_trace_enabled=False),
+            qq_outbound_ledger=None,
+        ),
+        persona=SimpleNamespace(),
+    )
+    event = SimpleNamespace(group_id=group_id, user_id="10001", message_id="safe-block")
+
+    with pytest.raises(_SafetyError, match="provider safety block"):
+        asyncio.run(processor_mod.process_response_logic(bot, event, state, deps))
+
+    assert processor_mod._provider_diagnosis_code(_SafetyError()) == "provider_safety_block"
+    assert len(utils_mod.get_recent_group_msgs(group_id, limit=10, expire_hours=0)) > 0
+    assert len(session_store.get_session_messages(session_id)) > 0
+    assert bot.sent == []
+    assert state.get("reply_delivery_started") is not True
