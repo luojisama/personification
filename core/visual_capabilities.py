@@ -33,6 +33,11 @@ _PROBE_TIMEOUT_SECONDS = 45.0
 _PROBE_TIMEOUT_MIN_SECONDS = 5.0
 _PROBE_TIMEOUT_MAX_SECONDS = 120.0
 _PROBE_EXPECTED_COLOR_ORDER = "红绿蓝黄"
+_PROBE_PROMPT = (
+    "这是一张 4 宫格纯色图片。"
+    "请只按“左上、右上、左下、右下”的顺序回答颜色。"
+    "只能输出四个汉字，不要解释，不要标点。"
+)
 _VIDEO_CAPABILITY_CACHE: Dict[tuple[str, str, str], VisualCapabilityRecord] = {}
 
 
@@ -307,11 +312,7 @@ async def probe_tool_caller_vision(
         {
             "role": "user",
             "content": build_user_message_content(
-                text=(
-                    "这是一张 4 宫格纯色图片。"
-                    "请只按“左上、右上、左下、右下”的顺序回答颜色。"
-                    "只能输出四个汉字，不要解释，不要标点。"
-                ),
+                text=_PROBE_PROMPT,
                 image_urls=[_PROBE_IMAGE_DATA_URL],
                 image_detail="low",
             ),
@@ -357,7 +358,7 @@ async def probe_tool_caller_vision(
             model,
             True,
             source="startup_probe",
-            detail=content[:80],
+            detail="vision_content_verified",
         )
         return True
     logger.warning(
@@ -380,7 +381,7 @@ async def probe_vision_caller(
         return None
     try:
         result = await asyncio.wait_for(
-            caller.describe("请直接回答 ok", _PROBE_IMAGE_DATA_URL),
+            caller.describe(_PROBE_PROMPT, _PROBE_IMAGE_DATA_URL),
             timeout=_normalize_probe_timeout_seconds(timeout_seconds),
         )
     except Exception as exc:
@@ -400,19 +401,25 @@ async def probe_vision_caller(
         )
         return None
 
-    detail = str(result or "").strip()
-    if not detail:
+    content = str(result or "").strip()
+    if not content:
         logger.warning(
             f"[vision] startup probe returned an empty response "
             f"route={route_name} type={api_type} model={model}"
         )
         return None
-    set_visual_capability(
-        route_name,
-        api_type,
-        model,
-        True,
-        source="startup_probe",
-        detail=detail[:80],
+    if _probe_response_matches_expected(content):
+        set_visual_capability(
+            route_name,
+            api_type,
+            model,
+            True,
+            source="startup_probe",
+            detail="vision_content_verified",
+        )
+        return True
+    logger.warning(
+        f"[vision] startup probe returned an unverified response "
+        f"route={route_name} type={api_type} model={model}"
     )
-    return True
+    return None

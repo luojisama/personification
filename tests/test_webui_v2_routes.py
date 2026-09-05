@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from ._loader import load_personification_module
 
@@ -132,9 +133,9 @@ def test_v2_trace_projection_sanitizes_legacy_message_and_bad_timestamp() -> Non
     assert "private.png" not in str(legacy_media)
 
 
-def test_functional_test_catalog_keeps_three_risk_levels_and_eighteen_categories() -> None:
+def test_functional_test_catalog_keeps_three_risk_levels_and_adds_audio_category() -> None:
     catalog = list(v2_routes._FUNCTIONAL_TEST_CATALOG)
-    assert len(catalog) == 18
+    assert len(catalog) == 19
     assert {item["risk"] for item in catalog} == {"local_read", "external_read", "external_write"}
     assert {item["group"] for item in catalog} == {
         "核心运行",
@@ -149,6 +150,7 @@ def test_functional_test_catalog_keeps_three_risk_levels_and_eighteen_categories
         "模型调用",
         "LLM 子模型",
         "视觉能力",
+        "音频理解",
         "视频理解",
         "存储",
         "记忆",
@@ -234,15 +236,105 @@ def test_paged_route_capabilities_exposes_per_capability_probe_catalog_and_verif
     assert item["capabilities"]["image_input"]["state"] == "unknown"
     assert item["capabilities"]["image_input"]["verification_state"] == "inconclusive"
     assert item["probe_catalog"]["image_input"]["probe_id"] == "vision"
+    assert item["probe_catalog"]["image_input"]["sample_modes"] == ("builtin",)
+    assert item["probe_catalog"]["image_input"]["default_sample_id"] == "image-grid-v1"
+    assert item["probe_catalog"]["image_input"]["builtin_sample"]["mime_type"] == "image/png"
     assert item["probe_catalog"]["function_call"]["probe_id"] == "function_call_noop"
     assert item["probe_catalog"]["function_call"]["available"] is True
     assert item["probe_catalog"]["native_web_search"]["confirmation_required"] is True
     assert item["probe_catalog"]["native_web_search"]["available"] is True
     assert item["probe_catalog"]["reasoning"]["probe_id"] == "reasoning_minimal"
     assert item["probe_catalog"]["reasoning"]["available"] is True
-    assert item["probe_catalog"]["audio_input"]["input_kind"] == "media_upload"
+    assert item["probe_catalog"]["audio_input"]["input_kind"] == "media"
+    assert item["probe_catalog"]["audio_input"]["sample_modes"] == ("builtin", "upload")
+    assert item["probe_catalog"]["audio_input"]["default_sample_id"] == "audio-ascending-v1"
+    assert item["probe_catalog"]["audio_input"]["builtin_sample"]["mime_type"] == "audio/wav"
     assert item["probe_catalog"]["audio_input"]["max_upload_bytes"] > 0
     assert "audio/wav" in item["probe_catalog"]["audio_input"]["accepted_mime_types"]
+
+
+def test_safe_full_batch_prepares_one_confirmation_and_excludes_all_external_writes(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(v2_routes, "_FUNCTIONAL_TEST_BATCHES", {})
+    monkeypatch.setattr(v2_routes, "_FUNCTIONAL_TEST_BATCH_TASKS", {})
+    router = v2_routes.build_v2_router(runtime=SimpleNamespace())
+    prepare = next(route.endpoint for route in router.routes if route.path == "/api/v2/test-batches/prepare")
+
+    result = asyncio.run(prepare(body={"profile": "safe_full"}, _=None))
+
+    assert result["state"] == "awaiting_confirmation"
+    assert result["confirmation"]["external_read_items"] > 0
+    assert result["confirmation"]["external_write_excluded"] == 2
+    assert {item["test_id"] for item in result["items"] if item["state"] == "skipped"} == {
+        "qzone",
+        "proactive",
+    }
+    assert all(
+        item["diagnostic_code"] == "safe_full_external_write_excluded"
+        for item in result["items"]
+        if item["risk"] == "external_write"
+    )
+
+
+def test_safe_full_batch_confirm_starts_one_batch_task(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(v2_routes, "_FUNCTIONAL_TEST_BATCHES", {})
+    monkeypatch.setattr(v2_routes, "_FUNCTIONAL_TEST_BATCH_TASKS", {})
+    executed: list[str] = []
+
+    async def _fake_execute(_runtime, batch_id):  # noqa: ANN001
+        executed.append(batch_id)
+
+    monkeypatch.setattr(v2_routes, "_execute_functional_batch", _fake_execute)
+    router = v2_routes.build_v2_router(runtime=SimpleNamespace())
+    prepare = next(route.endpoint for route in router.routes if route.path == "/api/v2/test-batches/prepare")
+    confirm = next(
+        route.endpoint
+        for route in router.routes
+        if route.path == "/api/v2/test-batches/{batch_id}/confirm"
+    )
+
+    async def _exercise() -> dict[str, object]:
+        batch = await prepare(body={"profile": "safe_full"}, _=None)
+        confirmed = await confirm(batch["id"], body={"confirmed": True}, _=None)
+        await asyncio.sleep(0)
+        return confirmed
+
+    result = asyncio.run(_exercise())
+
+    assert result["state"] == "queued"
+    assert executed == [result["id"]]
+
+
+def test_terminal_task_pruning_enforces_ttl_and_capacity() -> None:
+    now = 10_000.0
+    registry = {
+        f"old-{index}": {"state": "succeeded", "finished_at": now - 10 - index}
+        for index in range(v2_routes._TERMINAL_TASK_LIMIT + 2)
+    }
+    registry["expired"] = {
+        "state": "failed",
+        "finished_at": now - v2_routes._TASK_TTL_SECONDS,
+    }
+    registry["running"] = {"state": "running", "created_at": 1.0}
+
+    v2_routes._prune_terminal_tasks(
+        registry,
+        terminal_states={"succeeded", "failed", "cancelled"},
+        now=now,
+    )
+
+    assert "expired" not in registry
+    assert "running" in registry
+    assert sum(1 for item in registry.values() if item["state"] != "running") == v2_routes._TERMINAL_TASK_LIMIT
+
+
+def test_v2_media_turn_routes_expose_builtin_and_upload_compatibility() -> None:
+    router = v2_routes.build_v2_router(runtime=SimpleNamespace())
+    paths = {route.path for route in router.routes}
+    assert {
+        "/api/v2/tests/media-turn/builtin",
+        "/api/v2/tests/media-turn/upload",
+        "/api/v2/tests/video-turn",
+    } <= paths
 
 
 def test_video_turn_capture_bot_never_calls_real_send_api() -> None:
@@ -257,13 +349,67 @@ def test_video_turn_capture_bot_never_calls_real_send_api() -> None:
                 raise AssertionError("real send API must not run")
             return {"ok": True}
 
+        async def send_group_forward_msg(self, **_data):  # noqa: ANN003
+            raise AssertionError("real forward send API must not run")
+
     bot = v2_routes._NoSendCaptureBot(_RealBot(), trace_id="missing-trace")
     result = asyncio.run(bot.send(None, "可见回复"))
     api_result = asyncio.run(bot.call_api("send_private_msg", message="第二段"))
+    forward_result = asyncio.run(bot.send_group_forward_msg(messages=[{"data": "第三段"}]))
 
     assert result["not_sent"] is True
     assert api_result["not_sent"] is True
-    assert bot.captured == ["可见回复", "第二段"]
+    assert forward_result["not_sent"] is True
+    assert bot.captured == ["可见回复", "第二段", "[{'data': '第三段'}]"]
+
+
+def test_media_turn_requires_successful_structured_tool_result() -> None:
+    failed = [
+        {
+            "stage": "result",
+            "tool": "vision_analyze",
+            "status": "error",
+            "result_summary": "result_len=0 evidence=structured",
+        },
+        {
+            "stage": "result",
+            "tool": "vision_analyze",
+            "status": "ok",
+            "result_summary": "result_len=0 evidence=empty",
+        },
+        {
+            "stage": "call",
+            "tool": "vision_analyze",
+            "status": "ok",
+            "result_summary": "evidence=structured",
+        },
+    ]
+    assert v2_routes._verified_media_evidence(failed) == []
+    assert v2_routes._verified_media_evidence(
+        [
+            {
+                "stage": "result",
+                "tool": "vision_analyze",
+                "status": "ok",
+                "result_summary": "result_len=128 evidence=structured media_routes=native",
+                "detail": "must not reach browser",
+            }
+        ]
+    ) == [{"tool": "vision_analyze", "status": "ok", "evidence_state": "structured"}]
+
+
+def test_route_probe_rejects_duplicate_active_task(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(
+        v2_routes,
+        "_ROUTE_PROBE_TASKS",
+        {("route-1", "audio_input"): {"status": "running"}},
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        v2_routes._ensure_route_probe_idle("route-1", "audio_input")
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "route_probe_already_running"
 
 
 def test_whole_backup_router_exposes_step_up_and_fail_closed_restore_routes() -> None:
@@ -672,6 +818,27 @@ def test_visual_probe_timeout_stays_unknown_and_inconclusive(monkeypatch) -> Non
     assert (state, code) == ("unknown", "probe_visual_timeout")
     assert registry.get(key, "image_input").to_dict()["state"] == "unknown"
     assert registry.get(key, "image_input").to_dict()["verification_state"] == "inconclusive"
+
+
+def test_visual_probe_result_is_exposed_as_content_verified(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(
+        v2_routes,
+        "_ROUTE_PROBE_TASKS",
+        {
+            ("route-fingerprint", "image_input"): {
+                "status": "finished",
+                "capability_state": "supported",
+                "verification_state": "verified",
+                "detail_code": "probe_visual_succeeded",
+                "finished_at": 1_700_000_000.0,
+            }
+        },
+    )
+
+    result = v2_routes._route_probe_results("route-fingerprint")["image_input"]
+
+    assert result["content_verified"] is True
+    assert result["transport_verified"] is False
 
 
 def test_function_call_probe_accepts_only_a_structured_local_noop_tool_call(monkeypatch) -> None:  # noqa: ANN001
@@ -1112,21 +1279,82 @@ def test_media_probe_uses_only_selected_native_route_and_does_not_save_answer(mo
         captured["fallback_enabled"] = probe_runtime.plugin_config.personification_fallback_enabled
         captured["transcription_enabled"] = probe_runtime.plugin_config.personification_audio_transcription_enabled
         captured["sample_exists"] = Path(kwargs["audio_refs"][0]).is_file()
-        return "private media answer must not be persisted", "audio_primary_native"
+        return '{"media_input_accepted":true}', "audio_primary_native"
 
     media_understanding = load_personification_module("plugin.personification.core.media_understanding")
     monkeypatch.setattr(media_understanding, "analyze_audios_with_route_or_fallback", _fake_audio_probe)
 
     state, code = asyncio.run(
-        v2_routes._run_route_media_probe(runtime, key.fingerprint, "audio_input", sample)
+        v2_routes._run_route_media_probe(
+            runtime,
+            key.fingerprint,
+            "audio_input",
+            sample,
+            sample_mode="upload",
+        )
     )
 
-    assert (state, code) == ("supported", "audio_input_native_media_visible_answer")
+    assert (state, code) == ("unknown", "audio_input_custom_media_transport_verified")
     assert captured["providers"] == [provider]
     assert captured["fallback_enabled"] is False
     assert captured["transcription_enabled"] is False
     assert captured["sample_exists"] is True
-    assert "private media answer" not in repr(registry.snapshot())
+    assert "media_input_accepted" not in repr(registry.snapshot())
+
+
+def test_builtin_audio_probe_requires_correct_media_observation(monkeypatch) -> None:  # noqa: ANN001
+    provider = {
+        "name": "native-media-provider",
+        "api_type": "gemini_official",
+        "api_url": "https://generativelanguage.googleapis.com/v1beta",
+        "api_key": "must-not-be-logged",
+        "model": "gemini-2.0-flash",
+        "media_protocol": "gemini_native",
+    }
+    registry, key, runtime = _route_probe_runtime(monkeypatch, provider=provider)
+    captured: dict[str, object] = {}
+
+    async def _fake_audio_probe(**kwargs):  # noqa: ANN003, ANN202
+        captured["prompt"] = kwargs["prompt"]
+        captured["path"] = kwargs["audio_refs"][0]
+        return '{"segment_count":3,"pitch_trend":"ascending"}', "audio_primary_native"
+
+    media_understanding = load_personification_module("plugin.personification.core.media_understanding")
+    monkeypatch.setattr(media_understanding, "analyze_audios_with_route_or_fallback", _fake_audio_probe)
+
+    state, code = asyncio.run(
+        v2_routes._run_route_media_probe(runtime, key.fingerprint, "audio_input", None)
+    )
+
+    assert (state, code) == ("supported", "audio_input_builtin_content_verified")
+    assert registry.get(key, "audio_input").verification_state.value == "verified"
+    assert "audio-ascending-v1" not in str(captured["prompt"])
+    assert str(captured["path"]) not in str(captured["prompt"])
+
+
+def test_builtin_audio_probe_nonempty_ack_is_inconclusive(monkeypatch) -> None:  # noqa: ANN001
+    provider = {
+        "name": "native-media-provider",
+        "api_type": "gemini_official",
+        "api_url": "https://generativelanguage.googleapis.com/v1beta",
+        "api_key": "must-not-be-logged",
+        "model": "gemini-2.0-flash",
+        "media_protocol": "gemini_native",
+    }
+    registry, key, runtime = _route_probe_runtime(monkeypatch, provider=provider)
+
+    async def _fake_audio_probe(**_kwargs):  # noqa: ANN003, ANN202
+        return "已接收", "audio_primary_native"
+
+    media_understanding = load_personification_module("plugin.personification.core.media_understanding")
+    monkeypatch.setattr(media_understanding, "analyze_audios_with_route_or_fallback", _fake_audio_probe)
+
+    state, code = asyncio.run(
+        v2_routes._run_route_media_probe(runtime, key.fingerprint, "audio_input", None)
+    )
+
+    assert (state, code) == ("unknown", "audio_input_probe_inconclusive")
+    assert registry.get(key, "audio_input").verification_state.value == "inconclusive"
 
 
 def test_media_probe_without_a_declared_native_protocol_is_not_marked_unsupported(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
@@ -1167,18 +1395,28 @@ def test_media_upload_probe_streams_a_bounded_sample_then_cleans_it(monkeypatch,
     monkeypatch.setattr(v2_routes, "_ROUTE_PROBE_TASKS", {})
     captured: dict[str, object] = {}
 
-    async def _fake_run(_runtime, route_fingerprint, capability, *, media_path=None):  # noqa: ANN001
+    async def _fake_run(
+        _runtime,
+        route_fingerprint,
+        capability,
+        *,
+        media_path=None,
+        sample_mode="builtin",
+        sample_id="",
+    ):  # noqa: ANN001
         assert route_fingerprint == key.fingerprint
         assert capability == "audio_input"
+        assert sample_mode == "upload"
+        assert sample_id == ""
         assert media_path is not None and media_path.is_file()
         captured["path"] = media_path
         v2_routes._record_route_probe_observation(
             key,
             capability,
-            route_capabilities.CapabilityObservation.SUCCESS,
-            "audio_input_native_media_visible_answer",
+            route_capabilities.CapabilityObservation.PARSE_ERROR,
+            "audio_input_custom_media_transport_verified",
         )
-        return "supported", "audio_input_native_media_visible_answer"
+        return "unknown", "audio_input_custom_media_transport_verified"
 
     monkeypatch.setattr(v2_routes, "_run_route_capability_probe", _fake_run)
 
@@ -1217,7 +1455,7 @@ def test_media_upload_probe_streams_a_bounded_sample_then_cleans_it(monkeypatch,
     assert captured["path"]
     assert not probe_root.exists()
     assert str(probe_root) not in repr(report)
-    assert registry.get(key, "audio_input").verification_state.value == "verified"
+    assert registry.get(key, "audio_input").verification_state.value == "inconclusive"
 
 
 def test_media_probe_helpers_require_matching_mime_suffix_and_signature() -> None:

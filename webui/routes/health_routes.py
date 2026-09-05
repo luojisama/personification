@@ -31,7 +31,7 @@ _STAGE_LOG_LEVEL = {
     "ok": "INFO",
     "info": "INFO",
 }
-_HEALTH_VIDEO_MAX_UPLOAD_BYTES = 256 * 1024 * 1024
+_HEALTH_VIDEO_MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 _HEALTH_VIDEO_MIME_SUFFIXES = {
     "video/mp4": ".mp4",
     "video/quicktime": ".mov",

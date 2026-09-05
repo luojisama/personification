@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from ._loader import load_personification_module
 
 visual_capabilities = load_personification_module("plugin.personification.core.visual_capabilities")
@@ -95,3 +97,54 @@ def test_visual_route_probe_cache_overrides_model_heuristic() -> None:
         "mimo-v2.5",
         route_name="other_route",
     ) is True
+
+
+def test_describe_probe_requires_verified_observation_and_does_not_cache_raw_reply() -> None:
+    class Caller:
+        async def describe(self, prompt, image):  # noqa: ANN001, ANN202
+            assert "红" not in prompt and "绿" not in prompt and "蓝" not in prompt and "黄" not in prompt
+            assert image.startswith("data:image/png;base64,")
+            return "红绿蓝黄"
+
+    class Logger:
+        def warning(self, _message):  # noqa: ANN001
+            return None
+
+    result = asyncio.run(
+        visual_capabilities.probe_vision_caller(
+            route_name="exact-probe",
+            caller=Caller(),
+            api_type="openai",
+            model="vision-model",
+            logger=Logger(),
+            timeout_seconds=5,
+        )
+    )
+
+    assert result is True
+    record = visual_capabilities.get_visual_capability_record("exact-probe", "openai", "vision-model")
+    assert record is not None
+    assert record.detail == "vision_content_verified"
+
+
+def test_describe_probe_generic_ack_is_inconclusive() -> None:
+    class Caller:
+        async def describe(self, _prompt, _image):  # noqa: ANN001, ANN202
+            return "收到"
+
+    class Logger:
+        def warning(self, _message):  # noqa: ANN001
+            return None
+
+    result = asyncio.run(
+        visual_capabilities.probe_vision_caller(
+            route_name="ack-probe",
+            caller=Caller(),
+            api_type="openai",
+            model="vision-model",
+            logger=Logger(),
+            timeout_seconds=5,
+        )
+    )
+
+    assert result is None

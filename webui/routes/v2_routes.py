@@ -16,6 +16,14 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from ...core.pagination import build_page, normalize_pagination, resolve_sort
+from ...core.diagnostic_media_samples import (
+    diagnostic_media_catalog_metadata,
+    diagnostic_media_prompt,
+    get_diagnostic_media_sample,
+    score_custom_media_transport_response,
+    score_diagnostic_media_response,
+    validate_diagnostic_media_sample,
+)
 from ...core.reply_recovery_queue import ReplyRecoveryQueue, RecoveryItem
 from ...core import reply_turn_trace
 from ...core.operation_diagnostics import diagnostic as operation_diagnostic
@@ -44,14 +52,24 @@ from .metrics_routes import build_metrics_summary
 _ROUTE_PROBE_TASKS: dict[tuple[str, str], dict[str, Any]] = {}
 _STICKER_INDEX_TASKS: dict[str, dict[str, Any]] = {}
 _FUNCTIONAL_TEST_RUNS: dict[str, dict[str, Any]] = {}
+_FUNCTIONAL_TEST_TASKS: dict[str, asyncio.Task[Any]] = {}
+_FUNCTIONAL_TEST_BATCHES: dict[str, dict[str, Any]] = {}
+_FUNCTIONAL_TEST_BATCH_TASKS: dict[str, asyncio.Task[Any]] = {}
 _ADMIN_INDEX_TASKS: dict[str, dict[str, Any]] = {}
 _CONFIG_SNAPSHOT_CACHE: dict[str, list[dict[str, Any]]] = {}
+
+_TASK_TTL_SECONDS = 6 * 60 * 60
+_TERMINAL_TASK_LIMIT = 128
+_FUNCTIONAL_TERMINAL_STATES = {"succeeded", "failed", "unknown", "cancelled", "skipped"}
+_FUNCTIONAL_BATCH_ALL_SEMAPHORE = asyncio.Semaphore(4)
+_FUNCTIONAL_BATCH_EXTERNAL_SEMAPHORE = asyncio.Semaphore(2)
 
 _FUNCTIONAL_TEST_CATALOG: tuple[dict[str, Any], ...] = (
     {"id": "core", "label": "核心运行", "category": "核心", "group": "核心运行", "risk": "local_read", "execution_kind": "local_readonly"},
     {"id": "model", "label": "主模型", "category": "模型调用", "group": "模型与媒体", "risk": "external_read", "execution_kind": "provider_probe"},
     {"id": "submodels", "label": "子模型", "category": "LLM 子模型", "group": "模型与媒体", "risk": "external_read", "execution_kind": "provider_probe"},
     {"id": "vision", "label": "图片理解", "category": "视觉能力", "group": "模型与媒体", "risk": "external_read", "execution_kind": "provider_probe"},
+    {"id": "audio", "label": "音频理解", "category": "音频理解", "group": "模型与媒体", "risk": "external_read", "execution_kind": "provider_probe"},
     {"id": "video", "label": "视频理解", "category": "视频理解", "group": "模型与媒体", "risk": "external_read", "execution_kind": "provider_probe"},
     {"id": "storage", "label": "存储", "category": "存储", "group": "存储与记忆", "risk": "local_read", "execution_kind": "local_readonly"},
     {"id": "memory", "label": "记忆", "category": "记忆", "group": "存储与记忆", "risk": "local_read", "execution_kind": "local_readonly"},
@@ -133,6 +151,14 @@ _ROUTE_PROBE_CATALOG: dict[str, dict[str, Any]] = {
         "risk": "external_read",
         "confirmation_required": True,
         "reason_code": "vision_probe_available",
+        "sample_modes": ("builtin",),
+        "default_sample_id": "image-grid-v1",
+        "builtin_sample": {
+            "sample_id": "image-grid-v1",
+            "media_kind": "image",
+            "mime_type": "image/png",
+            "description": "服务器内置的确定性四宫格图片，用于验证图像内容理解。",
+        },
     },
     "function_call": {
         "probe_id": "function_call_noop",
@@ -146,8 +172,11 @@ _ROUTE_PROBE_CATALOG: dict[str, dict[str, Any]] = {
         "available": True,
         "risk": "external_read",
         "confirmation_required": True,
-        "reason_code": "audio_probe_upload_available",
-        "input_kind": "media_upload",
+        "reason_code": "audio_probe_builtin_available",
+        "input_kind": "media",
+        "sample_modes": ("builtin", "upload"),
+        "default_sample_id": "audio-ascending-v1",
+        "builtin_sample": diagnostic_media_catalog_metadata("audio_input"),
         "accepted_mime_types": _ROUTE_MEDIA_PROBE_SPECS["audio_input"]["accepted_mime_types"],
         "max_upload_bytes": _ROUTE_MEDIA_PROBE_SPECS["audio_input"]["max_upload_bytes"],
     },
@@ -156,8 +185,11 @@ _ROUTE_PROBE_CATALOG: dict[str, dict[str, Any]] = {
         "available": True,
         "risk": "external_read",
         "confirmation_required": True,
-        "reason_code": "video_probe_upload_available",
-        "input_kind": "media_upload",
+        "reason_code": "video_probe_builtin_available",
+        "input_kind": "media",
+        "sample_modes": ("builtin", "upload"),
+        "default_sample_id": "video-rgb-v1",
+        "builtin_sample": diagnostic_media_catalog_metadata("video_input"),
         "accepted_mime_types": _ROUTE_MEDIA_PROBE_SPECS["video_input"]["accepted_mime_types"],
         "max_upload_bytes": _ROUTE_MEDIA_PROBE_SPECS["video_input"]["max_upload_bytes"],
     },
@@ -198,6 +230,31 @@ def _iso(value: Any) -> str | None:
         return None
 
 
+def _prune_terminal_tasks(
+    registry: dict[Any, dict[str, Any]],
+    *,
+    terminal_states: set[str],
+    state_key: str = "state",
+    now: float | None = None,
+) -> None:
+    """Bound completed in-memory admin tasks without evicting live work."""
+
+    current = time.time() if now is None else float(now)
+    terminal: list[tuple[Any, float]] = []
+    for key, item in list(registry.items()):
+        state = str(item.get(state_key) or "")
+        if state not in terminal_states:
+            continue
+        finished_at = float(item.get("finished_at") or item.get("created_at") or item.get("queued_at") or 0.0)
+        if finished_at > 0 and current - finished_at >= _TASK_TTL_SECONDS:
+            registry.pop(key, None)
+            continue
+        terminal.append((key, finished_at))
+    if len(terminal) <= _TERMINAL_TASK_LIMIT:
+        return
+    terminal.sort(key=lambda pair: pair[1])
+    for key, _finished_at in terminal[: len(terminal) - _TERMINAL_TASK_LIMIT]:
+        registry.pop(key, None)
 def _recovery_summary(item: RecoveryItem) -> dict[str, Any]:
     return {
         "id": item.id,
@@ -809,6 +866,18 @@ def _route_probe_task_key(route_fingerprint: str, capability: str) -> tuple[str,
     return str(route_fingerprint or ""), str(capability or "")
 
 
+def _ensure_route_probe_idle(route_fingerprint: str, capability: str) -> None:
+    existing = _ROUTE_PROBE_TASKS.get(_route_probe_task_key(route_fingerprint, capability))
+    if isinstance(existing, dict) and str(existing.get("status") or "") in {"queued", "running"}:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "route_probe_already_running",
+                "message": "同一路由的该能力探针仍在执行；请等待现有任务结束。",
+            },
+        )
+
+
 def _route_key_for_fingerprint(route_fingerprint: str) -> tuple[str, RouteKey] | None:
     target_fingerprint = str(route_fingerprint or "")
     for item in DEFAULT_ROUTE_CAPABILITY_REGISTRY.snapshot():
@@ -822,6 +891,11 @@ def _route_key_for_fingerprint(route_fingerprint: str) -> tuple[str, RouteKey] |
 
 
 def _route_probe_statuses(route_fingerprint: str) -> dict[str, str]:
+    _prune_terminal_tasks(
+        _ROUTE_PROBE_TASKS,
+        terminal_states={"finished", "failed"},
+        state_key="status",
+    )
     return {
         capability: str(
             _ROUTE_PROBE_TASKS.get(
@@ -831,6 +905,29 @@ def _route_probe_statuses(route_fingerprint: str) -> dict[str, str]:
         )
         for capability in CAPABILITY_NAMES
     }
+
+
+def _route_probe_results(route_fingerprint: str) -> dict[str, dict[str, Any]]:
+    results: dict[str, dict[str, Any]] = {}
+    for capability in CAPABILITY_NAMES:
+        task = _ROUTE_PROBE_TASKS.get(_route_probe_task_key(route_fingerprint, capability), {})
+        if not task:
+            continue
+        detail_code = str(task.get("detail_code") or "")
+        content_verified = detail_code.endswith("_builtin_content_verified") or (
+            capability == "image_input" and detail_code == "probe_visual_succeeded"
+        )
+        results[capability] = {
+            "status": str(task.get("status") or "idle"),
+            "sample_mode": str(task.get("sample_mode") or ""),
+            "capability_state": str(task.get("capability_state") or "unknown"),
+            "verification_state": str(task.get("verification_state") or "not_run"),
+            "content_verified": content_verified,
+            "transport_verified": detail_code.endswith("_custom_media_transport_verified"),
+            "detail_code": detail_code,
+            "finished_at": _iso(task.get("finished_at")),
+        }
+    return results
 
 
 def _route_probe_status(route_fingerprint: str) -> str:
@@ -1493,6 +1590,9 @@ async def _run_route_media_probe(
     route_fingerprint: str,
     capability: str,
     media_path: Path | None,
+    *,
+    sample_mode: str = "builtin",
+    sample_id: str = "",
 ) -> tuple[str, str]:
     """Run one selected-route native media probe and retain no media output."""
 
@@ -1503,6 +1603,28 @@ async def _run_route_media_probe(
         _record_unavailable_route_probe(route_fingerprint, capability)
         return "unknown", "probe_route_caller_unavailable"
     _route_name, route_key, provider = target
+    normalized_mode = str(sample_mode or "builtin").strip().lower()
+    builtin_sample = None
+    if normalized_mode == "builtin":
+        builtin_sample = get_diagnostic_media_sample(capability, sample_id)
+        if builtin_sample is None:
+            _record_route_probe_observation(
+                route_key,
+                capability,
+                CapabilityObservation.PROBE_UNAVAILABLE,
+                "builtin_sample_not_found",
+            )
+            return "unknown", "builtin_sample_not_found"
+        integrity_ok, integrity_code = validate_diagnostic_media_sample(builtin_sample)
+        if not integrity_ok:
+            _record_route_probe_observation(
+                route_key,
+                capability,
+                CapabilityObservation.PROBE_UNAVAILABLE,
+                integrity_code,
+            )
+            return "unknown", integrity_code
+        media_path = builtin_sample.path
     if media_path is None or not media_path.is_file():
         _record_route_probe_observation(
             route_key,
@@ -1536,7 +1658,11 @@ async def _run_route_media_probe(
             response, _route = await asyncio.wait_for(
                 analyze_audios_with_route_or_fallback(
                     runtime=probe_runtime,
-                    prompt="请仅回复“已接收”。不要转写、描述、引用或保存音频内容。",
+                    prompt=(
+                        diagnostic_media_prompt(builtin_sample)
+                        if builtin_sample is not None
+                        else "请仅依据音频返回一个严格 JSON 对象，格式为 {\"media_input_accepted\":true|false}，不要附加解释。"
+                    ),
                     audio_refs=[str(media_path)],
                 ),
                 timeout=_route_probe_timeout_seconds(runtime),
@@ -1545,7 +1671,11 @@ async def _run_route_media_probe(
             response, _route = await asyncio.wait_for(
                 analyze_videos_with_route_or_fallback(
                     runtime=probe_runtime,
-                    prompt="请仅回复“已接收”。不要转写、描述、引用或保存视频内容。",
+                    prompt=(
+                        diagnostic_media_prompt(builtin_sample)
+                        if builtin_sample is not None
+                        else "请仅依据视频返回一个严格 JSON 对象，格式为 {\"media_input_accepted\":true|false}，不要附加解释。"
+                    ),
                     video_refs=[str(media_path)],
                 ),
                 timeout=_route_probe_timeout_seconds(runtime),
@@ -1560,13 +1690,24 @@ async def _run_route_media_probe(
         _record_route_probe_observation(route_key, capability, observation, code)
         return ("unsupported" if observation == CapabilityObservation.EXPLICIT_UNSUPPORTED else "unknown"), code
 
-    # Only the existence of a visible answer is observed; the media-derived
-    # content, local path, route attempts, and any raw provider payload are
-    # never persisted or sent back to the browser.
-    if bool(str(response or "").strip()):
-        code = f"{capability}_native_media_visible_answer"
+    # Built-in samples have a server-only expected observation.  Uploaded
+    # samples deliberately cannot prove semantic understanding because there
+    # is no trusted answer key; they can only establish transport/decoding.
+    if builtin_sample is not None and score_diagnostic_media_response(builtin_sample, response):
+        code = f"{capability}_builtin_content_verified"
         _record_route_probe_observation(route_key, capability, CapabilityObservation.SUCCESS, code)
         return "supported", code
+
+    custom_transport = score_custom_media_transport_response(response) if builtin_sample is None else None
+    if custom_transport is True:
+        code = f"{capability}_custom_media_transport_verified"
+        _record_route_probe_observation(route_key, capability, CapabilityObservation.PARSE_ERROR, code)
+        return "unknown", code
+
+    if custom_transport is False:
+        code = f"{capability}_custom_media_transport_rejected"
+        _record_route_probe_observation(route_key, capability, CapabilityObservation.EXPLICIT_UNSUPPORTED, code)
+        return "unsupported", code
 
     code = f"{capability}_probe_inconclusive"
     _record_route_probe_observation(route_key, capability, CapabilityObservation.PARSE_ERROR, code)
@@ -1579,6 +1720,8 @@ async def _run_route_capability_probe(
     capability: str,
     *,
     media_path: Path | None = None,
+    sample_mode: str = "builtin",
+    sample_id: str = "",
 ) -> tuple[str, str]:
     if capability == "image_input":
         return await _run_route_visual_probe(runtime, route_fingerprint)
@@ -1589,7 +1732,14 @@ async def _run_route_capability_probe(
     if capability == "reasoning":
         return await _run_route_reasoning_probe(runtime, route_fingerprint)
     if capability in _ROUTE_MEDIA_PROBE_SPECS:
-        return await _run_route_media_probe(runtime, route_fingerprint, capability, media_path)
+        return await _run_route_media_probe(
+            runtime,
+            route_fingerprint,
+            capability,
+            media_path,
+            sample_mode=sample_mode,
+            sample_id=sample_id,
+        )
     return "unknown", "probe_unavailable"
 
 
@@ -1644,12 +1794,84 @@ class _NoSendCaptureBot:
         return self._capture(message)
 
     def __getattr__(self, name: str) -> Any:
+        if str(name).startswith("send"):
+            async def _blocked_send(*args: Any, **kwargs: Any) -> dict[str, Any]:
+                message = kwargs.get("message", kwargs.get("messages"))
+                if message is None and args:
+                    message = args[-1]
+                return self._capture(message)
+
+            return _blocked_send
         return getattr(self._real, name)
+
+
+def _verified_media_evidence(tools: Any) -> list[dict[str, str]]:
+    """Return only successful structured media-analysis evidence."""
+
+    if not isinstance(tools, list):
+        return []
+    verified: list[dict[str, str]] = []
+    for item in tools:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("tool") or "") != "vision_analyze":
+            continue
+        if str(item.get("stage") or "") != "result" or str(item.get("status") or "") != "ok":
+            continue
+        summary_tokens = set(str(item.get("result_summary") or "").split())
+        if "evidence=structured" not in summary_tokens:
+            continue
+        verified.append(
+            {
+                "tool": "vision_analyze",
+                "status": "ok",
+                "evidence_state": "structured",
+            }
+        )
+    return verified[:4]
 
 
 def _functional_test_definition(test_id: str) -> dict[str, Any] | None:
     normalized = str(test_id or "").strip()
     return next((dict(item) for item in _FUNCTIONAL_TEST_CATALOG if item["id"] == normalized), None)
+
+
+def _new_functional_run(
+    definition: dict[str, Any],
+    *,
+    target_summary: str = "",
+    route_fingerprint: str = "",
+    parent_batch_id: str = "",
+) -> dict[str, Any]:
+    risk = str(definition.get("risk") or "local_read")
+    operation_id = uuid.uuid4().hex
+    run = {
+        "id": operation_id,
+        "test_id": str(definition.get("id") or ""),
+        "label": str(definition.get("label") or ""),
+        "category": str(definition.get("category") or ""),
+        "group": str(definition.get("group") or ""),
+        "risk": risk,
+        "execution_kind": str(definition.get("execution_kind") or "local_readonly"),
+        "state": "prepared" if risk == "local_read" else "awaiting_confirmation",
+        "target_summary": str(target_summary or "")[:240],
+        "route_fingerprint": str(route_fingerprint or "")[:128],
+        "parent_batch_id": str(parent_batch_id or "")[:64],
+        "trace_id": "",
+        "created_at": time.time(),
+        "started_at": 0.0,
+        "finished_at": 0.0,
+        "duration_ms": None,
+        "steps": [],
+        "diagnostic": {},
+        "result_summary": {},
+        "delivery_status": (
+            "not_started"
+            if definition.get("execution_kind") in {"qq_canary", "qzone_canary"}
+            else "not_applicable"
+        ),
+    }
+    return run
 
 
 def _functional_step_plan(run: dict[str, Any], *, status: str, message: str) -> tuple[Any, ...]:
@@ -1739,6 +1961,40 @@ def _functional_test_view(run: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _active_primary_route_fingerprint(runtime: Any) -> str:
+    bundle = getattr(runtime, "runtime_bundle", None)
+    getter = getattr(bundle, "get_configured_api_providers", None)
+    try:
+        providers = list(getter() or []) if callable(getter) else []
+    except Exception:
+        providers = []
+    if not providers:
+        config = getattr(runtime, "plugin_config", None)
+        if config is not None:
+            providers = [
+                {
+                    "name": "legacy_primary",
+                    "api_type": getattr(config, "personification_api_type", ""),
+                    "api_url": getattr(config, "personification_api_url", ""),
+                    "model": getattr(config, "personification_model", ""),
+                    "media_protocol": getattr(config, "personification_media_protocol", "auto"),
+                }
+            ]
+    for provider in providers[:1]:
+        if not isinstance(provider, dict):
+            continue
+        candidate = RouteKey.from_config(
+            provider=provider.get("name") or "legacy_primary",
+            api_type=provider.get("api_type"),
+            api_url=provider.get("api_url"),
+            model=provider.get("model"),
+            media_protocol=provider.get("media_protocol") or "auto",
+        )
+        if _route_key_for_fingerprint(candidate.fingerprint) is not None:
+            return candidate.fingerprint
+    return ""
+
+
 async def _execute_functional_test(runtime: Any, operation_id: str) -> None:
     from ...core.diagnostics import run_diagnostics
 
@@ -1761,6 +2017,71 @@ async def _execute_functional_test(runtime: Any, operation_id: str) -> None:
         payload={"operation_id": operation_id, "state": "running", "test_id": run["test_id"]},
     )
     try:
+        media_capability = {
+            "vision": "image_input",
+            "audio": "audio_input",
+            "video": "video_input",
+        }.get(str(run.get("test_id") or ""))
+        if media_capability:
+            route_fingerprint = _active_primary_route_fingerprint(runtime)
+            if not route_fingerprint:
+                capability_state, detail_code = "unknown", "active_primary_route_unavailable"
+            else:
+                run["route_fingerprint"] = route_fingerprint
+                capability_state, detail_code = await _run_route_capability_probe(
+                    runtime,
+                    route_fingerprint,
+                    media_capability,
+                    sample_mode="builtin",
+                )
+            content_verified = detail_code.endswith("_builtin_content_verified") or (
+                media_capability == "image_input" and capability_state == "supported"
+            )
+            run.update(
+                {
+                    "state": (
+                        "succeeded"
+                        if capability_state == "supported" and content_verified
+                        else "failed"
+                        if capability_state == "unsupported"
+                        else "unknown"
+                    ),
+                    "result_summary": {
+                        "overall": capability_state,
+                        "check_count": 1,
+                        "failed_count": 0 if capability_state == "supported" and content_verified else 1,
+                        "execution_kind": "provider_probe",
+                        "content_verified": content_verified,
+                        "delivery_status": "not_applicable",
+                        "detail_code": detail_code,
+                    },
+                    "delivery_status": "not_applicable",
+                }
+            )
+            _set_functional_run_diagnostic(
+                run,
+                ok=run["state"] == "succeeded",
+                code=(
+                    "functional_test_succeeded"
+                    if run["state"] == "succeeded"
+                    else "functional_test_unsupported"
+                    if run["state"] == "failed"
+                    else "functional_test_inconclusive"
+                ),
+                phase="diagnostic_complete",
+                title="媒体理解体检完成" if run["state"] == "succeeded" else "媒体理解体检未得出明确成功结论",
+                message=(
+                    "当前活动主路由已通过内置媒体内容验真；未发送 QQ。"
+                    if run["state"] == "succeeded"
+                    else "当前活动主路由未通过内容验真；结果不会被标记为支持。"
+                ),
+                steps=_functional_step_plan(
+                    run,
+                    status="ok" if run["state"] == "succeeded" else "warn",
+                    message="内置媒体探针已结束。",
+                ),
+            )
+            return
         result = await run_diagnostics(
             plugin_config=getattr(runtime, "plugin_config", None),
             bundle=getattr(runtime, "runtime_bundle", None),
@@ -1853,6 +2174,134 @@ async def _execute_functional_test(runtime: Any, operation_id: str) -> None:
                 "diagnostic_code": run["diagnostic_code"],
             },
         )
+        current = _FUNCTIONAL_TEST_TASKS.get(operation_id)
+        if current is asyncio.current_task():
+            _FUNCTIONAL_TEST_TASKS.pop(operation_id, None)
+
+
+def _safe_batch_item_view(item: dict[str, Any]) -> dict[str, Any]:
+    run = _FUNCTIONAL_TEST_RUNS.get(str(item.get("run_id") or ""))
+    if run is not None:
+        return _functional_test_view(run)
+    return {
+        "id": "",
+        "test_id": str(item.get("test_id") or ""),
+        "label": str(item.get("label") or ""),
+        "group": str(item.get("group") or ""),
+        "risk": str(item.get("risk") or "local_read"),
+        "execution_kind": str(item.get("execution_kind") or "local_readonly"),
+        "state": str(item.get("state") or "pending"),
+        "diagnostic_code": str(item.get("diagnostic_code") or "safe_full_pending"),
+        "created_at": None,
+        "started_at": None,
+        "finished_at": None,
+        "duration_ms": None,
+        "steps": [],
+        "diagnostic": {},
+        "result_summary": {},
+        "delivery_status": "excluded" if item.get("state") == "skipped" else "not_applicable",
+    }
+
+
+def _functional_batch_view(batch: dict[str, Any]) -> dict[str, Any]:
+    items = [_safe_batch_item_view(item) for item in list(batch.get("items") or [])[:64] if isinstance(item, dict)]
+    counts = {state: 0 for state in ("pending", "running", "succeeded", "failed", "unknown", "skipped", "cancelled")}
+    for item in items:
+        state = str(item.get("state") or "pending")
+        counts[state] = counts.get(state, 0) + 1
+    return {
+        "id": str(batch.get("id") or ""),
+        "profile": "safe_full",
+        "state": str(batch.get("state") or "awaiting_confirmation"),
+        "created_at": _iso(batch.get("created_at")),
+        "confirmed_at": _iso(batch.get("confirmed_at")),
+        "started_at": _iso(batch.get("started_at")),
+        "finished_at": _iso(batch.get("finished_at")),
+        "expires_at": _iso(batch.get("expires_at")),
+        "cancellation_requested": bool(batch.get("cancellation_requested", False)),
+        "confirmation": dict(batch.get("confirmation") or {}),
+        "excluded": list(batch.get("excluded") or [])[:16],
+        "counts": counts,
+        "items": items,
+        "diagnostic_code": str(batch.get("diagnostic_code") or "safe_full_prepared"),
+    }
+
+
+async def _execute_functional_batch(runtime: Any, batch_id: str) -> None:
+    batch = _FUNCTIONAL_TEST_BATCHES.get(batch_id)
+    if batch is None:
+        return
+    batch.update({"state": "running", "started_at": time.time(), "diagnostic_code": "safe_full_running"})
+    async def _one(item: dict[str, Any]) -> None:
+        if item.get("state") == "skipped" or batch.get("cancellation_requested"):
+            return
+        definition = _functional_test_definition(str(item.get("test_id") or ""))
+        if definition is None:
+            item.update({"state": "failed", "diagnostic_code": "functional_test_not_found"})
+            return
+        async with _FUNCTIONAL_BATCH_ALL_SEMAPHORE:
+            if batch.get("cancellation_requested"):
+                item.update({"state": "cancelled", "diagnostic_code": "safe_full_cancelled"})
+                return
+
+            async def _run_once() -> None:
+                run = _new_functional_run(definition, parent_batch_id=batch_id)
+                run["state"] = "prepared"
+                _FUNCTIONAL_TEST_RUNS[run["id"]] = run
+                item["run_id"] = run["id"]
+                item["state"] = "running"
+                await _execute_functional_test(runtime, run["id"])
+                item["state"] = str(run.get("state") or "unknown")
+                item["diagnostic_code"] = str(run.get("diagnostic_code") or "functional_test_inconclusive")
+
+            if item.get("risk") == "external_read":
+                async with _FUNCTIONAL_BATCH_EXTERNAL_SEMAPHORE:
+                    await _run_once()
+            else:
+                await _run_once()
+
+    workers = [asyncio.create_task(_one(item)) for item in batch.get("items") or [] if isinstance(item, dict)]
+    batch["workers"] = workers
+    try:
+        await asyncio.gather(*workers)
+    except asyncio.CancelledError:
+        batch["cancellation_requested"] = True
+        for worker in workers:
+            if not worker.done():
+                worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+    finally:
+        for item in batch.get("items") or []:
+            if not isinstance(item, dict) or item.get("state") in {"skipped", "succeeded", "failed", "unknown"}:
+                continue
+            if batch.get("cancellation_requested"):
+                item.update({"state": "cancelled", "diagnostic_code": "safe_full_cancelled"})
+                run = _FUNCTIONAL_TEST_RUNS.get(str(item.get("run_id") or ""))
+                if run is not None and run.get("state") not in _FUNCTIONAL_TERMINAL_STATES:
+                    run.update(
+                        {
+                            "state": "cancelled",
+                            "finished_at": time.time(),
+                            "diagnostic_code": "safe_full_cancelled",
+                        }
+                    )
+        terminal = [
+            str(item.get("state") or "unknown")
+            for item in batch.get("items") or []
+            if isinstance(item, dict) and item.get("state") != "skipped"
+        ]
+        batch["finished_at"] = time.time()
+        batch["expires_at"] = batch["finished_at"] + _TASK_TTL_SECONDS
+        if batch.get("cancellation_requested"):
+            batch.update({"state": "cancelled", "diagnostic_code": "safe_full_cancelled"})
+        elif any(state in {"failed", "unknown"} for state in terminal):
+            batch.update({"state": "failed", "diagnostic_code": "safe_full_completed_with_issues"})
+        else:
+            batch.update({"state": "succeeded", "diagnostic_code": "safe_full_succeeded"})
+        batch.pop("workers", None)
+        _FUNCTIONAL_TEST_BATCH_TASKS.pop(batch_id, None)
+        _prune_terminal_tasks(_FUNCTIONAL_TEST_BATCHES, terminal_states={"succeeded", "failed", "cancelled"})
+        _prune_terminal_tasks(_FUNCTIONAL_TEST_RUNS, terminal_states=_FUNCTIONAL_TERMINAL_STATES)
 
 
 def build_v2_router(*, runtime: Any) -> APIRouter:
@@ -1862,6 +2311,16 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
     async def bots(_: AdminIdentity = Depends(require_admin)) -> dict[str, Any]:
         items = await list_bot_identities(runtime)
         return {"items": items, "total": len(items), "diagnostic_code": "bot_identity_snapshot"}
+
+    @router.get("/admin-identity")
+    async def admin_identity(admin: AdminIdentity = Depends(require_admin)) -> dict[str, str]:
+        source = "SUPERUSER" if str(admin.qq) in {str(item) for item in (getattr(runtime, "superusers", set()) or set())} else "plugin_admin"
+        return {
+            "qq": admin.qq,
+            "device_id": admin.device_id,
+            "label": admin.label,
+            "identity_source": source,
+        }
 
     @router.get("/admin-index/status")
     async def admin_index_status(_: AdminIdentity = Depends(require_admin)) -> dict[str, Any]:
@@ -1908,6 +2367,149 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             "diagnostic_code": "functional_test_catalog_ready",
         }
 
+    @router.post("/test-batches/prepare")
+    async def prepare_test_batch(
+        body: dict[str, Any] = Body(default_factory=dict),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        if str(body.get("profile") or "safe_full").strip() != "safe_full":
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "test_batch_profile_invalid", "message": "只支持安全全检批次。"},
+            )
+        _prune_terminal_tasks(_FUNCTIONAL_TEST_BATCHES, terminal_states={"succeeded", "failed", "cancelled"})
+        items: list[dict[str, Any]] = []
+        excluded: list[dict[str, str]] = []
+        for definition in _FUNCTIONAL_TEST_CATALOG:
+            risk = str(definition.get("risk") or "local_read")
+            item = {
+                "test_id": str(definition.get("id") or ""),
+                "label": str(definition.get("label") or ""),
+                "group": str(definition.get("group") or ""),
+                "risk": risk,
+                "execution_kind": str(definition.get("execution_kind") or "local_readonly"),
+                "state": "skipped" if risk == "external_write" else "pending",
+                "diagnostic_code": (
+                    "safe_full_external_write_excluded" if risk == "external_write" else "safe_full_pending"
+                ),
+            }
+            items.append(item)
+            if risk == "external_write":
+                excluded.append(
+                    {
+                        "test_id": item["test_id"],
+                        "label": item["label"],
+                        "reason_code": "safe_full_external_write_excluded",
+                    }
+                )
+        external_count = sum(1 for item in items if item["risk"] == "external_read")
+        local_count = sum(1 for item in items if item["risk"] == "local_read")
+        batch_id = uuid.uuid4().hex
+        batch = {
+            "id": batch_id,
+            "state": "awaiting_confirmation",
+            "created_at": time.time(),
+            "confirmed_at": 0.0,
+            "started_at": 0.0,
+            "finished_at": 0.0,
+            "expires_at": 0.0,
+            "cancellation_requested": False,
+            "items": items,
+            "excluded": excluded,
+            "confirmation": {
+                "provider_calls_required": external_count > 0,
+                "external_read_items": external_count,
+                "local_read_items": local_count,
+                "external_write_excluded": len(excluded),
+                "active_media_routes": 1,
+                "cost_notice": "外部读取探针会调用当前配置的 Provider，可能产生额度消耗；不自动重试。",
+            },
+            "diagnostic_code": "safe_full_confirmation_required",
+        }
+        _FUNCTIONAL_TEST_BATCHES[batch_id] = batch
+        return _functional_batch_view(batch)
+
+    @router.post("/test-batches/{batch_id}/confirm")
+    async def confirm_test_batch(
+        batch_id: str,
+        body: dict[str, Any] = Body(default_factory=dict),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _prune_terminal_tasks(_FUNCTIONAL_TEST_BATCHES, terminal_states={"succeeded", "failed", "cancelled"})
+        batch = _FUNCTIONAL_TEST_BATCHES.get(str(batch_id or ""))
+        if batch is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "test_batch_not_found", "message": "体检批次不存在或已过期。"},
+            )
+        if batch.get("state") != "awaiting_confirmation":
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "test_batch_state_conflict", "message": "该批次当前不等待确认。"},
+            )
+        if body.get("confirmed") is not True:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "test_batch_confirmation_missing", "message": "必须明确确认 Provider 调用和额度范围。"},
+            )
+        batch.update(
+            {
+                "state": "queued",
+                "confirmed_at": time.time(),
+                "diagnostic_code": "safe_full_confirmed",
+            }
+        )
+        task = asyncio.create_task(_execute_functional_batch(runtime, batch_id))
+        _FUNCTIONAL_TEST_BATCH_TASKS[batch_id] = task
+        return _functional_batch_view(batch)
+
+    @router.get("/test-batches/{batch_id}")
+    async def get_test_batch(
+        batch_id: str,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        _prune_terminal_tasks(_FUNCTIONAL_TEST_BATCHES, terminal_states={"succeeded", "failed", "cancelled"})
+        batch = _FUNCTIONAL_TEST_BATCHES.get(str(batch_id or ""))
+        if batch is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "test_batch_not_found", "message": "体检批次不存在、已过期或服务已重启。"},
+            )
+        return _functional_batch_view(batch)
+
+    @router.delete("/test-batches/{batch_id}")
+    async def cancel_test_batch(
+        batch_id: str,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        batch = _FUNCTIONAL_TEST_BATCHES.get(str(batch_id or ""))
+        if batch is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "test_batch_not_found", "message": "体检批次不存在或已过期。"},
+            )
+        if batch.get("state") in {"succeeded", "failed", "cancelled"}:
+            return _functional_batch_view(batch)
+        batch["cancellation_requested"] = True
+        task = _FUNCTIONAL_TEST_BATCH_TASKS.get(batch_id)
+        if task is not None and not task.done():
+            task.cancel()
+            batch.update({"state": "cancelling", "diagnostic_code": "safe_full_cancelling"})
+        else:
+            now = time.time()
+            for item in batch.get("items") or []:
+                if isinstance(item, dict) and item.get("state") == "pending":
+                    item.update({"state": "cancelled", "diagnostic_code": "safe_full_cancelled"})
+            batch.update(
+                {
+                    "state": "cancelled",
+                    "finished_at": now,
+                    "expires_at": now + _TASK_TTL_SECONDS,
+                    "diagnostic_code": "safe_full_cancelled",
+                }
+            )
+        return _functional_batch_view(batch)
+
     @router.post("/test-runs/prepare")
     async def prepare_test_run(
         body: dict[str, Any] = Body(default_factory=dict),
@@ -1919,33 +2521,14 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                 status_code=404,
                 detail={"code": "functional_test_not_found", "message": "未找到该体检项目。"},
             )
-        operation_id = uuid.uuid4().hex
-        risk = definition["risk"]
-        run = {
-            "id": operation_id,
-            "test_id": definition["id"],
-            "label": definition["label"],
-            "category": definition["category"],
-            "group": definition["group"],
-            "risk": risk,
-            "execution_kind": definition["execution_kind"],
-            "state": "prepared" if risk == "local_read" else "awaiting_confirmation",
-            "target_summary": str(body.get("target_summary") or "")[:240],
-            "route_fingerprint": str(body.get("route_fingerprint") or "")[:128],
-            "trace_id": "",
-            "created_at": time.time(),
-            "started_at": 0.0,
-            "finished_at": 0.0,
-            "duration_ms": None,
-            "steps": [],
-            "diagnostic": {},
-            "result_summary": {},
-            "delivery_status": (
-                "not_started"
-                if definition["execution_kind"] in {"qq_canary", "qzone_canary"}
-                else "not_applicable"
-            ),
-        }
+        _prune_terminal_tasks(_FUNCTIONAL_TEST_RUNS, terminal_states=_FUNCTIONAL_TERMINAL_STATES)
+        run = _new_functional_run(
+            definition,
+            target_summary=str(body.get("target_summary") or ""),
+            route_fingerprint=str(body.get("route_fingerprint") or ""),
+        )
+        operation_id = str(run["id"])
+        risk = str(definition["risk"])
         if risk == "local_read":
             _set_functional_run_diagnostic(
                 run,
@@ -1968,7 +2551,9 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             )
         _FUNCTIONAL_TEST_RUNS[operation_id] = run
         if risk == "local_read":
-            asyncio.create_task(_execute_functional_test(runtime, operation_id))
+            _FUNCTIONAL_TEST_TASKS[operation_id] = asyncio.create_task(
+                _execute_functional_test(runtime, operation_id)
+            )
         return _functional_test_view(run)
 
     @router.post("/test-runs/{operation_id}/confirm")
@@ -2047,7 +2632,9 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             message="管理员已确认 Provider 外部读取范围；任务即将开始，不会发送 QQ 消息。",
             steps=_functional_step_plan(run, status="pending", message="等待受控 Provider 探针任务开始。"),
         )
-        asyncio.create_task(_execute_functional_test(runtime, operation_id))
+        _FUNCTIONAL_TEST_TASKS[operation_id] = asyncio.create_task(
+            _execute_functional_test(runtime, operation_id)
+        )
         return _functional_test_view(run)
 
     @router.get("/test-runs/{operation_id}")
@@ -2063,19 +2650,53 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             )
         return _functional_test_view(run)
 
+    @router.delete("/test-runs/{operation_id}")
+    async def cancel_test_run(
+        operation_id: str,
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        run = _FUNCTIONAL_TEST_RUNS.get(str(operation_id or ""))
+        if run is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "functional_test_run_not_found", "message": "测试任务不存在或已失效。"},
+            )
+        if run.get("state") in _FUNCTIONAL_TERMINAL_STATES:
+            return _functional_test_view(run)
+        task = _FUNCTIONAL_TEST_TASKS.get(operation_id)
+        if task is not None and not task.done():
+            task.cancel()
+        now = time.time()
+        run.update(
+            {
+                "state": "cancelled",
+                "finished_at": now,
+                "diagnostic_code": "functional_test_cancelled",
+            }
+        )
+        _set_functional_run_diagnostic(
+            run,
+            ok=False,
+            code="functional_test_cancelled",
+            phase="cancelled",
+            title="功能体检已取消",
+            message="尚未完成的检查已停止；已进入 Provider 的请求不宣称已撤回，也不会自动重试。",
+            steps=_functional_step_plan(run, status="skipped", message="管理员已取消本次体检。"),
+        )
+        return _functional_test_view(run)
+
     @router.post("/tests/video-turn")
-    async def full_video_turn_test(
+    @router.post("/tests/media-turn/upload")
+    async def full_media_turn_upload(
         request: Request,
-        text: str = Query(default="请根据视频内容做简短说明。", max_length=1000),
+        media_kind: str = Query(default="video", pattern="^(audio|video)$"),
+        text: str = Query(default="请根据媒体内容做简短说明。", max_length=1000),
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
-        """Run an uploaded video through the production turn chain without sending QQ."""
+        """Run uploaded audio/video through the production turn chain without sending QQ."""
 
         from ...core.diagnostics import _video_probe_root
-        from ...core.media_refs import is_supported_video_filename
         from .health_routes import (
-            _HEALTH_VIDEO_MAX_UPLOAD_BYTES,
-            _HEALTH_VIDEO_MIME_SUFFIXES,
             _build_probe_event,
             _dispatch_via_plugin_path,
             _first_bot,
@@ -2091,18 +2712,24 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                 status_code=503,
                 detail={"code": "video_turn_runtime_unavailable", "message": "Bot 或回复运行时尚未就绪。"},
             )
-        filename = Path(str(request.headers.get("x-personification-video-filename") or "video.bin")).name
+        capability = "audio_input" if media_kind == "audio" else "video_input"
+        spec = _ROUTE_MEDIA_PROBE_SPECS[capability]
+        original_name = str(
+            request.headers.get("x-personification-media-filename")
+            or request.headers.get("x-personification-video-filename")
+            or ""
+        ).strip()
         content_type = str(request.headers.get("content-type") or "").split(";", 1)[0].lower()
-        suffix = Path(filename).suffix.lower() if is_supported_video_filename(filename) else _HEALTH_VIDEO_MIME_SUFFIXES.get(content_type, "")
-        if suffix not in _HEALTH_VIDEO_MIME_SUFFIXES.values():
+        suffix = _route_probe_media_suffix(capability, original_name, content_type)
+        if suffix is None:
             raise HTTPException(
                 status_code=400,
-                detail={"code": "video_turn_invalid_type", "message": "仅支持 MP4、MOV、M4V、WEBM、MKV 或 AVI。"},
+                detail={"code": "media_turn_invalid_type", "message": "媒体文件名扩展名与 MIME 类型不匹配支持范围。"},
             )
         operation_id = uuid.uuid4().hex
         root = _video_probe_root(cfg).resolve()
         probe_dir = root / f"turn-{operation_id}"
-        target = probe_dir / f"video{suffix}"
+        target = probe_dir / f"media{suffix}"
         total = 0
         trace_id = ""
         try:
@@ -2112,16 +2739,23 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                     if not chunk:
                         continue
                     total += len(chunk)
-                    if total > _HEALTH_VIDEO_MAX_UPLOAD_BYTES:
+                    if total > int(spec["max_upload_bytes"]):
                         raise HTTPException(
                             status_code=413,
-                            detail={"code": "video_turn_payload_too_large", "message": "视频超过完整回合测试大小上限。"},
+                            detail={"code": "media_turn_payload_too_large", "message": "媒体超过完整回合测试大小上限。"},
                         )
                     sink.write(chunk)
             if total <= 0:
                 raise HTTPException(
                     status_code=400,
-                    detail={"code": "video_turn_empty_upload", "message": "没有收到视频内容。"},
+                    detail={"code": "media_turn_empty_upload", "message": "没有收到媒体内容。"},
+                )
+            with target.open("rb") as source:
+                header = source.read(32)
+            if not _route_probe_media_magic_matches(capability, suffix, header):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "media_turn_format_invalid", "message": "媒体未通过格式签名校验。"},
                 )
             user_id = str(admin.qq or "")
             if not user_id.isdigit():
@@ -2134,9 +2768,9 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                 group_id="",
                 user_id=user_id,
                 detail={
-                    "source": "webui_video_turn_test",
+                    "source": "webui_media_turn_test",
                     "operator_qq": user_id,
-                    "media_kind": "video",
+                    "media_kind": media_kind,
                     "media_size_bytes": total,
                     "text_length": len(text),
                     "text_hash": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
@@ -2147,11 +2781,15 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             event = _build_probe_event(bot, group_id="", user_id=user_id, text=text)
             from nonebot.adapters.onebot.v11 import MessageSegment
 
-            segment = MessageSegment.video(file=target.as_uri())
+            segment = (
+                MessageSegment.record(file=target.as_uri())
+                if media_kind == "audio"
+                else MessageSegment.video(file=target.as_uri())
+            )
             event.message += segment
             event.original_message = event.message
-            event.raw_message = f"{text}[CQ:video,file=controlled-upload]"
-            _stage(stages, trace_id, "video_turn_upload", "受控视频上传", "ok", f"kind=video size_bytes={total}")
+            event.raw_message = f"{text}[CQ:{'record' if media_kind == 'audio' else 'video'},file=controlled-upload]"
+            _stage(stages, trace_id, "media_turn_upload", "受控媒体上传", "ok", f"kind={media_kind} size_bytes={total}")
             proxy = _NoSendCaptureBot(bot, trace_id=trace_id)
             started = time.monotonic()
             token = reply_turn_trace.set_current_trace_id(trace_id)
@@ -2175,38 +2813,36 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                 reply_turn_trace.finish_trace(
                     trace_id=trace_id,
                     outcome="failed",
-                    diagnosis_code="video_turn_plugin_path_unavailable",
+                    diagnosis_code="media_turn_plugin_path_unavailable",
                     detail={"outbound_mode": "capture_only"},
                 )
                 result = {
                     "replied": False,
                     "reply": "",
                     "trace_id": trace_id,
-                    "diagnosis_code": "video_turn_plugin_path_unavailable",
+                    "diagnosis_code": "media_turn_plugin_path_unavailable",
                     "duration_ms": int((time.monotonic() - started) * 1000),
                 }
             trace = reply_turn_trace.get_trace(trace_id) or {}
             process = reply_turn_trace.build_process_view(trace, logs=[])
             inspection = process.get("agent_inspection") if isinstance(process, dict) else {}
             tools = inspection.get("tools") if isinstance(inspection, dict) and isinstance(inspection.get("tools"), list) else []
-            video_evidence = [
-                {
-                    "tool": str(item.get("tool") or ""),
-                    "status": str(item.get("status") or ""),
-                    "detail": str(item.get("detail") or "")[:240],
-                }
-                for item in tools
-                if isinstance(item, dict) and str(item.get("tool") or "") == "vision_analyze"
-            ]
+            media_evidence = _verified_media_evidence(tools)
+            evidence_complete = bool(media_evidence)
             return {
-                "ok": bool(result.get("replied")) and bool(video_evidence),
-                "code": "video_turn_evidence_complete" if result.get("replied") and video_evidence else "video_turn_evidence_incomplete",
+                "ok": bool(result.get("replied")) and evidence_complete,
+                "code": (
+                    "media_turn_evidence_complete"
+                    if result.get("replied") and evidence_complete
+                    else "media_turn_evidence_incomplete"
+                ),
                 "operation_id": operation_id,
                 "trace_id": trace_id,
                 "reply": str(result.get("reply") or "")[:6000],
                 "duration_ms": result.get("duration_ms"),
                 "diagnosis_code": str(result.get("diagnosis_code") or ""),
-                "media_evidence": video_evidence,
+                "media_kind": media_kind,
+                "media_evidence": media_evidence,
                 "outbound": "captured_not_sent",
             }
         finally:
@@ -2216,6 +2852,51 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                     root.rmdir()
             except Exception:
                 pass
+
+    @router.post("/tests/media-turn/builtin")
+    async def full_media_turn_builtin(
+        body: dict[str, Any] = Body(default_factory=dict),
+        admin: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        media_kind = str(body.get("media_kind") or "video").strip().lower()
+        if media_kind not in {"audio", "video"}:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "media_turn_kind_invalid", "message": "完整媒体回合仅支持 audio 或 video。"},
+            )
+        capability = "audio_input" if media_kind == "audio" else "video_input"
+        sample = get_diagnostic_media_sample(capability, str(body.get("sample_id") or ""))
+        if sample is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "builtin_sample_not_found", "message": "找不到所选内置媒体样例。"},
+            )
+        integrity_ok, integrity_code = validate_diagnostic_media_sample(sample)
+        if not integrity_ok:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": integrity_code, "message": "内置媒体样例完整性校验失败。"},
+            )
+        text = str(body.get("text") or "请根据媒体内容做简短说明。")[:1000]
+
+        class _BuiltinMediaRequest:
+            headers = {
+                "x-personification-media-filename": f"sample{sample.suffix}",
+                "content-type": sample.mime_type,
+                "content-length": str(sample.size_bytes),
+            }
+
+            async def stream(self):  # noqa: ANN201
+                with sample.path.open("rb") as source:
+                    while chunk := source.read(64 * 1024):
+                        yield chunk
+
+        return await full_media_turn_upload(
+            _BuiltinMediaRequest(),  # type: ignore[arg-type]
+            media_kind=media_kind,
+            text=text,
+            admin=admin,
+        )
 
     @router.post("/tests/video-route")
     async def video_route_probe(
@@ -2838,6 +3519,7 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                 "capabilities": item.get("capabilities", {}),
                 "probe_catalog": _route_probe_catalog(),
                 "probe_statuses": _route_probe_statuses(str(item.get("route_fingerprint") or "")),
+                "probe_results": _route_probe_results(str(item.get("route_fingerprint") or "")),
                 "probe_status": _route_probe_status(str(item.get("route_fingerprint") or "")),
             }
             haystack = " ".join(str(value) for value in flat.values()).casefold()
@@ -2855,6 +3537,8 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
         *,
         media_path: Path | None = None,
         cleanup_dir: Path | None = None,
+        sample_mode: str = "builtin",
+        sample_id: str = "",
     ) -> None:
         task = _ROUTE_PROBE_TASKS.get(_route_probe_task_key(route_fingerprint, capability))
         if task is None:
@@ -2869,6 +3553,8 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                     route_fingerprint,
                     capability,
                     media_path=media_path,
+                    sample_mode=sample_mode,
+                    sample_id=sample_id,
                 )
             except Exception:
                 capability_state = "unknown"
@@ -2894,6 +3580,7 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                     "capability_state": capability_state,
                     "verification_state": verification_state,
                     "detail_code": detail_code,
+                    "sample_mode": sample_mode if capability in _ROUTE_MEDIA_PROBE_SPECS else "",
                 }
             )
             publish_runtime_event(
@@ -2935,14 +3622,39 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                     "message": "该探针可能消耗 Provider 额度或网络请求，必须由管理员明确确认。",
                 },
             )
-        if catalog.get("input_kind") == "media_upload":
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "route_probe_media_upload_required",
-                    "message": "音频和视频能力探针必须由管理员选择一个受限样例上传；未写入文件，也未调用 Provider。",
-                },
-            )
+        _ensure_route_probe_idle(route_fingerprint, capability)
+        sample_mode = str(body.get("sample_mode") or "builtin").strip().lower()
+        sample_id = str(body.get("sample_id") or "").strip()[:80]
+        if capability in _ROUTE_MEDIA_PROBE_SPECS:
+            if sample_mode not in {"builtin", "upload"}:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"code": "route_probe_sample_mode_invalid", "message": "媒体样例模式无效。"},
+                )
+            if sample_mode == "upload":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "route_probe_media_upload_endpoint_required",
+                        "message": "自定义媒体请使用受限上传入口；未写入文件，也未调用 Provider。",
+                    },
+                )
+            sample = get_diagnostic_media_sample(capability, sample_id)
+            if sample is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"code": "builtin_sample_not_found", "message": "找不到所选内置媒体样例。"},
+                )
+            integrity_ok, integrity_code = validate_diagnostic_media_sample(sample)
+            if not integrity_ok:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": integrity_code,
+                        "message": "内置媒体样例完整性校验失败；未调用 Provider。",
+                    },
+                )
+            sample_id = sample.sample_id
         if not catalog["available"]:
             route = _route_key_for_fingerprint(route_fingerprint)
             if route is not None:
@@ -2965,8 +3677,21 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             "status": "queued",
             "queued_at": time.time(),
             "capability": capability,
+            "sample_mode": sample_mode if capability in _ROUTE_MEDIA_PROBE_SPECS else "",
         }
-        asyncio.create_task(_finish_probe(route_fingerprint, capability))
+        _prune_terminal_tasks(
+            _ROUTE_PROBE_TASKS,
+            terminal_states={"finished", "failed"},
+            state_key="status",
+        )
+        asyncio.create_task(
+            _finish_probe(
+                route_fingerprint,
+                capability,
+                sample_mode=sample_mode,
+                sample_id=sample_id,
+            )
+        )
         return operation_diagnostic(
             ok=True,
             code="route_probe_queued",
@@ -3021,6 +3746,7 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                     "message": "该探针会把管理员选择的受限媒体样例发送给当前 Provider，必须明确确认。",
                 },
             )
+        _ensure_route_probe_idle(route_fingerprint, capability)
 
         target = _route_probe_target(runtime, route_fingerprint)
         if target is None:
@@ -3131,13 +3857,20 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                 "queued_at": time.time(),
                 "capability": capability,
                 "media_upload": True,
+                "sample_mode": "upload",
             }
+            _prune_terminal_tasks(
+                _ROUTE_PROBE_TASKS,
+                terminal_states={"finished", "failed"},
+                state_key="status",
+            )
             asyncio.create_task(
                 _finish_probe(
                     route_fingerprint,
                     capability,
                     media_path=target_path,
                     cleanup_dir=probe_dir,
+                    sample_mode="upload",
                 )
             )
             handed_to_probe = True
