@@ -5,10 +5,10 @@
       <p v-if="diagnostic.message" class="diagnostic-message">{{ diagnostic.message }}</p>
       <p v-if="diagnostic.suggestion" class="diagnostic-suggestion">{{ diagnostic.suggestion }}</p>
       <dl class="compact-kv">
-        <dt>诊断码</dt><dd><code>{{ diagnostic.code }}</code></dd>
-        <template v-if="diagnostic.operation_id"><dt>Operation ID</dt><dd><code>{{ diagnostic.operation_id }}</code></dd></template>
-        <template v-if="diagnostic.trace_id"><dt>Trace ID</dt><dd><code>{{ diagnostic.trace_id }}</code></dd></template>
-        <dt>可重试</dt><dd>{{ diagnostic.retryable ? "是" : "否" }}</dd>
+        <div><dt>诊断码</dt><dd><code>{{ diagnostic.code }}</code></dd></div>
+        <div v-if="diagnostic.operation_id"><dt>Operation ID</dt><dd><code>{{ diagnostic.operation_id }}</code></dd></div>
+        <div v-if="diagnostic.trace_id"><dt>Trace ID</dt><dd><code>{{ diagnostic.trace_id }}</code></dd></div>
+        <div><dt>可重试</dt><dd>{{ diagnostic.retryable ? "是" : "否" }}</dd></div>
       </dl>
       <div v-if="diagnostic.warnings?.length" class="diagnostic-warnings">
         <strong>警告</strong><ul><li v-for="(warning, index) in diagnostic.warnings" :key="index">{{ warning }}</li></ul>

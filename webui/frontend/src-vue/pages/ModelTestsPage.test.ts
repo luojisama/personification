@@ -10,8 +10,8 @@ vi.mock("@/api/resources", () => ({
   resources: {
     personaPromptPreview: vi.fn(),
     modelChat: vi.fn(),
-    videoRouteProbe: vi.fn(),
-    videoTurnTest: vi.fn(),
+    mediaTurnBuiltin: vi.fn(),
+    mediaTurnUpload: vi.fn(),
   },
 }));
 
@@ -106,10 +106,11 @@ describe("ModelTestsPage", () => {
     queryClient.clear();
   });
 
-  it("视频路由探针与完整回合要求文件和明确确认", async () => {
-    vi.mocked(resources.videoRouteProbe).mockResolvedValue({
+  it("音视频默认使用内置样例，并保留需确认的自定义上传", async () => {
+    vi.mocked(resources.mediaTurnBuiltin).mockResolvedValue({
       ok: true,
-      code: "video_probe_ok",
+      code: "media_turn_evidence_complete",
+      outbound: "captured_not_sent",
       duration_ms: 1200,
       categories: [
         {
@@ -122,21 +123,23 @@ describe("ModelTestsPage", () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const { wrapper, queryClient } = await renderPage();
 
-    const probeBtn = wrapper.findAll("button").find((b) => b.text().includes("确认并运行路由探针"));
-    expect(probeBtn!.attributes("disabled")).toBeDefined();
+    const runBtn = wrapper.findAll("button").find((b) => b.text().includes("确认并运行内置/上传媒体回合"));
+    expect(runBtn!.attributes("disabled")).toBeUndefined();
+    await runBtn!.trigger("click");
+    await vi.waitFor(() => expect(resources.mediaTurnBuiltin).toHaveBeenCalledWith("video", "", expect.any(String)));
 
+    const uploadMode = wrapper.find("input[type='radio'][value='upload']");
+    await uploadMode.setValue(true);
+    expect(runBtn!.attributes("disabled")).toBeDefined();
     const file = new File(["dummy"], "sample.mp4", { type: "video/mp4" });
     const fileInput = wrapper.find("input[type='file']");
     Object.defineProperty(fileInput.element, "files", { value: [file], writable: false });
     await fileInput.trigger("change");
 
-    expect(probeBtn!.attributes("disabled")).toBeUndefined();
-    await probeBtn!.trigger("click");
-
-    await vi.waitFor(() => {
-      expect(resources.videoRouteProbe).toHaveBeenCalledWith(file);
-      expect(wrapper.text()).toContain("视频解码测试");
-    });
+    vi.mocked(resources.mediaTurnUpload).mockResolvedValue({ ok: true, code: "media_turn_evidence_complete", outbound: "captured_not_sent" });
+    expect(runBtn!.attributes("disabled")).toBeUndefined();
+    await runBtn!.trigger("click");
+    await vi.waitFor(() => expect(resources.mediaTurnUpload).toHaveBeenCalledWith("video", file, expect.any(String)));
 
     confirmSpy.mockRestore();
     wrapper.unmount();

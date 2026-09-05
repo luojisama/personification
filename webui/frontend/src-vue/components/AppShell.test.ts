@@ -11,7 +11,7 @@ import AppShell from "./AppShell.vue";
 import { RUNTIME_EVENTS_KEY, type RuntimeEventsManager } from "@vue-app/realtime/runtimeEvents";
 import { useBotStore } from "@vue-app/stores/bot";
 
-vi.mock("@/api/resources", () => ({ resources: { bots: vi.fn() } }));
+vi.mock("@/api/resources", () => ({ resources: { bots: vi.fn(), adminIdentity: vi.fn() } }));
 
 const bots: BotIdentity[] = [
   { bot_id: "10001", nickname: "测试主号", avatar_url: null, online: true, is_default: true, last_seen_at: 1 },
@@ -33,6 +33,7 @@ describe("AppShell", () => {
   beforeEach(() => {
     window.localStorage.clear();
     vi.mocked(resources.bots).mockResolvedValue({ items: bots, total: 2, diagnostic_code: "ok" });
+    vi.mocked(resources.adminIdentity).mockResolvedValue({ qq: "10001", device_id: "device", label: "浏览器", identity_source: "SUPERUSER" });
   });
 
   async function renderShell() {
@@ -65,6 +66,7 @@ describe("AppShell", () => {
     expect(wrapper.get(".skip-link").text()).toBe("跳到主要内容");
     expect(wrapper.get(".legacy-entry").attributes("href")).toBe("/personification/");
     expect(wrapper.get("#test-content").text()).toBe("测试内容");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("当前身份 SUPERUSER（NoneBot 超级用户） · QQ 10001"));
     await wrapper.get(".rail-collapse").trigger("click");
     expect(wrapper.get(".app-frame").classes()).toContain("rail-collapsed");
     expect(window.localStorage.getItem("personification.nav.collapsed")).toBe("1");

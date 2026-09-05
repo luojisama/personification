@@ -6,6 +6,38 @@
       description="区分本地只读检查、Provider 外部读取探针与真实 rules→buffer→model→review→ledger→send QQ canary。源码与自动测试绝不发送真实 QQ。"
     />
 
+    <Panel eyebrow="SAFE FULL / ONE CONFIRMATION" title="一键安全全检">
+      <p>
+        服务端先计算项目和费用摘要；确认后只执行本地读取与 Provider 外部读取。QQ、QZone 及所有外部写入始终排除，不会因一键全检被触发。
+      </p>
+      <div class="dossier-actions">
+        <button class="button" type="button" :disabled="safeBatchMutation.isPending.value || batchBusy" @click="safeBatchMutation.mutate()">
+          {{ safeBatchMutation.isPending.value || batchBusy ? '安全全检运行中…' : '一键安全全检' }}
+        </button>
+        <button v-if="safeBatch && batchBusy" class="button button-danger" type="button" @click="cancelBatchMutation.mutate(safeBatch.id)">
+          取消批次
+        </button>
+      </div>
+      <div v-if="safeBatch" class="test-run-result" data-testid="safe-full-batch">
+        <div class="result-status-row">
+          <StateBadge :tone="batchTone">{{ batchStateLabel }}</StateBadge>
+          <code class="diagnostic-code-pill">{{ safeBatch.diagnostic_code }}</code>
+        </div>
+        <dl class="structured-summary-list">
+          <div class="summary-kv-pair"><dt>本地只读</dt><dd>{{ safeBatch.confirmation.local_read_items ?? 0 }}</dd></div>
+          <div class="summary-kv-pair"><dt>Provider 外部读取</dt><dd>{{ safeBatch.confirmation.external_read_items ?? 0 }}</dd></div>
+          <div class="summary-kv-pair"><dt>排除外部写入</dt><dd>{{ safeBatch.confirmation.external_write_excluded ?? 0 }}</dd></div>
+          <div class="summary-kv-pair"><dt>当前媒体路由</dt><dd>{{ safeBatch.confirmation.active_media_routes ?? 0 }}</dd></div>
+        </dl>
+        <p class="muted-copy">{{ safeBatch.confirmation.cost_notice }}</p>
+        <ul v-if="safeBatch.excluded.length" class="structured-summary-list">
+          <li v-for="item in safeBatch.excluded" :key="item.test_id">
+            <strong>{{ item.label }}</strong>：已跳过（{{ item.reason_code }}）
+          </li>
+        </ul>
+      </div>
+    </Panel>
+
     <!-- 结构化诊断告警面板 -->
     <section v-if="activeDiagnostic" class="panel diagnostic-alert-panel" role="region" aria-label="诊断详情">
       <header class="panel-heading">
@@ -165,12 +197,15 @@ const EXECUTION_LABELS = {
 } as const;
 
 const RUN_STATE_LABELS = {
+  pending: "等待中",
   prepared: "已准备",
   awaiting_confirmation: "等待确认",
   running: "运行中",
   succeeded: "已完成",
   failed: "未通过",
   unknown: "结果未知",
+  skipped: "已跳过",
+  cancelled: "已取消",
 } as const;
 
 const DELIVERY_LABELS: Record<string, string> = {
@@ -185,12 +220,33 @@ const catalogQuery = useQuery({
 });
 
 const runs = ref<Record<string, FunctionalTestRun>>({});
+const safeBatch = ref<import("@/api/types").FunctionalTestBatch | null>(null);
 const targets = ref<Record<string, string>>({});
 const currentError = ref<unknown>(null);
 
 const activeDiagnostic = computed<OperationDiagnostic | null>(() => {
   if (currentError.value == null) return null;
   return diagnosticFromError(currentError.value);
+});
+
+const batchBusy = computed(() => Boolean(safeBatch.value && ["awaiting_confirmation", "queued", "running", "cancelling"].includes(safeBatch.value.state)));
+const batchStateLabel = computed(() => {
+  const labels: Record<string, string> = {
+    awaiting_confirmation: "等待确认",
+    queued: "已排队",
+    running: "运行中",
+    succeeded: "已完成",
+    failed: "完成但有未通过/不确定项目",
+    cancelling: "取消等待中",
+    cancelled: "已取消",
+  };
+  return labels[safeBatch.value?.state || ""] || "未开始";
+});
+const batchTone = computed<"ok" | "warn" | "error" | "running" | "unknown">(() => {
+  if (safeBatch.value?.state === "succeeded") return "ok";
+  if (safeBatch.value?.state === "failed") return "warn";
+  if (safeBatch.value?.state === "cancelled") return "unknown";
+  return batchBusy.value ? "running" : "unknown";
 });
 
 const testGroups = computed(() => {
@@ -221,6 +277,33 @@ const runMutation = useMutation({
   onError: (err) => {
     currentError.value = err;
   },
+});
+
+const safeBatchMutation = useMutation({
+  mutationFn: async () => {
+    const prepared = await resources.prepareSafeTestBatch();
+    safeBatch.value = prepared;
+    const summary = prepared.confirmation;
+    const confirmed = window.confirm(
+      `将执行 ${summary.local_read_items ?? 0} 个本地只读项目和 ${summary.external_read_items ?? 0} 个 Provider 外部读取项目；` +
+      `永久排除 ${summary.external_write_excluded ?? 0} 个外部写入项目。\n\n${summary.cost_notice || "外部调用可能产生额度消耗。"}\n\n确认启动一次安全全检吗？`,
+    );
+    if (!confirmed) return resources.cancelTestBatch(prepared.id);
+    return resources.confirmSafeTestBatch(prepared.id);
+  },
+  onSuccess: (batch) => {
+    safeBatch.value = batch;
+    currentError.value = null;
+  },
+  onError: (error) => {
+    currentError.value = error;
+  },
+});
+
+const cancelBatchMutation = useMutation({
+  mutationFn: (id: string) => resources.cancelTestBatch(id),
+  onSuccess: (batch) => { safeBatch.value = batch; },
+  onError: (error) => { currentError.value = error; },
 });
 
 function handleRunRequest(test: FunctionalTestDefinition) {
@@ -287,34 +370,62 @@ function hasSummaryEntries(run: FunctionalTestRun): boolean {
 }
 
 function formatSummaryValue(value: unknown): string {
-  if (typeof value === "object" && value !== null) {
-    return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, 8)
+      .filter((item) => ["string", "number", "boolean"].includes(typeof item))
+      .map((item) => String(item))
+      .join("、");
   }
-  return String(value ?? "");
+  if (typeof value === "object" && value !== null) return "结构化摘要（已折叠）";
+  return ["string", "number", "boolean"].includes(typeof value) ? String(value) : "";
 }
 
 let pollTimer: number | null = null;
+let batchPollTimer: number | null = null;
 
 function startOrUpdatePolling() {
   if (pollTimer !== null) {
     window.clearInterval(pollTimer);
     pollTimer = null;
   }
-  const pending = Object.values(runs.value).filter((run) => ["prepared", "running"].includes(run.state));
-  if (!pending.length) return;
+  if (!Object.values(runs.value).some((run) => ["prepared", "running"].includes(run.state))) return;
 
-  pollTimer = window.setInterval(() => {
-    if (document.hidden) return;
-    for (const run of pending) {
+  pollTimer = window.setInterval(pollRunsOnce, 1_500);
+}
+
+function pollRunsOnce() {
+  if (document.hidden) return;
+  const pending = Object.values(runs.value).filter((run) => ["prepared", "running"].includes(run.state));
+  for (const run of pending) {
       void resources
         .testRun(run.id)
         .then((next) => {
           runs.value = { ...runs.value, [next.test_id]: next };
         })
         .catch(() => undefined);
-    }
-  }, 1_500);
+  }
 }
+
+function pollSafeBatch() {
+  const batch = safeBatch.value;
+  if (!batch || !["queued", "running", "cancelling"].includes(batch.state) || document.hidden) return;
+  void resources.testBatch(batch.id).then((next) => { safeBatch.value = next; }).catch(() => undefined);
+}
+
+watch(batchBusy, (busy) => {
+  if (batchPollTimer !== null) window.clearInterval(batchPollTimer);
+  batchPollTimer = busy ? window.setInterval(pollSafeBatch, 1_500) : null;
+});
+
+function onVisibilityChange() {
+  if (!document.hidden) {
+    pollRunsOnce();
+    pollSafeBatch();
+  }
+}
+
+document.addEventListener("visibilitychange", onVisibilityChange);
 
 watch(
   runs,
@@ -329,5 +440,7 @@ onUnmounted(() => {
     window.clearInterval(pollTimer);
     pollTimer = null;
   }
+  if (batchPollTimer !== null) window.clearInterval(batchPollTimer);
+  document.removeEventListener("visibilitychange", onVisibilityChange);
 });
 </script>

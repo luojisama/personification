@@ -429,8 +429,8 @@
         :title="currentSection === 'search' ? '语义搜索' : currentSection === 'rebuild' ? '索引状态与重建' : '知识目录'"
       >
         <QueryBoundary
-          :pending="knowledgeCatalogQuery.isPending.value || knowledgeSearchQuery.isPending.value"
-          :error="knowledgeCatalogQuery.error.value || knowledgeSearchQuery.error.value"
+          :pending="currentSection === 'search' ? knowledgeSearchQuery.isPending.value : knowledgeCatalogQuery.isPending.value"
+          :error="currentSection === 'search' ? knowledgeSearchQuery.error.value : knowledgeCatalogQuery.error.value"
           :empty="knowledgeRows.length === 0"
           empty-text="当前没有匹配的插件知识。"
         >
@@ -455,7 +455,7 @@
                   </td>
                   <td>{{ textAt(row, 'summary', 'description', 'analysis_scope') }}</td>
                   <td>{{ textAt(row, 'category') }}</td>
-                  <td>{{ textAt(row, 'coverage', 'source_coverage', 'command_count') }}</td>
+                  <td><SourceCoverage :coverage="row.source_coverage" /></td>
                 </tr>
               </tbody>
             </table>
@@ -484,6 +484,28 @@
         </div>
       </Panel>
 
+      <Panel v-if="currentSection === 'rebuild'" eyebrow="PLUGIN KNOWLEDGE / BUILD STATUS" title="构建状态与单次重建">
+        <QueryBoundary :pending="knowledgeStatusQuery.isPending.value" :error="knowledgeStatusQuery.error.value">
+          <template v-if="knowledgeStatus">
+            <div class="metric-ribbon">
+              <article><span>自动构建</span><strong>{{ knowledgeStatus.automatic_build_enabled === true ? '开启' : '关闭' }}</strong></article>
+              <article><span>已索引 / 已加载</span><strong>{{ countAt(knowledgeStatus, 'indexed') }} / {{ countAt(knowledgeStatus, 'loaded') }}</strong></article>
+              <article><span>缺失</span><strong>{{ countAt(knowledgeStatus, 'missing') }}</strong></article>
+              <article><span>陈旧 pending</span><strong>{{ countAt(knowledgeStatus, 'pending') }}</strong></article>
+              <article><span>失败 / 降级</span><strong>{{ countAt(knowledgeStatus, 'failed') }} / {{ countAt(knowledgeStatus, 'degraded') }}</strong></article>
+            </div>
+            <p v-if="knowledgeStatus.automatic_build_enabled !== true" class="security-manifest">
+              自动构建当前关闭；目录为空或 pending 时不是普通空结果。可在明确确认后执行一次重建，持久配置不会被打开。
+            </p>
+            <p><code>{{ textAt(knowledgeStatus, 'diagnostic_code') }}</code></p>
+            <div class="inline-controls">
+              <button class="button" type="button" :disabled="knowledgeBuildMutation.isPending.value || knowledgeBuildBusy" @click="confirmKnowledgeBuild">确认并单次重建</button>
+              <button v-if="knowledgeBuildId && knowledgeBuildBusy" class="button button-danger" type="button" @click="knowledgeCancelMutation.mutate(knowledgeBuildId)">取消重建</button>
+            </div>
+          </template>
+        </QueryBoundary>
+      </Panel>
+
       <Panel
         v-if="selectedKnowledgeName"
         eyebrow="PLUGIN KNOWLEDGE / DETAIL"
@@ -502,15 +524,25 @@
               <dt>摘要</dt>
               <dd>{{ textAt(asRecord(asRecord(knowledgeDetailQuery.data.value).entry), 'summary', 'description') }}</dd>
             </div>
-            <div>
-              <dt>来源覆盖</dt>
-              <dd>{{ textAt(asRecord(knowledgeDetailQuery.data.value), 'source_coverage') }}</dd>
-            </div>
+            <div><dt>来源覆盖</dt><dd><SourceCoverage :coverage="asRecord(knowledgeDetailQuery.data.value).source_coverage" /></dd></div>
             <div>
               <dt>诊断码</dt>
               <dd><code>{{ textAt(asRecord(asRecord(knowledgeDetailQuery.data.value).diagnostic), 'code') }}</code></dd>
             </div>
           </dl>
+          <div v-if="knowledgeSectionNames.length" class="tabs" aria-label="知识详情分区">
+            <button v-for="section in knowledgeSectionNames" :key="section" type="button" :class="['tab-item', { active: selectedKnowledgeSection === section }]" @click="selectedKnowledgeSection = section">
+              {{ section }}（{{ knowledgeSectionCount(section) }}）
+            </button>
+          </div>
+          <QueryBoundary :pending="knowledgeSectionQuery.isPending.value" :error="knowledgeSectionQuery.error.value">
+            <ul v-if="knowledgeSectionRows.length" class="business-list">
+              <li v-for="(row, idx) in knowledgeSectionRows" :key="`${selectedKnowledgeSection}:${idx}`">
+                <strong>{{ textAt(row, 'title', 'name', 'key') }}</strong>
+                <span>{{ textAt(row, 'summary', 'description', 'detail', 'type') }}</span>
+              </li>
+            </ul>
+          </QueryBoundary>
         </QueryBoundary>
       </Panel>
     </template>
@@ -708,6 +740,7 @@ import { resources } from "@/api/resources";
 import type { CatalogItem, OperationDiagnostic, Page, PluginUpdateOperation, PluginUpdateStatus } from "@/api/types";
 import { formatDateTime } from "@/lib/format";
 import DiagnosticPanel from "@vue-app/components/DiagnosticPanel.vue";
+import SourceCoverage from "@vue-app/components/SourceCoverage.vue";
 import PageHeader from "@vue-app/components/PageHeader.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
@@ -764,8 +797,14 @@ function textAt(row: unknown, ...keys: string[]): string {
   if (Object.keys(record).length === 0) return "—";
   for (const key of keys) {
     const val = record[key];
-    if (val !== undefined && val !== null && String(val).trim() !== "") {
-      return String(val);
+    if (typeof val === "string" && val.trim() !== "") return val;
+    if (typeof val === "number" || typeof val === "boolean") return String(val);
+    if (Array.isArray(val)) {
+      const visible = val
+        .filter((item) => typeof item === "string" || typeof item === "number" || typeof item === "boolean")
+        .slice(0, 8)
+        .map((item) => String(item));
+      if (visible.length) return visible.join("、");
     }
   }
   return "—";
@@ -1023,6 +1062,7 @@ const toolResultDiagnostic = computed(() =>
 const knowledgePage = ref(1);
 const knowledgeSearch = ref("");
 const selectedKnowledgeName = ref("");
+const selectedKnowledgeSection = ref("features");
 
 const knowledgeCatalogQuery = useQuery<Page<CatalogItem>>({
   queryKey: computed(() => ["plugin-knowledge", knowledgePage.value, knowledgeSearch.value]),
@@ -1042,9 +1082,53 @@ const knowledgeDetailQuery = useQuery({
   enabled: computed(() => currentMode.value === "plugin-knowledge" && Boolean(selectedKnowledgeName.value)),
 });
 
+const knowledgeStatusQuery = useQuery({
+  queryKey: ["plugin-knowledge-status"],
+  queryFn: ({ signal }) => resources.pluginKnowledgeStatus(signal),
+  enabled: computed(() => currentMode.value === "plugin-knowledge"),
+  refetchInterval: computed(() => currentMode.value === "plugin-knowledge" && currentSection.value === "rebuild" ? 1_500 : false),
+});
+
+const knowledgeStatus = computed(() => asRecord(knowledgeStatusQuery.data.value));
+const knowledgeOperation = computed(() => asRecord(knowledgeStatus.value.operation));
+const knowledgeBuildId = computed(() => textAt(knowledgeOperation.value, "id") === "—" ? "" : textAt(knowledgeOperation.value, "id"));
+const knowledgeBuildBusy = computed(() => ["queued", "running", "cancelling"].includes(textAt(knowledgeOperation.value, "state")));
+
+const knowledgeBuildMutation = useMutation({
+  mutationFn: () => resources.startPluginKnowledgeBuild(),
+  onSuccess: () => void client.invalidateQueries({ queryKey: ["plugin-knowledge-status"] }),
+});
+const knowledgeCancelMutation = useMutation({
+  mutationFn: (id: string) => resources.cancelPluginKnowledgeBuild(id),
+  onSuccess: () => void client.invalidateQueries({ queryKey: ["plugin-knowledge-status"] }),
+});
+
+function confirmKnowledgeBuild(): void {
+  if (window.confirm("本次重建会读取普通插件源码并调用当前配置模型，可能产生费用；不会发送 Secret、环境文件、认证文件或非源码二进制，也不会修改自动构建开关。确认启动吗？")) {
+    knowledgeBuildMutation.mutate();
+  }
+}
+
+function countAt(status: BusinessRecord, key: string): number {
+  const value = Number(asRecord(status.counts)[key]);
+  return Number.isFinite(value) ? value : 0;
+}
+
+const knowledgeSectionNames = computed(() => Object.keys(asRecord(asRecord(knowledgeDetailQuery.data.value).sections)).slice(0, 8));
+function knowledgeSectionCount(section: string): number {
+  const value = Number(asRecord(asRecord(knowledgeDetailQuery.data.value).sections)[section]);
+  return Number.isFinite(value) ? value : 0;
+}
+const knowledgeSectionQuery = useQuery({
+  queryKey: computed(() => ["plugin-knowledge-section", selectedKnowledgeName.value, selectedKnowledgeSection.value]),
+  queryFn: ({ signal }) => resources.pluginKnowledgeSection(selectedKnowledgeName.value, selectedKnowledgeSection.value, 1, 20, signal),
+  enabled: computed(() => currentMode.value === "plugin-knowledge" && Boolean(selectedKnowledgeName.value && selectedKnowledgeSection.value)),
+});
+const knowledgeSectionRows = computed(() => recordsAt(knowledgeSectionQuery.data.value, "items"));
+
 const knowledgeRows = computed<BusinessRecord[]>(() => {
   if (currentSection.value === "search") {
-    return recordsAt(knowledgeSearchQuery.data.value, "results", "items");
+    return recordsAt(knowledgeSearchQuery.data.value, "items");
   }
   return knowledgeCatalogQuery.data.value?.items ?? [];
 });

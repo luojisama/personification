@@ -61,30 +61,20 @@
         <div v-if="statusQuery.data.value" class="summary-grid">
           <Panel eyebrow="AUTH / RUNTIME" title="登录与运行态">
             <dl class="compact-kv">
-              <dt>总开关</dt>
-              <dd>{{ statusQuery.data.value.enabled ? '启用' : '停用' }}</dd>
-              <dt>Cookie</dt>
-              <dd>{{ statusQuery.data.value.cookie_configured ? '已配置（不回传原值）' : '未配置' }}</dd>
-              <dt>凭据来源</dt>
-              <dd><code>{{ formatValue(statusQuery.data.value.credential_source, '未配置') }}</code></dd>
-              <dt>身份匹配</dt>
-              <dd>{{ identityVerificationText }}</dd>
-              <dt>认证状态</dt>
-              <dd>{{ formatValue(authRecord.state ?? authRecord.status, 'unknown') }}</dd>
-              <dt>只读模式</dt>
-              <dd>{{ statusQuery.data.value.read_only ? '是' : '否' }}</dd>
+              <div><dt>总开关</dt><dd>{{ statusQuery.data.value.enabled ? '启用' : '停用' }}</dd></div>
+              <div><dt>Cookie</dt><dd>{{ statusQuery.data.value.cookie_configured ? '已配置（不回传原值）' : '未配置' }}</dd></div>
+              <div><dt>凭据来源</dt><dd><code>{{ formatValue(statusQuery.data.value.credential_source, '未配置') }}</code></dd></div>
+              <div><dt>身份匹配</dt><dd>{{ identityVerificationText }}</dd></div>
+              <div><dt>认证状态</dt><dd>{{ formatValue(authRecord.state ?? authRecord.status, 'unknown') }}</dd></div>
+              <div><dt>只读模式</dt><dd>{{ statusQuery.data.value.read_only ? '是' : '否' }}</dd></div>
             </dl>
           </Panel>
           <Panel eyebrow="QUOTA / RECONCILIATION" title="额度与结果核对">
             <dl class="compact-kv">
-              <dt>本月</dt>
-              <dd>{{ formatValue(quotaRecord.used ?? quotaRecord.count) }} / {{ formatValue(quotaRecord.limit) }}</dd>
-              <dt>下一可用</dt>
-              <dd>{{ formatDateTime(statusQuery.data.value.next_eligible_at as number) }}</dd>
-              <dt>对账状态</dt>
-              <dd>{{ formatValue(reconciliationRecord.state, 'clear') }}</dd>
-              <dt>阻塞写操作</dt>
-              <dd>{{ reconciliationRecord.blocking ? '有，禁止重发' : '无' }}</dd>
+              <div><dt>本月</dt><dd>{{ formatValue(quotaRecord.used ?? quotaRecord.count) }} / {{ formatValue(quotaRecord.limit) }}</dd></div>
+              <div><dt>下一可用</dt><dd>{{ formatDateTime(statusQuery.data.value.next_eligible_at as number) }}</dd></div>
+              <div><dt>对账状态</dt><dd>{{ formatValue(reconciliationRecord.state, 'clear') }}</dd></div>
+              <div><dt>阻塞写操作</dt><dd>{{ reconciliationRecord.blocking ? '有，禁止重发' : '无' }}</dd></div>
             </dl>
           </Panel>
         </div>
@@ -158,12 +148,9 @@
             referrerpolicy="no-referrer"
           />
           <dl class="compact-kv">
-            <dt>Session ID</dt>
-            <dd><code>{{ sessionId }}</code></dd>
-            <dt>状态</dt>
-            <dd>{{ formatValue(loginStatusQuery.data.value?.status, '等待扫码') }}</dd>
-            <dt>过期</dt>
-            <dd>{{ formatDateTime(loginStatusQuery.data.value?.expires_at as number) }}</dd>
+            <div><dt>Session ID</dt><dd><code>{{ sessionId }}</code></dd></div>
+            <div><dt>状态</dt><dd>{{ formatValue(loginStatusQuery.data.value?.status, '等待扫码') }}</dd></div>
+            <div><dt>过期</dt><dd>{{ formatDateTime(loginStatusQuery.data.value?.expires_at as number) }}</dd></div>
           </dl>
         </div>
       </Panel>
@@ -211,26 +198,18 @@
         <div v-if="statusQuery.data.value" class="summary-grid">
           <Panel eyebrow="AUTH / RUNTIME" title="登录与运行态">
             <dl class="compact-kv">
-              <dt>总开关</dt>
-              <dd>{{ statusQuery.data.value.enabled ? '启用' : '停用' }}</dd>
-              <dt>Cookie</dt>
-              <dd>{{ statusQuery.data.value.cookie_configured ? '已配置（不回传原值）' : '未配置' }}</dd>
-              <dt>认证状态</dt>
-              <dd>{{ formatValue(authRecord.state ?? authRecord.status, 'unknown') }}</dd>
-              <dt>只读模式</dt>
-              <dd>{{ statusQuery.data.value.read_only ? '是' : '否' }}</dd>
+              <div><dt>总开关</dt><dd>{{ statusQuery.data.value.enabled ? '启用' : '停用' }}</dd></div>
+              <div><dt>Cookie</dt><dd>{{ statusQuery.data.value.cookie_configured ? '已配置（不回传原值）' : '未配置' }}</dd></div>
+              <div><dt>认证状态</dt><dd>{{ formatValue(authRecord.state ?? authRecord.status, 'unknown') }}</dd></div>
+              <div><dt>只读模式</dt><dd>{{ statusQuery.data.value.read_only ? '是' : '否' }}</dd></div>
             </dl>
           </Panel>
           <Panel eyebrow="QUOTA / RECONCILIATION" title="额度与结果核对">
             <dl class="compact-kv">
-              <dt>本月</dt>
-              <dd>{{ formatValue(quotaRecord.used ?? quotaRecord.count) }} / {{ formatValue(quotaRecord.limit) }}</dd>
-              <dt>下一可用</dt>
-              <dd>{{ formatDateTime(statusQuery.data.value.next_eligible_at as number) }}</dd>
-              <dt>对账状态</dt>
-              <dd>{{ formatValue(reconciliationRecord.state, 'clear') }}</dd>
-              <dt>阻塞写操作</dt>
-              <dd>{{ reconciliationRecord.blocking ? '有，禁止重发' : '无' }}</dd>
+              <div><dt>本月</dt><dd>{{ formatValue(quotaRecord.used ?? quotaRecord.count) }} / {{ formatValue(quotaRecord.limit) }}</dd></div>
+              <div><dt>下一可用</dt><dd>{{ formatDateTime(statusQuery.data.value.next_eligible_at as number) }}</dd></div>
+              <div><dt>对账状态</dt><dd>{{ formatValue(reconciliationRecord.state, 'clear') }}</dd></div>
+              <div><dt>阻塞写操作</dt><dd>{{ reconciliationRecord.blocking ? '有，禁止重发' : '无' }}</dd></div>
             </dl>
           </Panel>
         </div>
@@ -363,12 +342,9 @@
           }}
         </p>
         <dl class="compact-kv">
-          <dt>目标 Bot</dt>
-          <dd><code>{{ selectedBotId || '未选择' }}</code></dd>
-          <dt>Operation ID</dt>
-          <dd><code>{{ operationId }}</code></dd>
-          <dt>动作</dt>
-          <dd>生成并发布一条 QZone 说说</dd>
+          <div><dt>目标 Bot</dt><dd><code>{{ selectedBotId || '未选择' }}</code></dd></div>
+          <div><dt>Operation ID</dt><dd><code>{{ operationId }}</code></dd></div>
+          <div><dt>动作</dt><dd>生成并发布一条 QZone 说说</dd></div>
         </dl>
         <TextField
           v-model="confirmationInput"
@@ -450,12 +426,9 @@
       <Panel eyebrow="VERIFY / SINGLE OPERATION" title="单个结果核对">
         <TextField v-model="historyOperationId" label="Operation ID" placeholder="Operation ID" />
         <dl v-if="singleOperationRecord" class="compact-kv">
-          <dt>状态</dt>
-          <dd>{{ formatValue(singleOperationRecord.status) }}</dd>
-          <dt>结果码</dt>
-          <dd><code>{{ formatValue(singleOperationRecord.result_code) }}</code></dd>
-          <dt>远端 ID</dt>
-          <dd>{{ formatValue(singleOperationRecord.remote_id) }}</dd>
+          <div><dt>状态</dt><dd>{{ formatValue(singleOperationRecord.status) }}</dd></div>
+          <div><dt>结果码</dt><dd><code>{{ formatValue(singleOperationRecord.result_code) }}</code></dd></div>
+          <div><dt>远端 ID</dt><dd>{{ formatValue(singleOperationRecord.remote_id) }}</dd></div>
         </dl>
         <div class="inline-controls">
           <button

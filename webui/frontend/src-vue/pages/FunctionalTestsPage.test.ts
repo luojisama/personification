@@ -11,6 +11,10 @@ vi.mock("@/api/resources", () => ({
     prepareTestRun: vi.fn(),
     confirmTestRun: vi.fn(),
     testRun: vi.fn(),
+    prepareSafeTestBatch: vi.fn(),
+    confirmSafeTestBatch: vi.fn(),
+    testBatch: vi.fn(),
+    cancelTestBatch: vi.fn(),
   },
 }));
 
@@ -81,6 +85,41 @@ describe("FunctionalTestsPage.vue", () => {
 
     expect(window.confirm).toHaveBeenCalled();
     expect(resources.prepareTestRun).not.toHaveBeenCalled();
+  });
+
+  it("安全全检只确认一次并展示被排除的外部写项目", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const batch = {
+      id: "batch-1",
+      profile: "safe_full" as const,
+      state: "awaiting_confirmation" as const,
+      created_at: null,
+      confirmed_at: null,
+      started_at: null,
+      finished_at: null,
+      expires_at: null,
+      cancellation_requested: false,
+      confirmation: {
+        local_read_items: 3,
+        external_read_items: 2,
+        external_write_excluded: 2,
+        active_media_routes: 1,
+        cost_notice: "可能产生额度消耗",
+      },
+      excluded: [{ test_id: "test_ext_write", label: "群主动消息发送", reason_code: "safe_full_external_write_excluded" }],
+      counts: { pending: 5, skipped: 2 },
+      items: [],
+      diagnostic_code: "safe_full_confirmation_required",
+    };
+    vi.mocked(resources.prepareSafeTestBatch).mockResolvedValue(batch);
+    vi.mocked(resources.confirmSafeTestBatch).mockResolvedValue({ ...batch, state: "running", diagnostic_code: "safe_full_running" });
+    const wrapper = createWrapper();
+    await vi.waitFor(() => expect(wrapper.text()).toContain("一键安全全检"));
+    await wrapper.findAll("button").find((button) => button.text() === "一键安全全检")!.trigger("click");
+    await vi.waitFor(() => expect(resources.confirmSafeTestBatch).toHaveBeenCalledWith("batch-1"));
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain("群主动消息发送");
+    expect(wrapper.text()).toContain("已跳过");
   });
 
   it("external operations execute full confirmation flow when accepted", async () => {

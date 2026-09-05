@@ -257,8 +257,8 @@
 
         <Panel v-if="selectedPalaceZone" eyebrow="MEMORY / PALACE-DETAIL" :title="`${textAt(selectedPalaceZone, 'name', 'title') || '未命名殿室'}详情`">
           <dl class="compact-kv">
-            <dt>条目数</dt><dd>{{ textAt(selectedPalaceZone, 'item_count', 'count', 'anchor_count') || '—' }}</dd>
-            <dt>更新时间</dt><dd>{{ formatDateTime(zoneUpdatedAt(selectedPalaceZone)) }}</dd>
+            <div><dt>条目数</dt><dd>{{ textAt(selectedPalaceZone, 'item_count', 'count', 'anchor_count') || '—' }}</dd></div>
+            <div><dt>更新时间</dt><dd>{{ formatDateTime(zoneUpdatedAt(selectedPalaceZone)) }}</dd></div>
           </dl>
 
           <div v-if="selectedZoneEntriesProvided && selectedZoneEntries.length" class="table-responsive">

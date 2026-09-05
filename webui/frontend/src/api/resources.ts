@@ -160,6 +160,9 @@ export function sanitizeTracePage(raw: unknown): Page<TraceListItem> {
 }
 
 export const resources = {
+  adminIdentity(signal?: AbortSignal): Promise<{ qq: string; device_id: string; label: string; identity_source: "SUPERUSER" | "plugin_admin" }> {
+    return api.get("/admin-identity", undefined, signal);
+  },
   bots(signal?: AbortSignal): Promise<{ items: BotIdentity[]; total: number; diagnostic_code: string }> {
     return api.get("/bots", undefined, signal);
   },
@@ -184,16 +187,36 @@ export const resources = {
   testRun(id: string, signal?: AbortSignal): Promise<FunctionalTestRun> {
     return api.get(`/test-runs/${encodeURIComponent(id)}`, undefined, signal);
   },
+  prepareSafeTestBatch(): Promise<import("./types").FunctionalTestBatch> {
+    return api.post("/test-batches/prepare", { profile: "safe_full" });
+  },
+  confirmSafeTestBatch(id: string): Promise<import("./types").FunctionalTestBatch> {
+    return api.post(`/test-batches/${encodeURIComponent(id)}/confirm`, { confirmed: true });
+  },
+  testBatch(id: string, signal?: AbortSignal): Promise<import("./types").FunctionalTestBatch> {
+    return api.get(`/test-batches/${encodeURIComponent(id)}`, undefined, signal);
+  },
+  cancelTestBatch(id: string): Promise<import("./types").FunctionalTestBatch> {
+    return api.delete(`/test-batches/${encodeURIComponent(id)}`);
+  },
   overview(signal?: AbortSignal): Promise<OverviewSnapshot> {
     return api.get("/overview", undefined, signal);
   },
   routes(page = 1, pageSize = 20, search = "", signal?: AbortSignal): Promise<Page<RouteCapabilityItem>> {
     return api.get("/routes/capabilities", { page, page_size: pageSize, search }, signal);
   },
-  queueRouteProbe(routeFingerprint: string, capability: CapabilityName, confirmed = true): Promise<OperationDiagnostic> {
+  queueRouteProbe(
+    routeFingerprint: string,
+    capability: CapabilityName,
+    confirmed = true,
+    sampleMode: "builtin" | "upload" = "builtin",
+    sampleId = "",
+  ): Promise<OperationDiagnostic> {
     return api.post(`/routes/capabilities/${encodeURIComponent(routeFingerprint)}/probes`, {
       capability,
       confirmed,
+      sample_mode: sampleMode,
+      ...(sampleId ? { sample_id: sampleId } : {}),
     });
   },
   uploadRouteMediaProbe(
@@ -312,6 +335,27 @@ export const resources = {
     const query = text ? `?text=${encodeURIComponent(text)}` : "";
     return api.upload(`/tests/video-turn${query}`, file, signal);
   },
+  mediaTurnBuiltin(mediaKind: "audio" | "video", sampleId = "", text = ""): Promise<Record<string, unknown>> {
+    return api.post("/tests/media-turn/builtin", {
+      media_kind: mediaKind,
+      ...(sampleId ? { sample_id: sampleId } : {}),
+      ...(text ? { text } : {}),
+    });
+  },
+  mediaTurnUpload(mediaKind: "audio" | "video", file: File, text = "", signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const query = new URLSearchParams({ media_kind: mediaKind });
+    if (text) query.set("text", text);
+    return rawApiRequest<Record<string, unknown>>(
+      API_BASE,
+      `/tests/media-turn/upload?${query.toString()}`,
+      file,
+      {
+        "Content-Type": file.type || "application/octet-stream",
+        "X-Personification-Media-Filename": file.name,
+      },
+      signal,
+    );
+  },
   personaPromptPreview(signal?: AbortSignal): Promise<Record<string, unknown>> {
     return api.get("/model-tests/persona-prompt", undefined, signal);
   },
@@ -334,7 +378,10 @@ export const resources = {
     return api.delete(`/persona-details/${encodeURIComponent(userId)}/avatar-analysis`);
   },
   groupBusiness(groupId: string, section: "personas" | "aliases" | "schedule" | "style" | "agent-state" | "knowledge" | "memes", signal?: AbortSignal): Promise<Record<string, unknown>> {
-    return api.get(`/group-management/${encodeURIComponent(groupId)}/${section}`, undefined, signal);
+    return api.get(`/group-management/${encodeURIComponent(groupId)}/${section}`, section === "personas" ? { page: 1, page_size: 20 } : undefined, signal);
+  },
+  groupPersonas(groupId: string, page = 1, search = "", signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get(`/group-management/${encodeURIComponent(groupId)}/personas`, { page, page_size: 20, search }, signal);
   },
   groupPeerBots(groupId: string, signal?: AbortSignal): Promise<GroupPeerBotBusinessState> {
     return api.get(`/group-management/${encodeURIComponent(groupId)}/peer-bots`, undefined, signal);
@@ -357,8 +404,8 @@ export const resources = {
   resetGroupPeerBotLoop(groupId: string): Promise<OperationDiagnostic> {
     return api.post(`/group-management/${encodeURIComponent(groupId)}/peer-bots/reset-loop`, {});
   },
-  groupMembers(groupId: string, botId: string, signal?: AbortSignal): Promise<{ members: GroupMemberOption[]; total: number }> {
-    return api.get(`/qq-management/groups/${encodeURIComponent(groupId)}/members`, { bot_id: botId, limit: 500 }, signal);
+  groupMembers(groupId: string, botId: string, signal?: AbortSignal, offset = 0, search = ""): Promise<{ members: GroupMemberOption[]; total: number; has_more?: boolean }> {
+    return api.get(`/qq-management/groups/${encodeURIComponent(groupId)}/members`, { bot_id: botId, limit: 50, offset, search }, signal);
   },
   groupQzoneAgent(groupId: string, signal?: AbortSignal): Promise<GroupQzoneAgentState> {
     return api.get(`/group-management/${encodeURIComponent(groupId)}/qzone-agent`, undefined, signal);
@@ -437,6 +484,21 @@ export const resources = {
   },
   pluginKnowledgeSearch(query: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
     return api.get("/plugin-knowledge-management/search", { q: query }, signal);
+  },
+  pluginKnowledgeStatus(signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get("/plugin-knowledge-management/status", undefined, signal);
+  },
+  pluginKnowledgeSection(name: string, section: string, page = 1, pageSize = 20, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get(`/plugin-knowledge-management/detail/${encodeURIComponent(name)}/sections/${encodeURIComponent(section)}`, { page, page_size: pageSize }, signal);
+  },
+  startPluginKnowledgeBuild(): Promise<Record<string, unknown>> {
+    return api.post("/plugin-knowledge-management/builds", { mode: "one_shot", confirmed: true });
+  },
+  pluginKnowledgeBuild(id: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get(`/plugin-knowledge-management/builds/${encodeURIComponent(id)}`, undefined, signal);
+  },
+  cancelPluginKnowledgeBuild(id: string): Promise<Record<string, unknown>> {
+    return api.delete(`/plugin-knowledge-management/builds/${encodeURIComponent(id)}`);
   },
   personaBuilderGet(path: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
     return api.get(`/persona-builder/${path.replace(/^\/+/, "")}`, undefined, signal);

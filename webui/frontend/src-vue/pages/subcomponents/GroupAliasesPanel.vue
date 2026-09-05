@@ -1,5 +1,5 @@
 <template>
-  <Panel eyebrow="GROUP / ALIASES" :title="`成员别名（${aliases.length}）`">
+  <Panel eyebrow="GROUP / ALIASES" :title="`当前页成员别名（${aliases.length}）`">
     <div class="trace-table-wrap">
       <table class="forensic-table">
         <thead>

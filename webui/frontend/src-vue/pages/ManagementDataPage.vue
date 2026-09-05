@@ -213,15 +213,18 @@
         description="详情按 QQ ID 懒加载，并把 QQ 公开资料、用户明确更正、系统观察和模型结构化字段分区展示。"
       >
         <template #actions>
-          <div class="inline-controls">
+          <div class="persona-query-bar">
             <TextField
-              :model-value="detailUserId"
+              :model-value="userIdDraft"
               label="QQ ID"
               hide-label
               placeholder="QQ ID"
               inputmode="numeric"
-              @update:model-value="updateParam('user_id', $event)"
+              :error="userIdDraftError"
+              @update:model-value="userIdDraft = $event"
+              @keydown.enter="submitUserLookup"
             />
+            <button class="button button-secondary" type="button" :disabled="!userIdDraft.trim() || Boolean(userIdDraftError)" @click="submitUserLookup">查看</button>
             <CurrentGroupSelect
               label="画像群范围"
               description="可选；未选择时查看全局画像。"
@@ -232,20 +235,24 @@
         </template>
       </PageHeader>
 
-      <Panel v-if="!detailUserId" eyebrow="PROMPT" title="需要用户 ID">
+      <Panel v-if="!normalizedDetailUserId" eyebrow="PROMPT" title="需要有效的用户 ID">
         <p class="muted-copy">从画像列表选择用户，或输入 QQ ID。</p>
       </Panel>
       <QueryBoundary v-else :pending="personaDetailQuery.isPending.value" :error="personaDetailQuery.error.value">
         <div v-if="personaDetailQuery.data.value" class="page-stack">
           <div class="summary-grid">
-            <Panel eyebrow="QQ / PUBLIC PROFILE" :title="text(personaQqProfile.nickname, detailUserId)">
-              <dl class="compact-kv">
-                <dt>QQ ID</dt><dd><code>{{ detailUserId }}</code></dd>
-                <dt>签名</dt><dd>{{ text(personaQqProfile.signature) }}</dd>
-                <dt>所在地</dt><dd>{{ [personaQqProfile.country, personaQqProfile.province, personaQqProfile.city].filter(Boolean).join(" / ") || "—" }}</dd>
-                <dt>等级</dt><dd>{{ text(personaQqProfile.level) }}</dd>
-                <dt>更新时间</dt><dd>{{ formatDateTime(personaCoreProfile.updated_at as string | number | null) }}</dd>
-              </dl>
+            <Panel eyebrow="QQ / PUBLIC PROFILE" :title="text(personaQqProfile.nickname, normalizedDetailUserId)">
+              <div class="persona-identity-heading">
+                <IdentityAvatar :src="personaAvatarUrl" :label="text(personaQqProfile.nickname, normalizedDetailUserId)" size="large" />
+                <div><strong>{{ text(personaQqProfile.nickname, normalizedDetailUserId) }}</strong><br /><code>{{ normalizedDetailUserId }}</code></div>
+              </div>
+              <KeyValueGrid>
+                <KeyValueItem label="QQ ID"><code>{{ normalizedDetailUserId }}</code></KeyValueItem>
+                <KeyValueItem label="签名">{{ text(personaQqProfile.signature) }}</KeyValueItem>
+                <KeyValueItem label="所在地">{{ [personaQqProfile.country, personaQqProfile.province, personaQqProfile.city].filter(Boolean).join(" / ") || "—" }}</KeyValueItem>
+                <KeyValueItem label="等级">{{ text(personaQqProfile.level) }}</KeyValueItem>
+                <KeyValueItem label="更新时间">{{ formatDateTime(personaCoreProfile.updated_at as string | number | null) }}</KeyValueItem>
+              </KeyValueGrid>
             </Panel>
             <GroupFavorabilityPanel :favorability="personaFavorability" eyebrow="RELATION / FAVORABILITY" />
           </div>
@@ -274,14 +281,11 @@
               </table>
             </div>
             <p v-else class="muted-copy">暂无可展示的白名单结构化字段。</p>
-            <dl class="compact-kv">
-              <dt>用户明确更正</dt>
-              <dd>{{ Object.keys(personaUserCorrections).length ? Object.entries(personaUserCorrections).map(([k, v]) => `${k}=${text(v)}`).join("；") : "无" }}</dd>
-              <dt>头像分析状态</dt>
-              <dd>{{ Object.keys(personaAvatarAnalysis).length ? "已有受控分析" : "未分析" }}</dd>
-              <dt>证据范围</dt>
-              <dd>{{ detailGroupId ? `群 ${detailGroupId}` : "全局" }}</dd>
-            </dl>
+            <KeyValueGrid>
+              <KeyValueItem label="用户明确更正">{{ Object.keys(personaUserCorrections).length ? Object.entries(personaUserCorrections).map(([k, v]) => `${k}=${text(v)}`).join("；") : "无" }}</KeyValueItem>
+              <KeyValueItem label="头像分析状态">{{ Object.keys(personaAvatarAnalysis).length ? "已有受控分析" : "未分析" }}</KeyValueItem>
+              <KeyValueItem label="证据范围">{{ detailGroupId ? `群 ${detailGroupId}` : "全局" }}</KeyValueItem>
+            </KeyValueGrid>
           </Panel>
 
           <Panel eyebrow="ACTIONS / EXPLICIT TARGET" title="画像维护">
@@ -333,6 +337,14 @@
           <!-- members 分区 -->
           <template v-if="currentSection === 'members'">
             <GroupFavorabilityPanel :favorability="groupMemberFavorability" />
+            <Panel eyebrow="GROUP / MEMBER FILTER" title="成员画像分页">
+              <TextField v-model="groupPersonaSearch" label="搜索 QQ、昵称、别名或摘要" type="search" />
+              <div class="pagination">
+                <button type="button" :disabled="groupPersonaPage <= 1" @click="groupPersonaPage--">上一页</button>
+                <span>第 {{ groupPersonaPage }} 页 · 共 {{ groupPersonaTotal }} 条</span>
+                <button type="button" :disabled="!groupPersonaHasMore" @click="groupPersonaPage++">下一页</button>
+              </div>
+            </Panel>
             <GroupMembersPanel :profiles="groupMemberProfiles" />
             <GroupAliasesPanel
               :aliases="groupAliases"
@@ -377,11 +389,11 @@
           <template v-else>
             <div class="summary-grid">
               <Panel eyebrow="AGENT / STATE" title="群内 Agent 状态">
-                <dl class="compact-kv">
-                  <dt>心情</dt><dd>{{ text(groupAgentState.mood) }}</dd>
-                  <dt>能量</dt><dd>{{ text(groupAgentState.energy) }}</dd>
-                  <dt>待处理</dt><dd>{{ text(groupAgentState.pending) }}</dd>
-                </dl>
+                <KeyValueGrid>
+                  <KeyValueItem label="心情">{{ text(groupAgentState.mood) }}</KeyValueItem>
+                  <KeyValueItem label="能量">{{ text(groupAgentState.energy) }}</KeyValueItem>
+                  <KeyValueItem label="待处理">{{ text(groupAgentState.pending) }}</KeyValueItem>
+                </KeyValueGrid>
               </Panel>
               <Panel eyebrow="GROUP / SCHEDULE" title="群作息与计划">
                 <SwitchField v-model="scheduleEnabled" label="启用群作息" on-label="已启用" off-label="未启用" />
@@ -399,12 +411,12 @@
               </Panel>
             </div>
             <Panel eyebrow="GROUP / OBSERVATION" title="可观察状态">
-              <dl class="compact-kv">
-                <dt>群 ID</dt><dd><code>{{ detailGroupId }}</code></dd>
-                <dt>群梗数量</dt><dd>{{ groupMemes.length }}</dd>
-                <dt>调度启用</dt><dd>{{ scheduleEnabled ? "是" : "否" }}</dd>
-                <dt>诊断边界</dt><dd>不展示隐藏思维链或原始聊天正文</dd>
-              </dl>
+              <KeyValueGrid>
+                <KeyValueItem label="群 ID"><code>{{ detailGroupId }}</code></KeyValueItem>
+                <KeyValueItem label="群梗数量">{{ groupMemes.length }}</KeyValueItem>
+                <KeyValueItem label="调度启用">{{ scheduleEnabled ? "是" : "否" }}</KeyValueItem>
+                <KeyValueItem label="诊断边界">不展示隐藏思维链或原始聊天正文</KeyValueItem>
+              </KeyValueGrid>
             </Panel>
           </template>
         </div>
@@ -466,6 +478,9 @@ import { useBotStore } from "@vue-app/stores/bot";
 import GroupPeerBotsPanel from "@vue-app/components/GroupPeerBotsPanel.vue";
 import GroupQzoneAgentPanel from "@vue-app/components/GroupQzoneAgentPanel.vue";
 import CurrentGroupSelect from "@vue-app/components/CurrentGroupSelect.vue";
+import IdentityAvatar from "@vue-app/components/IdentityAvatar.vue";
+import KeyValueGrid from "@vue-app/components/KeyValueGrid.vue";
+import KeyValueItem from "@vue-app/components/KeyValueItem.vue";
 import SelectField from "@vue-app/components/forms/SelectField.vue";
 import SwitchField from "@vue-app/components/forms/SwitchField.vue";
 import TextareaField from "@vue-app/components/forms/TextareaField.vue";
@@ -578,18 +593,34 @@ const managementData = computed(() => listQuery.data.value as any);
 
 // 画像详情 Query & Mutations
 const detailUserId = computed(() => String(route.query.user_id ?? ""));
+const normalizedDetailUserId = computed(() => {
+  const value = detailUserId.value.trim();
+  return /^[1-9]\d*$/.test(value) ? value : "";
+});
+const userIdDraft = ref(detailUserId.value);
+watch(detailUserId, (next) => { userIdDraft.value = next; });
+const userIdDraftError = computed(() => {
+  const value = userIdDraft.value.trim();
+  return !value || /^[1-9]\d*$/.test(value) ? "" : "QQ ID 必须是规范正整数。";
+});
+function submitUserLookup() {
+  const value = userIdDraft.value.trim();
+  if (!value || userIdDraftError.value) return;
+  updateParam("user_id", value);
+}
 const detailGroupId = computed(() => String(route.query.group_id ?? ""));
 const correctionField = ref("");
 const correctionValue = ref("");
 
 const personaDetailQuery = useQuery({
-  queryKey: computed(() => ["persona-detail", detailUserId.value, detailGroupId.value]),
-  queryFn: ({ signal }) => resources.personaDetail(detailUserId.value, detailGroupId.value, signal),
-  enabled: computed(() => Boolean(detailUserId.value && props.dataset === "personas")),
+  queryKey: computed(() => ["persona-detail", normalizedDetailUserId.value, detailGroupId.value]),
+  queryFn: ({ signal }) => resources.personaDetail(normalizedDetailUserId.value, detailGroupId.value, signal),
+  enabled: computed(() => Boolean(normalizedDetailUserId.value && props.dataset === "personas")),
 });
 
 const personaCoreProfile = computed(() => record(personaDetailQuery.data.value?.core_profile));
 const personaQqProfile = computed(() => record(personaCoreProfile.value.qq_profile));
+const personaAvatarUrl = computed(() => text(personaQqProfile.value.avatar_url, ""));
 const personaFavorability = computed(() => record(personaDetailQuery.data.value?.favorability));
 const personaStructured = computed(() => record(personaCoreProfile.value.structured));
 const personaStructuredFields = computed(() => {
@@ -627,16 +658,16 @@ function structuredFieldConfidence(field: Record<string, unknown>): string {
 
 const personaActionMutation = useMutation({
   mutationFn: async (action: "refresh" | "correct" | "avatar" | "clear-avatar") => {
-    if (action === "refresh") return resources.refreshPersona(detailUserId.value, detailGroupId.value, botStore.selectedBotId);
-    if (action === "correct") return resources.correctPersona(detailUserId.value, { corrections: { [correctionField.value]: correctionValue.value } });
-    if (action === "avatar") return resources.refreshPersonaAvatar(detailUserId.value);
-    return resources.clearPersonaAvatar(detailUserId.value);
+    if (action === "refresh") return resources.refreshPersona(normalizedDetailUserId.value, detailGroupId.value, botStore.selectedBotId);
+    if (action === "correct") return resources.correctPersona(normalizedDetailUserId.value, { corrections: { [correctionField.value]: correctionValue.value } });
+    if (action === "avatar") return resources.refreshPersonaAvatar(normalizedDetailUserId.value);
+    return resources.clearPersonaAvatar(normalizedDetailUserId.value);
   },
   onSuccess: () => { void personaDetailQuery.refetch(); },
 });
 
 function confirmClearAvatar() {
-  if (window.confirm(`确认清除 QQ ${detailUserId.value} 的头像分析？`)) {
+  if (window.confirm(`确认清除 QQ ${normalizedDetailUserId.value} 的头像分析？`)) {
     personaActionMutation.mutate("clear-avatar");
   }
 }
@@ -645,16 +676,24 @@ function confirmClearAvatar() {
 const isSpecializedGroupSection = computed(() => currentSection.value === "peer-bots" || currentSection.value === "qzone-agent");
 const groupApiSections = computed(() => {
   if (currentSection.value === "knowledge") return ["knowledge", "style", "memes"] as const;
-  if (currentSection.value === "members") return ["personas", "aliases"] as const;
+  if (currentSection.value === "members") return ["personas"] as const;
   if (isSpecializedGroupSection.value) return [];
   return ["schedule", "agent-state", "memes"] as const;
 });
+const groupPersonaPage = ref(1);
+const groupPersonaSearch = ref("");
+watch(groupPersonaSearch, () => { groupPersonaPage.value = 1; });
 
 const groupDetailQuery = useQuery({
-  queryKey: computed(() => ["group-business", detailGroupId.value, groupApiSections.value.join("+")]),
+  queryKey: computed(() => ["group-business", detailGroupId.value, groupApiSections.value.join("+"), groupPersonaPage.value, groupPersonaSearch.value]),
   queryFn: async ({ signal }) => {
     const entries = await Promise.all(
-      groupApiSections.value.map(async (name) => [name, await resources.groupBusiness(detailGroupId.value, name, signal)])
+      groupApiSections.value.map(async (name) => [
+        name,
+        name === "personas"
+          ? await resources.groupPersonas(detailGroupId.value, groupPersonaPage.value, groupPersonaSearch.value, signal)
+          : await resources.groupBusiness(detailGroupId.value, name, signal),
+      ])
     );
     return Object.fromEntries(entries);
   },
@@ -662,8 +701,17 @@ const groupDetailQuery = useQuery({
 });
 
 const groupDetailData = computed(() => record(groupDetailQuery.data.value));
-const groupAliases = computed(() => records(record(groupDetailData.value.aliases).aliases));
 const groupMemberProfiles = computed(() => records(record(groupDetailData.value.personas).profiles));
+const groupAliases = computed(() => groupMemberProfiles.value
+  .filter((profile) => (Array.isArray(profile.aliases) && profile.aliases.length > 0) || text(profile.alias_note, "") !== "")
+  .map((profile) => ({
+    user_id: profile.user_id,
+    aliases: Array.isArray(profile.aliases) ? profile.aliases.join("、") : "",
+    note: profile.alias_note,
+    updated_at: profile.alias_updated_at,
+  })));
+const groupPersonaTotal = computed(() => Number(record(groupDetailData.value.personas).total ?? 0));
+const groupPersonaHasMore = computed(() => record(groupDetailData.value.personas).has_more === true);
 const groupMemberFavorability = computed(() => record(record(groupDetailData.value.personas).group_favorability));
 const groupMemes = computed(() => records(record(groupDetailData.value.memes).items ?? record(groupDetailData.value.memes).memes));
 const groupKnowledge = computed(() => record(groupDetailData.value.knowledge));

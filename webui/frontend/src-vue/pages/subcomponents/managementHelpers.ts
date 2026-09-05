@@ -12,7 +12,13 @@ export function records(value: unknown): JsonRecord[] {
 
 export function text(value: unknown, fallback = "—"): string {
   if (value === null || value === undefined || value === "") return fallback;
-  if (Array.isArray(value)) return value.map((item) => String(item)).join("、") || fallback;
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, 16)
+      .filter((item) => ["string", "number", "boolean"].includes(typeof item))
+      .map((item) => String(item))
+      .join("、") || fallback;
+  }
   if (typeof value === "object") return fallback;
   return String(value);
 }

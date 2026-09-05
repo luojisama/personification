@@ -3,7 +3,7 @@
     <PageHeader
       index="05"
       title="模型测试"
-      description="单路由、全路由、人设 Prompt 与媒体测试入口。视频路由探针只证明路由接受视频；完整视频回合必须经过语义帧、Agent、工具、证据门与输出检查。"
+      description="单路由、全路由、人设 Prompt 与音视频测试入口。媒体默认使用服务器内置确定性样例；自定义上传只证明传输/解码链，不冒充内容理解验证。"
     />
 
     <div v-if="topDiagnostic" class="diagnostic-panel diagnostic-panel-error" role="alert">
@@ -90,13 +90,23 @@
         </QueryBoundary>
       </Panel>
 
-      <Panel eyebrow="VIDEO / ROUTE PROBE" title="视频路由探针">
-        <p>只验证配置的视频理解路线，不进入聊天 Agent，也不发送 QQ。</p>
-        <div class="stacked-field">
+      <Panel eyebrow="MEDIA / SAMPLE" title="音视频样例模式">
+        <p>内置样例随服务端发布并校验摘要，不向浏览器暴露答案或本地路径；自定义上传仍受音频 12 MiB、视频 32 MiB 上限约束。</p>
+        <div class="inline-controls">
+          <label>媒体类型
+            <select v-model="mediaKind" class="form-control">
+              <option value="audio">音频</option>
+              <option value="video">视频</option>
+            </select>
+          </label>
+          <label><input v-model="sampleMode" type="radio" value="builtin" /> 内置样例（默认）</label>
+          <label><input v-model="sampleMode" type="radio" value="upload" /> 自定义上传</label>
+        </div>
+        <div v-if="sampleMode === 'upload'" class="stacked-field">
           <input
             type="file"
-            accept="video/*,.mkv,.avi"
-            aria-label="选择测试视频文件"
+            :accept="mediaKind === 'audio' ? 'audio/wav,audio/mpeg,audio/mp4,.wav,.mp3,.m4a,.ogg' : 'video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov,.mkv,.avi'"
+            aria-label="选择测试媒体文件"
             @change="onFileChange"
           />
         </div>
@@ -104,28 +114,14 @@
           <button
             class="button button-secondary"
             type="button"
-            :disabled="!selectedVideo || probeVideoMutation.isPending.value"
-            @click="handleProbeVideo"
+            :disabled="(sampleMode === 'upload' && !selectedMedia) || mediaTurnMutation.isPending.value"
+            @click="handleMediaTurn"
           >
-            {{ probeVideoMutation.isPending.value ? '探针运行中…' : '确认并运行路由探针' }}
-          </button>
-        </div>
-      </Panel>
-
-      <Panel eyebrow="VIDEO / FULL TURN" title="完整视频回合">
-        <p>使用与真实 QQ 回合一致的语义帧、规划、Agent、媒体工具、证据门和可见输出门。发送接口被替换为只捕获代理，不会触达 QQ。</p>
-        <div class="dossier-actions">
-          <button
-            class="button"
-            type="button"
-            :disabled="!selectedVideo || videoTurnMutation.isPending.value"
-            @click="handleVideoTurn"
-          >
-            {{ videoTurnMutation.isPending.value ? '完整回合运行中…' : '确认并运行完整无发送回合' }}
+            {{ mediaTurnMutation.isPending.value ? '媒体回合运行中…' : '确认并运行内置/上传媒体回合' }}
           </button>
         </div>
         <div class="security-manifest">
-          成功条件同时要求捕获可见回复和关联成功的 <code>vision_analyze</code> 视频证据；仅有路由探针结果不会通过。
+          完整链路经过媒体理解、Agent、Review 与 Ledger 前置阶段；最终发送由捕获型 Bot 截获，页面结果固定显示 <code>captured_not_sent</code>。
         </div>
       </Panel>
     </div>
@@ -308,7 +304,9 @@ function resultDiagnostic(row: UnknownRecord): OperationDiagnostic | null {
 }
 
 const prompt = ref("用一句话说明当前模型已连通。");
-const selectedVideo = ref<File | null>(null);
+const mediaKind = ref<"audio" | "video">("video");
+const sampleMode = ref<"builtin" | "upload">("builtin");
+const selectedMedia = ref<File | null>(null);
 const result = ref<unknown>(null);
 const topError = ref<unknown>(null);
 
@@ -330,7 +328,7 @@ function loadPersonaPrompt() {
 
 function onFileChange(event: Event) {
   const target = event.target as HTMLInputElement;
-  selectedVideo.value = target.files?.[0] ?? null;
+  selectedMedia.value = target.files?.[0] ?? null;
 }
 
 const chatMutation = useMutation({
@@ -350,10 +348,13 @@ function handleRunChat(mode: "single" | "all") {
   chatMutation.mutate(mode);
 }
 
-const probeVideoMutation = useMutation({
+const mediaTurnMutation = useMutation({
   mutationFn: async () => {
-    if (!selectedVideo.value) throw new Error("请先选择视频文件");
-    return resources.videoRouteProbe(selectedVideo.value);
+    if (sampleMode.value === "builtin") {
+      return resources.mediaTurnBuiltin(mediaKind.value, "", prompt.value);
+    }
+    if (!selectedMedia.value) throw new Error("请先选择媒体文件");
+    return resources.mediaTurnUpload(mediaKind.value, selectedMedia.value, prompt.value);
   },
   onSuccess: (value) => {
     result.value = value;
@@ -364,35 +365,14 @@ const probeVideoMutation = useMutation({
   },
 });
 
-function handleProbeVideo() {
-  if (!selectedVideo.value) return;
-  const video = selectedVideo.value;
-  const sizeMb = (video.size / 1024 / 1024).toFixed(1);
-  const confirmed = window.confirm(`将上传 ${video.name}（${sizeMb} MB）并调用视频路由，可能产生供应商额度消耗。确认继续吗？`);
+function handleMediaTurn() {
+  if (sampleMode.value === "upload" && !selectedMedia.value) return;
+  const sample = sampleMode.value === "builtin"
+    ? `服务器内置${mediaKind.value === "audio" ? "音频" : "视频"}样例`
+    : `${selectedMedia.value?.name || "自定义媒体"}（${((selectedMedia.value?.size || 0) / 1024 / 1024).toFixed(1)} MB）`;
+  const confirmed = window.confirm(`将使用${sample}进入真实媒体理解与完整 Agent 链路，可能产生供应商额度消耗。最终回复只在 WebUI 捕获，绝不发送 QQ。确认继续吗？`);
   if (!confirmed) return;
-  probeVideoMutation.mutate();
-}
-
-const videoTurnMutation = useMutation({
-  mutationFn: async () => {
-    if (!selectedVideo.value) throw new Error("请先选择视频文件");
-    return resources.videoTurnTest(selectedVideo.value, prompt.value);
-  },
-  onSuccess: (value) => {
-    result.value = value;
-    topError.value = null;
-  },
-  onError: (err) => {
-    topError.value = err;
-  },
-});
-
-function handleVideoTurn() {
-  if (!selectedVideo.value) return;
-  const video = selectedVideo.value;
-  const confirmed = window.confirm(`将上传 ${video.name} 并进入与真实聊天一致的完整 Agent 链路。最终回复只在 WebUI 捕获，绝不发送 QQ。确认继续吗？`);
-  if (!confirmed) return;
-  videoTurnMutation.mutate();
+  mediaTurnMutation.mutate();
 }
 
 const resultRecord = computed(() => (result.value != null ? asRecord(result.value) : null));

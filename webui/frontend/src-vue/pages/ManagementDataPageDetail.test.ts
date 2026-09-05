@@ -11,6 +11,9 @@ vi.mock("@/api/resources", () => ({
   resources: {
     personasFiltered: vi.fn(),
     personaDetail: vi.fn(),
+    groupsFiltered: vi.fn(),
+    groupPersonas: vi.fn(),
+    groupBusiness: vi.fn(),
   },
 }));
 
@@ -70,5 +73,75 @@ describe("ManagementDataPage.vue persona detail", () => {
     expect(table.text()).toContain("0.86");
     expect(table.text()).toMatch(/09\/04\s+17:30:00/);
     expect(wrapper.text()).not.toContain("ORIGINAL_PRIVATE_PROFILE_DO_NOT_RENDER");
+  });
+
+  it("does not query when an invalid QQ ID arrives through the URL", async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: "/persona/personas/:section", component: ManagementDataPage }],
+    });
+    await router.push({ path: "/persona/personas/detail", query: { user_id: "12x34" } });
+    await router.isReady();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    const wrapper = mount(ManagementDataPage, {
+      props: { dataset: "personas" },
+      global: {
+        plugins: [createPinia(), router, [VueQueryPlugin, { queryClient }]],
+      },
+    });
+    await flushPromises();
+
+    expect(resources.personaDetail).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("QQ ID 必须是规范正整数");
+    expect(wrapper.text()).toContain("需要有效的用户 ID");
+  });
+
+  it("uses aliases embedded in the current persona page without loading the full alias catalog", async () => {
+    vi.mocked(resources.groupsFiltered).mockResolvedValue({
+      items: [],
+      page: 1,
+      page_size: 20,
+      total: 0,
+      total_pages: 0,
+    });
+    vi.mocked(resources.groupPersonas).mockResolvedValue({
+      profiles: [
+        {
+          user_id: "10001",
+          nickname: "小林",
+          aliases: ["林同学", "小林子"],
+          alias_note: "当前页数据",
+          favorability: { score: 0, level: "初见" },
+        },
+      ],
+      page: 1,
+      page_size: 20,
+      total: 1,
+      has_more: false,
+      group_favorability: {},
+    });
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: "/persona/groups/:section", component: ManagementDataPage }],
+    });
+    await router.push({ path: "/persona/groups/members", query: { group_id: "20002" } });
+    await router.isReady();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    const wrapper = mount(ManagementDataPage, {
+      props: { dataset: "groups" },
+      global: {
+        plugins: [createPinia(), router, [VueQueryPlugin, { queryClient }]],
+      },
+    });
+    await flushPromises();
+
+    expect(resources.groupPersonas).toHaveBeenCalledWith("20002", 1, "", expect.any(AbortSignal));
+    expect(resources.groupBusiness).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("当前页成员别名（1）");
+    expect(wrapper.text()).toContain("林同学、小林子");
+    expect(wrapper.text()).toContain("当前页数据");
   });
 });

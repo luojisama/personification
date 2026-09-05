@@ -98,8 +98,11 @@ export interface RouteCapabilityProbe {
   risk: FunctionalTestRisk;
   confirmation_required: boolean;
   reason_code: string;
-  /** "media_upload" means a bounded, one-shot admin sample is required. */
-  input_kind?: "none" | "media_upload";
+  /** Media probes default to deterministic server-owned samples. */
+  input_kind?: "none" | "media" | "media_upload";
+  sample_modes?: Array<"builtin" | "upload">;
+  default_sample_id?: string;
+  builtin_sample?: { id?: string; kind?: string; mime_type?: string; size_bytes?: number; description?: string };
   /** Stable server-declared MIME allowlist for a media-upload probe. */
   accepted_mime_types?: string[];
   /** Stable byte limit for the one-shot media-upload probe. */
@@ -115,6 +118,16 @@ export interface RouteCapabilityItem {
   capabilities: RouteCapabilities;
   probe_catalog: Record<CapabilityName, RouteCapabilityProbe>;
   probe_statuses?: Partial<Record<CapabilityName, "idle" | "queued" | "running" | "finished" | "failed">>;
+  probe_results?: Partial<Record<CapabilityName, {
+    status: string;
+    sample_mode: "builtin" | "upload" | "";
+    capability_state: CapabilityState;
+    verification_state: VerificationState;
+    content_verified: boolean;
+    transport_verified: boolean;
+    detail_code: string;
+    finished_at: string | null;
+  }>>;
   probe_status?: "idle" | "queued" | "running" | "finished" | "failed";
   updated_at?: string | null;
 }
@@ -578,7 +591,7 @@ export interface FunctionalTestRun {
   group: string;
   risk: FunctionalTestRisk;
   execution_kind: "local_readonly" | "provider_probe" | "qq_canary" | "qzone_canary";
-  state: "prepared" | "awaiting_confirmation" | "running" | "succeeded" | "failed" | "unknown";
+  state: "prepared" | "awaiting_confirmation" | "running" | "succeeded" | "failed" | "unknown" | "skipped" | "cancelled";
   target_summary: string | null;
   route_fingerprint: string | null;
   trace_id: string | null;
@@ -591,6 +604,52 @@ export interface FunctionalTestRun {
   diagnostic: OperationDiagnostic;
   result_summary: Record<string, unknown>;
   delivery_status: "not_applicable" | "not_started" | "dedicated_canary_required" | string;
+}
+
+export interface FunctionalTestBatchItem {
+  id: string;
+  test_id: string;
+  label: string;
+  group: string;
+  risk: FunctionalTestRisk;
+  execution_kind: FunctionalTestRun["execution_kind"];
+  state: FunctionalTestRun["state"] | "pending";
+  target_summary?: string | null;
+  route_fingerprint?: string | null;
+  trace_id?: string | null;
+  diagnostic_code: string;
+  created_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  duration_ms: number | null;
+  steps: OperationStep[];
+  diagnostic: Partial<OperationDiagnostic>;
+  result_summary: Record<string, unknown>;
+  delivery_status: string;
+}
+
+export interface FunctionalTestBatch {
+  id: string;
+  profile: "safe_full";
+  state: "awaiting_confirmation" | "queued" | "running" | "succeeded" | "failed" | "cancelling" | "cancelled";
+  created_at: string | null;
+  confirmed_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  expires_at: string | null;
+  cancellation_requested: boolean;
+  confirmation: {
+    provider_calls_required?: boolean;
+    external_read_items?: number;
+    local_read_items?: number;
+    external_write_excluded?: number;
+    active_media_routes?: number;
+    cost_notice?: string;
+  };
+  excluded: Array<{ test_id: string; label: string; reason_code: string }>;
+  counts: Record<string, number>;
+  items: FunctionalTestBatchItem[];
+  diagnostic_code: string;
 }
 
 export interface HealthCatalog {

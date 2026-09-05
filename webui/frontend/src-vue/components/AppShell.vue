@@ -83,6 +83,7 @@
       <header class="top-status-line">
         <span><Icon name="signal" /> 实时事件 {{ realtime.events.value.length }}/500</span>
         <span>{{ selectedBot?.online ? "Bot 在线" : "Bot 未连接" }}{{ selectedBot?.bot_id ? ` · ${selectedBot.bot_id}` : "" }}</span>
+        <span v-if="adminIdentity">当前身份 {{ identitySourceLabel(adminIdentity.identity_source) }} · QQ {{ adminIdentity.qq }}</span>
         <span v-if="realtime.resyncCount.value">REST 重同步 {{ realtime.resyncCount.value }} 次</span>
         <code>{{ route.path }}</code>
       </header>
@@ -144,6 +145,11 @@ try {
 
 const railCollapsed = computed(() => uiStore.sidebarCollapsed);
 const botsQuery = useQuery({ queryKey: ["bots"], queryFn: ({ signal }) => resources.bots(signal), staleTime: 30_000 });
+const adminIdentityQuery = useQuery({ queryKey: ["admin-identity"], queryFn: ({ signal }) => resources.adminIdentity(signal), staleTime: 60_000 });
+const adminIdentity = computed(() => adminIdentityQuery.data.value ?? null);
+function identitySourceLabel(source: "SUPERUSER" | "plugin_admin"): string {
+  return source === "SUPERUSER" ? "SUPERUSER（NoneBot 超级用户）" : "plugin_admin（插件管理员）";
+}
 const bots = computed<BotIdentity[]>(() => botsQuery.data.value?.items ?? []);
 const selectedBot = computed(() => resolveSelectedBot(bots.value, botStore.selectedBotId));
 const selectedBotId = computed({

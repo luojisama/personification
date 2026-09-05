@@ -56,16 +56,11 @@
               </button>
             </div>
             <dl class="compact-kv">
-              <dt>单回合上限</dt>
-              <dd>1 次</dd>
-              <dt>跨 Bot 深度</dt>
-              <dd>1 层</dd>
-              <dt>Pending</dt>
-              <dd>{{ data.pending_count }}</dd>
-              <dt>冷却项</dt>
-              <dd>{{ data.loop_protection.cooldown_count }}</dd>
-              <dt>观察微批</dt>
-              <dd>{{ data.observer.pending_messages }} 条 / {{ data.observer.pending_users }} 个用户</dd>
+              <div><dt>单回合上限</dt><dd>1 次</dd></div>
+              <div><dt>跨 Bot 深度</dt><dd>1 层</dd></div>
+              <div><dt>Pending</dt><dd>{{ data.pending_count }}</dd></div>
+              <div><dt>冷却项</dt><dd>{{ data.loop_protection.cooldown_count }}</dd></div>
+              <div><dt>观察微批</dt><dd>{{ data.observer.pending_messages }} 条 / {{ data.observer.pending_users }} 个用户</dd></div>
             </dl>
           </Panel>
 
@@ -251,6 +246,11 @@
                 <p v-if="membersQuery.isError.value" class="muted-copy">
                   实时成员目录暂不可用；仍可选择注册表中已有的 Bot。
                 </p>
+                <div v-else class="pagination" aria-label="群成员分页">
+                  <button type="button" :disabled="memberOffset === 0" @click="memberOffset = Math.max(0, memberOffset - 50)">上一页</button>
+                  <span>第 {{ Math.floor(memberOffset / 50) + 1 }} 页 · 共 {{ membersQuery.data.value?.total ?? 0 }} 人</span>
+                  <button type="button" :disabled="membersQuery.data.value?.has_more !== true" @click="memberOffset += 50">下一页</button>
+                </div>
               </div>
               <TextField
                 id="peer-bot-command-id"
@@ -477,10 +477,13 @@ const query = useQuery({
 });
 
 const data = computed(() => query.data.value);
+const memberSearch = ref("");
+const memberSearchApplied = ref("");
+const memberOffset = ref(0);
 
 const membersQuery = useQuery({
-  queryKey: computed(() => ["group-peer-bot-member-options", props.groupId, props.botId]),
-  queryFn: ({ signal }) => resources.groupMembers(props.groupId, props.botId, signal),
+  queryKey: computed(() => ["group-peer-bot-member-options", props.groupId, props.botId, memberOffset.value, memberSearchApplied.value]),
+  queryFn: ({ signal }) => resources.groupMembers(props.groupId, props.botId, signal, memberOffset.value, memberSearchApplied.value),
   enabled: computed(() => Boolean(props.groupId && props.botId)),
 });
 
@@ -492,7 +495,14 @@ const settingsDirty = ref(false);
 const draft = ref<CommandDraft>(emptyDraft());
 const argumentsText = ref("{}");
 const dryRunResult = ref("");
-const memberSearch = ref("");
+
+watch(memberSearch, (value, _previous, onCleanup) => {
+  const timer = window.setTimeout(() => {
+    memberSearchApplied.value = value.trim();
+    memberOffset.value = 0;
+  }, 250);
+  onCleanup(() => window.clearTimeout(timer));
+});
 
 function confirmAction(message: string): boolean {
   return window.confirm(message);
@@ -502,6 +512,7 @@ watch(
   () => props.groupId,
   () => {
     settingsDirty.value = false;
+    memberOffset.value = 0;
   },
 );
 

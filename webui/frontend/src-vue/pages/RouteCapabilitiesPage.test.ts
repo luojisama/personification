@@ -33,8 +33,8 @@ const mockRouteItem: RouteCapabilityItem = {
   },
   probe_catalog: {
     image_input: { probe_id: "vision", available: true, risk: "external_read", confirmation_required: true, reason_code: "vision_probe_available" },
-    audio_input: { probe_id: "audio_upload", available: true, risk: "external_read", confirmation_required: true, reason_code: "audio_probe_upload_available", input_kind: "media_upload", accepted_mime_types: ["audio/wav"], max_upload_bytes: 12 * 1024 * 1024 },
-    video_input: { probe_id: "video_upload", available: true, risk: "external_read", confirmation_required: true, reason_code: "video_probe_upload_available", input_kind: "media_upload", accepted_mime_types: ["video/mp4"], max_upload_bytes: 32 * 1024 * 1024 },
+    audio_input: { probe_id: "audio_builtin", available: true, risk: "external_read", confirmation_required: true, reason_code: "audio_probe_available", input_kind: "media", sample_modes: ["builtin", "upload"], default_sample_id: "audio-ascending-v1", builtin_sample: { description: "三段短音调" }, accepted_mime_types: ["audio/wav"], max_upload_bytes: 12 * 1024 * 1024 },
+    video_input: { probe_id: "video_builtin", available: true, risk: "external_read", confirmation_required: true, reason_code: "video_probe_available", input_kind: "media", sample_modes: ["builtin", "upload"], default_sample_id: "video-rgb-v1", builtin_sample: { description: "三段生成画面" }, accepted_mime_types: ["video/mp4"], max_upload_bytes: 32 * 1024 * 1024 },
     reasoning: { probe_id: "reasoning_minimal", available: true, risk: "external_read", confirmation_required: true, reason_code: "reasoning_minimal_probe_available" },
     function_call: { probe_id: "function_call_noop", available: true, risk: "external_read", confirmation_required: true, reason_code: "function_call_noop_probe_available" },
     native_web_search: { probe_id: "native_search_readonly", available: true, risk: "external_read", confirmation_required: true, reason_code: "native_search_readonly_probe_available" },
@@ -141,19 +141,29 @@ describe("RouteCapabilitiesPage", () => {
 
     const audioCell = wrapper.findAll(".capability-cell").find((cell) => cell.text().includes("音频: 不支持"));
     expect(audioCell).toBeDefined();
-    expect(audioCell?.text()).toContain("管理员受限音频样例");
-    expect(audioCell?.find("button").attributes("disabled")).toBeDefined();
+    expect(audioCell?.text()).toContain("内置确定性样例（默认）");
+    expect(audioCell?.find("button").attributes("disabled")).toBeUndefined();
+    await audioCell?.find("button").trigger("click");
+    expect(resources.queueRouteProbe).toHaveBeenCalledWith("rf_test_1234567890", "audio_input", true, "builtin", "audio-ascending-v1");
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain("内置确定性样例（默认）"));
+    const refreshedAudioCell = wrapper.findAll(".capability-cell").find((cell) => cell.text().includes("音频: 不支持"));
+    const uploadRadio = refreshedAudioCell?.findAll("input[type='radio']")[1];
+    expect(uploadRadio?.exists()).toBe(true);
+    await uploadRadio!.setValue(true);
+    expect(refreshedAudioCell?.text()).toContain("管理员受限音频样例");
+    expect(refreshedAudioCell?.find("button").attributes("disabled")).toBeDefined();
     const sample = new File(["RIFF"], "sample.wav", { type: "audio/wav" });
-    const input = audioCell?.find('[data-testid="route-media-probe-input"]');
+    const input = refreshedAudioCell?.find('[data-testid="route-media-probe-input"]');
     expect(input?.exists()).toBe(true);
     Object.defineProperty((input?.element as HTMLInputElement), "files", {
       value: { 0: sample, length: 1, item: (index: number) => (index === 0 ? sample : null) },
       configurable: true,
     });
     await input?.trigger("change");
-    expect(audioCell?.text()).toContain("已选择受限样例");
-    expect(audioCell?.find("button").attributes("disabled")).toBeUndefined();
-    await audioCell?.find("button").trigger("click");
+    expect(refreshedAudioCell?.text()).toContain("已选择受限样例");
+    expect(refreshedAudioCell?.find("button").attributes("disabled")).toBeUndefined();
+    await refreshedAudioCell?.find("button").trigger("click");
     expect(resources.uploadRouteMediaProbe).toHaveBeenCalledWith("rf_test_1234567890", "audio_input", sample);
     wrapper.unmount();
     queryClient.clear();

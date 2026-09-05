@@ -73,18 +73,12 @@
           </Panel>
           <Panel eyebrow="QZONE AGENT / QUOTA" title="今日额度与边界">
             <dl class="compact-kv">
-              <dt>今日已占用</dt>
-              <dd>{{ data.quota.used_today }} / {{ data.settings.group_daily_limit }}</dd>
-              <dt>同一目标每日</dt>
-              <dd>{{ data.settings.target_daily_limit }} 次</dd>
-              <dt>同一目标冷却</dt>
-              <dd>{{ data.settings.target_cooldown_seconds }} 秒</dd>
-              <dt>结果未知</dt>
-              <dd>占用额度，不自动重试</dd>
-              <dt>可执行动作</dt>
-              <dd>仅读取、点赞、评论</dd>
-              <dt>禁止动作</dt>
-              <dd>转发、代发、删除、跨群操作</dd>
+              <div><dt>今日已占用</dt><dd>{{ data.quota.used_today }} / {{ data.settings.group_daily_limit }}</dd></div>
+              <div><dt>同一目标每日</dt><dd>{{ data.settings.target_daily_limit }} 次</dd></div>
+              <div><dt>同一目标冷却</dt><dd>{{ data.settings.target_cooldown_seconds }} 秒</dd></div>
+              <div><dt>结果未知</dt><dd>占用额度，不自动重试</dd></div>
+              <div><dt>可执行动作</dt><dd>仅读取、点赞、评论</dd></div>
+              <div><dt>禁止动作</dt><dd>转发、代发、删除、跨群操作</dd></div>
             </dl>
           </Panel>
         </div>

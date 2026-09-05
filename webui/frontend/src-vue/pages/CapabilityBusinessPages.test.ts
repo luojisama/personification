@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
 import CapabilityBusinessPages from "./CapabilityBusinessPages.vue";
 import { resources } from "@/api/resources";
+import SourceCoverage from "@vue-app/components/SourceCoverage.vue";
 
 const mockRoute = {
   path: "/capability/skills/installed",
@@ -25,6 +26,10 @@ vi.mock("@/api/resources", () => ({
     toolCreatorPost: vi.fn(),
     pluginKnowledgeSearch: vi.fn(),
     pluginKnowledgeDetail: vi.fn(),
+    pluginKnowledgeStatus: vi.fn(),
+    pluginKnowledgeSection: vi.fn(),
+    startPluginKnowledgeBuild: vi.fn(),
+    cancelPluginKnowledgeBuild: vi.fn(),
     pluginUpdateStatus: vi.fn(),
     pluginUpdateBenchmark: vi.fn(),
     pluginUpdateCheck: vi.fn(),
@@ -34,6 +39,15 @@ vi.mock("@/api/resources", () => ({
 }));
 
 describe("CapabilityBusinessPages.vue", () => {
+  it("distinguishes missing coverage counters from a real zero", () => {
+    const missing = mount(SourceCoverage, { props: { coverage: {} } });
+    const zero = mount(SourceCoverage, {
+      props: { coverage: { source_file_count: 0, source_chunk_count: 0, source_chars: 0 } },
+    });
+
+    expect(missing.text()).toContain("文件—");
+    expect(zero.text()).toContain("文件0");
+  });
   let queryClient: QueryClient;
   let pinia: ReturnType<typeof createPinia>;
 
@@ -47,6 +61,16 @@ describe("CapabilityBusinessPages.vue", () => {
       },
     });
     window.confirm = vi.fn().mockReturnValue(true);
+    vi.mocked(resources.catalog).mockResolvedValue({ items: [], page: 1, page_size: 20, total: 0, total_pages: 0 });
+    vi.mocked(resources.pluginKnowledgeStatus).mockResolvedValue({
+      available: true,
+      automatic_build_enabled: false,
+      state: "stale_pending",
+      counts: { loaded: 5, indexed: 2, missing: 3, pending: 3, failed: 0, degraded: 0, success: 2 },
+      operation: null,
+      diagnostic_code: "plugin_knowledge_automatic_build_disabled",
+    });
+    vi.mocked(resources.pluginKnowledgeSection).mockResolvedValue({ items: [], total: 0 });
   });
 
   function createWrapper(props: { mode?: "skills" | "mcp" | "tool-creator" | "plugin-knowledge" | "plugins" } = {}) {
@@ -66,7 +90,7 @@ describe("CapabilityBusinessPages.vue", () => {
     mockRoute.params.section = "installed";
     mockRoute.meta.mode = "skills";
 
-    vi.mocked(resources.catalog).mockResolvedValueOnce({
+    vi.mocked(resources.catalog).mockResolvedValue({
       items: [
         { name: "weather_tool", description: "查询天气", source_kind: "builtin", user_disabled: false },
       ],
@@ -136,9 +160,9 @@ describe("CapabilityBusinessPages.vue", () => {
     mockRoute.params.section = "catalog";
     mockRoute.meta.mode = "plugin-knowledge";
 
-    vi.mocked(resources.catalog).mockResolvedValueOnce({
+    vi.mocked(resources.catalog).mockResolvedValue({
       items: [
-        { plugin_name: "core_ops", display_name: "核心运维", summary: "提供日志与诊断能力", category: "ops", coverage: "95%" },
+        { plugin_name: "core_ops", display_name: "核心运维", summary: "提供日志与诊断能力", category: "ops", source_coverage: { source_file_count: 4, source_chunk_count: 9, source_chars: 1200, analysis_strategy: "module_bundles", full_input: true } },
       ],
       page: 1,
       page_size: 20,
@@ -149,7 +173,26 @@ describe("CapabilityBusinessPages.vue", () => {
     const wrapper = createWrapper({ mode: "plugin-knowledge" });
     await vi.waitFor(() => {
       expect(wrapper.text()).toContain("插件知识库");
+      expect(wrapper.text()).toContain("源码字符");
+      expect(wrapper.text()).not.toContain("[object Object]");
     });
+    wrapper.unmount();
+  });
+
+  it("uses object items when search keeps the legacy string results field", async () => {
+    mockRoute.path = "/capability/plugin-knowledge/search";
+    mockRoute.params.section = "search";
+    mockRoute.meta.mode = "plugin-knowledge";
+    vi.mocked(resources.pluginKnowledgeSearch).mockResolvedValue({
+      results: ["core_ops"],
+      items: [{ plugin_name: "core_ops", display_name: "核心运维", summary: "真实对象命中", category: "ops", source_coverage: { source_file_count: 1 } }],
+    });
+    const wrapper = createWrapper({ mode: "plugin-knowledge" });
+    const input = wrapper.find("input[type='search']");
+    await input.setValue("core");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("真实对象命中"));
+    expect(wrapper.text()).not.toContain("[object Object]");
+    wrapper.unmount();
   });
 
   it("renders PluginManagementPage and enforces UPDATE confirmation text for apply", async () => {
