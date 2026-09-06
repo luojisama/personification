@@ -521,6 +521,46 @@ def _mface_cq(data: dict[str, Any]) -> str:
     return f"[CQ:mface,{','.join(params)}]" if params else ""
 
 
+def _caller_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("content", "text", "message"):
+            if isinstance(value.get(key), str):
+                return value[key]
+    return str(getattr(value, "content", "") or getattr(value, "text", "") or "")
+
+
+async def review_native_qq_expression(
+    *, face_id: int, label: str, core_persona: str, runtime: Any, context: str
+) -> bool:
+    """Review a known protocol face against trusted persona/context.
+
+    Protocol faces have no bitmap to inspect, so the fixed official ID/name is
+    the evidence.  Unknown IDs never reach this helper.  Legacy diagnostic
+    rendering without a runtime does not claim a review and is intentionally
+    kept separate from normal/YAML delivery, which always supplies one.
+    """
+    if not core_persona or runtime is None:
+        return False
+    caller = getattr(runtime, "response_review_call_ai_api", None) or getattr(runtime, "review_call_ai_api", None)
+    if not callable(caller):
+        return False
+    try:
+        result = await caller(
+            [
+                {"role": "system", "content": "只输出严格 JSON：{\"allow\":true|false}。依据核心人格、当前语境和可信 QQ 协议表情名称判断是否适合发送；不确定必须 false。"},
+                {"role": "user", "content": f"核心人格：{core_persona}\n语境：{str(context or '')[:600]}\n可信协议表情：id={face_id}，名称={label}"},
+            ],
+            max_tokens=48,
+            temperature=0,
+        )
+        verdict = json.loads(_caller_text(result))
+        return isinstance(verdict, dict) and verdict.get("allow") is True
+    except Exception:
+        return False
+
+
 async def _resolve_request_to_segment(
     request: QQExpressionRequest,
     *,
@@ -528,6 +568,10 @@ async def _resolve_request_to_segment(
     bot: Any = None,
     plugin_config: Any = None,
     logger: Any = None,
+    core_persona: str = "",
+    runtime: Any = None,
+    context: str = "",
+    group_id: str | int | None = None,
 ) -> tuple[list[Any], str, str]:
     source_for_request = {
         "favorite": "qq_favorite",
@@ -544,13 +588,25 @@ async def _resolve_request_to_segment(
             if item is None:
                 return [], "", ""
             label = str(item.get("official_name") or item.get("id"))
+            face_id = int(item["id"])
+            # Normal/YAML delivery supplies trusted persona/runtime.  When it
+            # does, protocol face output is fail-closed on the semantic gate.
+            if runtime is not None or str(core_persona or "").strip():
+                if not await review_native_qq_expression(
+                    face_id=face_id,
+                    label=label,
+                    core_persona=str(core_persona or "").strip(),
+                    runtime=runtime,
+                    context=context,
+                ):
+                    return [], "", ""
             if super_face:
                 mface_data = _super_mface_data_for_query(request.query or label, item)
                 if mface_data is not None:
                     return [message_segment_cls("mface", mface_data)], _clean_expression_label(mface_data.get("summary") or label), "super_face"
             repeat = 1 if super_face else max(1, min(_MAX_FACE_REPEAT, request.count))
             return (
-                [_face_segment(message_segment_cls, int(item["id"])) for _ in range(repeat)],
+                [_face_segment(message_segment_cls, face_id) for _ in range(repeat)],
                 label,
                 "face",
             )
@@ -562,9 +618,23 @@ async def _resolve_request_to_segment(
             if not candidates:
                 return [], "", ""
             candidate = random.choice(candidates)
+            if not str(core_persona or "").strip() or runtime is None:
+                return [], "", ""
+            from .expression_preparation import prepare_remote_expression
+            image_ref = await prepare_remote_expression(
+                url=candidate.url,
+                source="qq_favorite",
+                config=plugin_config,
+                core_persona=core_persona,
+                runtime=runtime,
+                context=context,
+                group_id=group_id,
+            )
+            if not image_ref:
+                return [], "", ""
             if candidate.mface_data is not None:
                 remember_qq_mface_segment(candidate.mface_data, kind="favorite", summary=candidate.summary)
-            return [message_segment_cls.image(candidate.url)], candidate.summary or "收藏表情", "favorite"
+            return [message_segment_cls.image("base64://" + image_ref.split(",", 1)[1])], candidate.summary or "收藏表情", "favorite"
         if request.kind == "recommended":
             query = str(request.query or "开心").strip()[:40] or "开心"
             raw = await _call_recommend_face_api(bot, query)
@@ -572,7 +642,21 @@ async def _resolve_request_to_segment(
             if not candidates:
                 return [], "", ""
             candidate = random.choice(candidates)
-            return [message_segment_cls.image(candidate.url)], candidate.summary or query, "recommended"
+            if not str(core_persona or "").strip() or runtime is None:
+                return [], "", ""
+            from .expression_preparation import prepare_remote_expression
+            image_ref = await prepare_remote_expression(
+                url=candidate.url,
+                source="qq_recommended",
+                config=plugin_config,
+                core_persona=core_persona,
+                runtime=runtime,
+                context=context,
+                group_id=group_id,
+            )
+            if not image_ref:
+                return [], "", ""
+            return [message_segment_cls.image("base64://" + image_ref.split(",", 1)[1])], candidate.summary or query, "recommended"
     except Exception as exc:
         if logger is not None:
             try:
@@ -589,6 +673,10 @@ async def render_qq_expression_message(
     bot: Any = None,
     plugin_config: Any = None,
     logger: Any = None,
+    core_persona: str = "",
+    runtime: Any = None,
+    context: str = "",
+    group_id: str | int | None = None,
 ) -> QQExpressionRender:
     parts = split_qq_expression_markers(text)
     if not any(isinstance(part, QQExpressionRequest) for part in parts):
@@ -613,6 +701,10 @@ async def render_qq_expression_message(
             bot=bot,
             plugin_config=plugin_config,
             logger=logger,
+            core_persona=core_persona,
+            runtime=runtime,
+            context=context or str(text or ""),
+            group_id=group_id,
         )
         if not segments:
             continue
@@ -891,6 +983,7 @@ __all__ = [
     "qq_face_semantic_text",
     "remember_qq_mface_segment",
     "render_qq_expression_cq_text",
+    "review_native_qq_expression",
     "render_qq_expression_message",
     "reset_qq_expression_state",
     "semantic_text_for_qq_expression_segment",

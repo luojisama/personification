@@ -70,8 +70,12 @@ def expression_action_allowed(config: Any, action_type: str, params: Any) -> boo
     if action in {"send_qq_face", "send_qq_mface"}:
         return expression_source_enabled(config, "native")
     if action == "send_qq_image_expression":
-        source = str(values.get("expression_source") or "")
-        return source in {"qq_favorite", "qq_recommended"} and expression_source_enabled(config, source)
+        # The final executor resolves this opaque token to its own immutable
+        # bytes and program-assigned source.  Do not accept a model supplied
+        # ``expression_source`` as a substitute for that capability.
+        if str(values.get("expression_token") or "").strip():
+            return True
+        return False
     return True
 
 

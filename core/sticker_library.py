@@ -947,4 +947,5 @@ __all__ = [
     "save_sticker_metadata",
     "save_sticker_metadata_sync",
     "sticker_metadata_path",
+    "validated_expression_image",
 ]

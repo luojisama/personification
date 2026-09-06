@@ -12,6 +12,7 @@ from ..agent.inner_state import DEFAULT_STATE, load_inner_state
 from ..core.context_policy import strip_response_control_markers
 from ..core.agent_bridge import run_text_agent
 from ..core.visible_output import guard_visible_text
+from ..core.response_review import review_response_text
 from ..core.emotion_state import (
     describe_group_emotion_memory,
     describe_user_emotion_memory,
@@ -25,9 +26,10 @@ from ..core.session_store import (
 from ..core.context_policy import stringify_history_content
 from ..core.qq_expression_library import (
     choose_qq_expression_marker_for_context,
-    render_qq_expression_cq_text,
+    render_qq_expression_message,
 )
 from ..core.qq_outbound import build_outbound_context
+from ..core.expression_preparation import prepare_local_expression
 from ..core.time_ctx import inject_current_time_context
 from ..skills.skillpacks.datetime_tool.scripts.impl import get_current_datetime_info
 from ..utils import get_group_topic_summary
@@ -35,6 +37,20 @@ from ..utils import get_group_topic_summary
 
 _GROUP_IDLE_LOCK = _asyncio.Lock()
 _last_group_idle_sent_at: float = 0.0
+
+
+async def _review_proactive_text(*, caller: Any, text: str, core_persona: Any, context: str, is_private: bool) -> str:
+    """Fail closed shared final review for proactive visible text."""
+    if not callable(caller) or not str(core_persona or "").strip():
+        return ""
+    decision = await review_response_text(
+        caller, candidate_text=text, raw_message_text=context,
+        recent_context=context, is_private=is_private, reply_required=False,
+        core_persona=str(core_persona),
+    )
+    if decision.action == "accept":
+        return text
+    return decision.text.strip() if decision.action == "rewrite" and decision.text else ""
 
 
 class ProactiveOutboundOutcomeUnknown(RuntimeError):
@@ -753,6 +769,8 @@ async def _send_group_idle_qq_expression(
     topic: str,
     mood_hint: str,
     mode: str,
+    core_persona: str,
+    runtime_bundle: Any,
     logger: Any,
     qq_outbound_ledger: Any = None,
     outbound_context: Any = None,
@@ -773,11 +791,22 @@ async def _send_group_idle_qq_expression(
         if not marker:
             return ""
         content = marker if mode in {"qq_face", "qq_face_combo", "qq_super"} else f"{topic}{marker}"
-        rendered = await render_qq_expression_cq_text(
+        # QQ face/mface/image output must use the same final persona gate as
+        # normal replies.  The older CQ renderer had no trusted persona or
+        # runtime and could therefore bypass it.
+        if not str(core_persona or "").strip() or runtime_bundle is None:
+            return ""
+        from nonebot.adapters.onebot.v11 import MessageSegment
+        rendered = await render_qq_expression_message(
             content,
+            message_segment_cls=MessageSegment,
             bot=bot,
             plugin_config=plugin_config,
             logger=logger,
+            core_persona=core_persona,
+            runtime=runtime_bundle,
+            context=topic,
+            group_id=group_id,
         )
         if not rendered.message:
             return ""
@@ -810,6 +839,7 @@ async def _try_send_idle_sticker(
     plugin_config: Any,
     mood_hint: str,
     topic_text_fallback: str,
+    core_persona: str,
     logger: Any,
     qq_outbound_ledger: Any = None,
     outbound_context: Any = None,
@@ -870,8 +900,18 @@ async def _try_send_idle_sticker(
         best_path = sticker_dir / best_name
         if not best_path.exists():
             return False
-        # OneBot v11 CQ 码发送
-        cq = f"[CQ:image,file=file:///{best_path.resolve().as_posix().lstrip('/')}]"
+        image_ref = await prepare_local_expression(
+            path=best_path,
+            config=plugin_config,
+            core_persona=core_persona,
+            runtime=runtime_bundle,
+            context=f"{mood_hint}\n{topic_text_fallback}",
+            group_id=group_id,
+        )
+        if not image_ref:
+            return False
+        # Send the checked immutable bytes, never the mutable library path.
+        cq = f"[CQ:image,file=base64://{image_ref.split(',', 1)[1]}]"
 
         async def _send() -> Any:
             nonlocal send_invoked
@@ -1162,6 +1202,12 @@ async def run_proactive_messaging(
         )
         return False
 
+    payload = await _review_proactive_text(
+        caller=call_ai_api, text=payload, core_persona=system_prompt,
+        context="主动私聊", is_private=True,
+    )
+    if not payload:
+        return False
     payload = guard_visible_text(
         payload,
         logger=logger,
@@ -1503,6 +1549,12 @@ async def run_group_idle_topic(
                     group_id=group_id,
                 )
 
+            topic = await _review_proactive_text(
+                caller=call_ai_api, text=topic, core_persona=system_prompt,
+                context="群聊冷场主动话题", is_private=False,
+            )
+            if not topic:
+                continue
             topic = guard_visible_text(
                 topic,
                 logger=logger,
@@ -1530,6 +1582,7 @@ async def run_group_idle_topic(
                         plugin_config=plugin_config,
                         mood_hint=sticker_mood_hint or topic,
                         topic_text_fallback=topic,
+                        core_persona=system_prompt,
                         logger=logger,
                         qq_outbound_ledger=qq_outbound_ledger,
                         outbound_context=outbound_context,
@@ -1562,6 +1615,7 @@ async def run_group_idle_topic(
                         plugin_config=plugin_config,
                         mood_hint=sticker_mood_hint or topic,
                         topic_text_fallback="",
+                        core_persona=system_prompt,
                         logger=logger,
                         qq_outbound_ledger=qq_outbound_ledger,
                         outbound_context=outbound_context,
@@ -1574,6 +1628,8 @@ async def run_group_idle_topic(
                         topic=topic,
                         mood_hint=sticker_mood_hint or topic,
                         mode=chosen_mode,
+                        core_persona=system_prompt,
+                        runtime_bundle=getattr(plugin_config, "_runtime_bundle_ref", None),
                         logger=logger,
                         qq_outbound_ledger=qq_outbound_ledger,
                         outbound_context=outbound_context,

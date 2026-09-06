@@ -39,6 +39,22 @@ def test_diag_record_and_query(_tmp_data) -> None:
     assert len(pri_rows) == 2
 
 
+def test_diag_page_contract_has_bounded_count_and_legacy_cursor(_tmp_data) -> None:
+    diag = load_personification_module("plugin.personification.core.proactive_diagnostics")
+    for index in range(5):
+        diag.record(scope="private", outcome=diag.OUTCOME_SENT, target=f"u{index}")
+
+    second = diag.query_page(scope="private", page=2, limit=2)
+    legacy = diag.query_page(scope="private", cursor=999999999, page=2, limit=2)
+
+    assert len(second["items"]) == 2
+    assert second["page"] == 2
+    assert second["page_size"] == 2
+    assert second["total"] == 5
+    assert second["total_pages"] == 3
+    assert legacy["page"] == 0
+
+
 def test_diag_skip_reason_stats(_tmp_data) -> None:
     diag = load_personification_module("plugin.personification.core.proactive_diagnostics")
     for _ in range(5):

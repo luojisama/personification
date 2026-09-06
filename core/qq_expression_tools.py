@@ -7,8 +7,28 @@ from typing import Any
 
 from ..agent.tool_registry import AgentTool, ToolRegistry
 from .expression_policy import expression_source_enabled
+from .expression_preparation import prepare_remote_expression
 from .qq_expression_library import semantic_text_for_qq_expression_segment
 from .qq_face_names import QQ_FACE_NAMES
+
+
+async def prepare_remote_qq_expression(*, executor: Any, url: str, source: str, context: str = "") -> str | None:
+    """Acquire, review and freeze one remote QQ expression for a tool turn."""
+    event = getattr(executor, "event", None)
+    return await prepare_remote_expression(
+        url=url,
+        source=source,
+        config=getattr(executor, "config", None),
+        core_persona=str(getattr(executor, "core_persona", "") or ""),
+        runtime=getattr(executor, "runtime", None),
+        context=context,
+        group_id=getattr(event, "group_id", None),
+    )
+
+
+async def expression_semantic_review(*, executor: Any, url: str, source: str, context: str = "") -> bool:
+    """Compatibility predicate; send paths must use the frozen return value."""
+    return bool(await prepare_remote_qq_expression(executor=executor, url=url, source=source, context=context))
 
 
 QQ_EXPRESSION_TOOL_NAMES = frozenset(
@@ -327,16 +347,16 @@ def build_send_qq_expression_tools(*, executor: Any, bot: Any = None, plugin_con
         summary = picked.get("summary", "")
         if not picked_url:
             return _action_result(ok=False, reason="没有选中收藏表情")
-        if not _queue_action(
-            executor,
-            "send_qq_image_expression",
-            {
-                "url": picked_url,
-                "text": _compact_text(text),
-                "summary": summary,
-                "history_text": f"[QQ收藏表情:{summary}]" if summary else "[QQ收藏表情]",
-                "expression_source": "qq_favorite",
-            },
+        image_ref = await prepare_remote_qq_expression(executor=executor, url=picked_url, source="qq_favorite", context=text)
+        if not image_ref:
+            return _action_result(ok=False, reason="收藏表情人格语义审阅未通过")
+        queue_remote = getattr(executor, "queue_remote_expression", None)
+        if not callable(queue_remote) or not queue_remote(
+            image_ref=image_ref,
+            source="qq_favorite",
+            text=_compact_text(text),
+            summary=summary,
+            history_text=f"[QQ收藏表情:{summary}]" if summary else "[QQ收藏表情]",
         ):
             return _action_result(ok=False, reason="当前发送上下文不可用")
         return _action_result(
@@ -370,16 +390,16 @@ def build_send_qq_expression_tools(*, executor: Any, bot: Any = None, plugin_con
         summary = picked.get("summary", "")
         if not picked_url:
             return _action_result(ok=False, reason="没有选中推荐表情", query=q)
-        if not _queue_action(
-            executor,
-            "send_qq_image_expression",
-            {
-                "url": picked_url,
-                "text": _compact_text(text),
-                "summary": summary or q,
-                "history_text": f"[QQ推荐表情:{q}]",
-                "expression_source": "qq_recommended",
-            },
+        image_ref = await prepare_remote_qq_expression(executor=executor, url=picked_url, source="qq_recommended", context=text or q)
+        if not image_ref:
+            return _action_result(ok=False, reason="推荐表情人格语义审阅未通过")
+        queue_remote = getattr(executor, "queue_remote_expression", None)
+        if not callable(queue_remote) or not queue_remote(
+            image_ref=image_ref,
+            source="qq_recommended",
+            text=_compact_text(text),
+            summary=summary or q,
+            history_text=f"[QQ推荐表情:{q}]",
         ):
             return _action_result(ok=False, reason="当前发送上下文不可用")
         return _action_result(
@@ -485,6 +505,8 @@ __all__ = [
     "QQ_EXPRESSION_TOOL_NAMES",
     "build_send_qq_expression_tools",
     "expression_tool_result_queued",
+    "expression_semantic_review",
+    "prepare_remote_qq_expression",
     "qq_action_history_text",
     "register_send_qq_expression_tools",
     "resolve_qq_face_id",

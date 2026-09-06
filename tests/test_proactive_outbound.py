@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import json
+import pytest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from PIL import Image
 
 from ._loader import load_personification_module
 
@@ -62,8 +65,10 @@ def _patch_common(monkeypatch) -> None:  # noqa: ANN001
         "plugin.personification.core.proactive_diagnostics"
     )
     schedule = load_personification_module("plugin.personification.schedule")
+    utils = load_personification_module("plugin.personification.utils")
     monkeypatch.setattr(diagnostics, "record", lambda **_kwargs: None)
     monkeypatch.setattr(schedule, "is_group_active_hour", lambda *_args: True)
+    monkeypatch.setattr(utils, "get_group_config", lambda _group_id: {"sticker_enabled": True})
     monkeypatch.setattr(proactive_flow, "append_session_message", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(proactive_flow, "get_group_topic_summary", lambda _group_id: "")
     monkeypatch.setattr(proactive_flow.random, "random", lambda: 0.0)
@@ -78,7 +83,7 @@ def _patch_sticker(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
         "plugin.personification.core.sticker_feedback"
     )
     sticker_path = tmp_path / "idle.png"
-    sticker_path.write_bytes(b"test-sticker")
+    Image.new("RGB", (8, 8), "pink").save(sticker_path, "PNG")
 
     async def _load_feedback():  # noqa: ANN202
         return {}
@@ -106,6 +111,37 @@ def _patch_sticker(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
     monkeypatch.setattr(sticker_feedback, "record_sticker_sent", _record_sent)
 
 
+def test_group_idle_qq_face_requires_trusted_persona_runtime_before_send() -> None:
+    sent: list[object] = []
+
+    class Bot:
+        async def send_group_msg(self, **kwargs):  # noqa: ANN003, ANN202
+            sent.append(kwargs["message"])
+            return {"message_id": "face-1"}
+
+    no_runtime = asyncio.run(
+        proactive_flow._send_group_idle_qq_expression(
+            bot=Bot(), group_id="10001", plugin_config=SimpleNamespace(),
+            topic="普通话题", mood_hint="", mode="qq_face",
+            core_persona="管理员核心人格", runtime_bundle=None, logger=_logger(),
+        )
+    )
+    assert no_runtime == "" and sent == []
+
+    async def reviewer(_messages, **_kwargs):
+        return '{"allow":true}'
+
+    allowed = asyncio.run(
+        proactive_flow._send_group_idle_qq_expression(
+            bot=Bot(), group_id="10001", plugin_config=SimpleNamespace(),
+            topic="普通话题", mood_hint="", mode="qq_face",
+            core_persona="管理员核心人格",
+            runtime_bundle=SimpleNamespace(response_review_call_ai_api=reviewer), logger=_logger(),
+        )
+    )
+    assert allowed and len(sent) == 1
+
+
 def test_private_proactive_send_records_ledger_receipt(
     tmp_path: Path,
     monkeypatch,
@@ -131,6 +167,8 @@ def test_private_proactive_send_records_ledger_receipt(
             return {"status": "ok", "data": {"message_id": "private-message-1"}}
 
     async def _call_ai(_messages, **_kwargs):  # noqa: ANN001, ANN202
+        if "persona_verdict" in str(_messages):
+            return json.dumps({"action": "accept", "persona_verdict": "consistent"})
         return "SEND|10001|suddenly remembered that episode"
 
     result = asyncio.run(
@@ -293,11 +331,26 @@ def _run_group_idle(
     records: list[tuple],
     agent_tool_caller=None,  # noqa: ANN001
     agent_tool_registry=None,  # noqa: ANN001
+    review_result='{"action":"accept","persona_verdict":"consistent"}',
 ) -> int:
     now = datetime(2026, 7, 18, 10, 0, 0)
     response_iter = iter(responses)
 
+    class _Vision:
+        async def describe(self, _prompt, _image):  # noqa: ANN001, ANN202
+            return '{"allow":true}'
+
+    # The production flow obtains this from the configured runtime bundle. A
+    # real image and visual answer keep this fake Bot test on the final gate.
+    config._runtime_bundle_ref = SimpleNamespace(
+        plugin_config=config,
+        vision_caller=_Vision(),
+    )
+
     async def _call_ai(_messages, **_kwargs):  # noqa: ANN001, ANN202
+        if "persona_verdict" in str(_messages):
+            assert "persona" in _messages[0]["content"]
+            return review_result
         return next(response_iter)
 
     return asyncio.run(

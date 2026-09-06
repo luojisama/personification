@@ -64,7 +64,7 @@ def test_load_prompt_reuses_yaml_cache_and_pick_ack_phrase(monkeypatch) -> None:
 
     assert first == second
     assert isinstance(first, dict)
-    assert first["system"].startswith("你是群友")
+    assert "[核心人格]\n你是群友" in first["system"]
     assert first["system"].count(context_policy.PROMPT_INJECTION_GUARD_MARKER) == 1
     assert ack_phrase == "查下~"
     assert len(logger.info_messages) == 1
@@ -119,5 +119,5 @@ def test_core_values_can_be_disabled() -> None:
     loaded = prompt_loader.load_prompt(plugin_config, lambda _gid: {}, logger)
 
     assert isinstance(loaded, str)
-    assert loaded.startswith("你是群友")
+    assert "[核心人格]\n你是群友" in loaded
     assert loaded.count(context_policy.PROMPT_INJECTION_GUARD_MARKER) == 1

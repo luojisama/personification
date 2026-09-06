@@ -5,6 +5,7 @@ import sqlite3
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 from ._loader import load_personification_module
 
@@ -40,7 +41,29 @@ def _event():  # noqa: ANN202
     return SimpleNamespace(group_id=20001, user_id=10001)
 
 
-def test_action_executor_fake_ledger_wraps_every_send_surface() -> None:
+@pytest.fixture
+def sticker_context(tmp_path, monkeypatch):
+    path = tmp_path / "sticker.png"
+    Image.new("RGB", (8, 8), "pink").save(path, "PNG")
+    cfg = SimpleNamespace(personification_sticker_path=str(tmp_path))
+    async def review(*_args, **_kwargs):
+        return '{"allow":true}'
+    runtime = SimpleNamespace(plugin_config=cfg, response_review_call_ai_api=review)
+    media = load_personification_module("plugin.personification.core.media_understanding")
+    preparation = load_personification_module("plugin.personification.core.expression_preparation")
+    monkeypatch.setattr(preparation, "_group_sticker_enabled", lambda _group_id: True)
+    async def allow(**kwargs):
+        assert kwargs["image_refs"][0].startswith("data:image/png;base64,")
+        return '{"allow":true}', "fixture"
+    monkeypatch.setattr(media, "analyze_images_with_route_or_fallback", allow)
+    async def accept_review(_caller, *, candidate_text, **_kwargs):
+        return SimpleNamespace(action="accept", text=candidate_text)
+    monkeypatch.setattr(action_executor_mod, "final_dialogue_gate", accept_review)
+    return cfg, {"core_persona": "温和测试人格", "runtime": runtime, "expression_review_caller": review}, str(path)
+
+
+def test_action_executor_fake_ledger_wraps_every_send_surface(sticker_context) -> None:
+    cfg, review_deps, sticker = sticker_context
     class _Ledger:
         def __init__(self) -> None:
             self.calls: list[tuple[object, str, str]] = []
@@ -69,15 +92,18 @@ def test_action_executor_fake_ledger_wraps_every_send_surface() -> None:
             qq_outbound_ledger=ledger,
             operation_id="agent-operation",
             user_target="10002",
+            **review_deps,
         )
         await executor.send_text("文本")
         await executor.send_image_b64("QUJD")
-        await executor.execute("send_sticker", {"path": "sticker.png"})
+        await executor.execute("send_sticker", {"path": sticker})
         await executor.execute("send_qq_face", {"face_id": 182})
-        await executor.execute(
-            "send_qq_image_expression",
-            {"url": "https://example.test/a.png", "expression_source": "qq_favorite"},
+        assert executor.queue_remote_expression(
+            image_ref="data:image/png;base64,QUJD",
+            source="qq_favorite",
         )
+        remote_action = executor.pending_actions.pop()
+        await executor.execute(remote_action["type"], remote_action["params"])
         await executor.execute("send_image_url", {"url": "https://example.test/b.png"})
         await executor.execute("send_qq_mface", {"data": {"emoji_id": "face-1"}})
         await executor.execute("poke_user", {"user_id": "10002"})
@@ -103,9 +129,15 @@ def test_action_executor_fake_ledger_wraps_every_send_surface() -> None:
     assert executor.last_delivery_confirmed is True
 
 
-def test_action_executor_real_ledger_records_distinct_parts_and_message_ids(tmp_path) -> None:  # noqa: ANN001
+def test_action_executor_real_ledger_records_distinct_parts_and_message_ids(tmp_path, monkeypatch) -> None:  # noqa: ANN001
     db_path = db.init_db_sync(tmp_path)
     ledger = qq_outbound.QQOutboundLedger(db_path)
+    async def accept_review(_caller, *, candidate_text, **_kwargs):
+        return SimpleNamespace(action="accept", text=candidate_text)
+    monkeypatch.setattr(action_executor_mod, "final_dialogue_gate", accept_review)
+
+    async def review(*_args, **_kwargs):
+        return "{}"
 
     async def _run():  # noqa: ANN202
         executor = action_executor_mod.ActionExecutor(
@@ -119,8 +151,10 @@ def test_action_executor_real_ledger_records_distinct_parts_and_message_ids(tmp_
             _event(),
             SimpleNamespace(),
             _Logger(),
-            qq_outbound_ledger=ledger,
-            operation_id="real-agent-operation",
+                qq_outbound_ledger=ledger,
+                operation_id="real-agent-operation",
+                core_persona="温和测试人格",
+                expression_review_caller=review,
         )
         await executor.send_text("第一段")
         await executor.execute("send_image_url", {"url": "https://example.test/image.png"})
@@ -148,7 +182,8 @@ def test_action_executor_real_ledger_records_distinct_parts_and_message_ids(tmp_
     assert "message-3" not in {candidate.message_id for candidate in candidates}
 
 
-def test_action_executor_send_exception_stays_unknown(tmp_path) -> None:  # noqa: ANN001
+def test_action_executor_send_exception_stays_unknown(tmp_path, sticker_context) -> None:  # noqa: ANN001
+    cfg, review_deps, sticker = sticker_context
     db_path = db.init_db_sync(tmp_path)
     ledger = qq_outbound.QQOutboundLedger(db_path)
     executor = action_executor_mod.ActionExecutor(
@@ -158,10 +193,11 @@ def test_action_executor_send_exception_stays_unknown(tmp_path) -> None:  # noqa
         _Logger(),
         qq_outbound_ledger=ledger,
         operation_id="agent-send-error",
+        **review_deps,
     )
 
     with pytest.raises(RuntimeError, match="send failed"):
-        asyncio.run(executor.execute("send_sticker", {"path": "sticker.png"}))
+        asyncio.run(executor.execute("send_sticker", {"path": sticker}))
 
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
@@ -173,7 +209,8 @@ def test_action_executor_send_exception_stays_unknown(tmp_path) -> None:  # noqa
     assert row == ("unknown", None, "agent_action_sticker", "RuntimeError")
 
 
-def test_action_executor_missing_message_id_is_not_confirmed(tmp_path) -> None:  # noqa: ANN001
+def test_action_executor_missing_message_id_is_not_confirmed(tmp_path, sticker_context) -> None:  # noqa: ANN001
+    cfg, review_deps, sticker = sticker_context
     db_path = db.init_db_sync(tmp_path)
     ledger = qq_outbound.QQOutboundLedger(db_path)
     executor = action_executor_mod.ActionExecutor(
@@ -183,9 +220,10 @@ def test_action_executor_missing_message_id_is_not_confirmed(tmp_path) -> None: 
         _Logger(),
         qq_outbound_ledger=ledger,
         operation_id="agent-missing-message-id",
+        **review_deps,
     )
 
-    asyncio.run(executor.execute("send_sticker", {"path": "sticker.png"}))
+    asyncio.run(executor.execute("send_sticker", {"path": sticker}))
 
     assert executor.last_delivery_confirmed is False
     assert len(executor.receipts) == 1
@@ -205,5 +243,5 @@ def test_action_executor_without_ledger_keeps_legacy_send_behavior() -> None:
 
     assert result == "已戳"
     assert bot.sent == ["[CQ:poke,qq=10001]"]
-    assert executor.last_delivery_confirmed is True
+    assert executor.last_delivery_confirmed is False
     assert executor.receipts == []

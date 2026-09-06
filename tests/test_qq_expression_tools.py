@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pytest
 from types import SimpleNamespace
 
 from ._loader import load_personification_module
@@ -15,6 +16,16 @@ qq_diagnostics = load_personification_module("plugin.personification.core.qq_exp
 qq_tools = load_personification_module("plugin.personification.core.qq_expression_tools")
 persona_contract = load_personification_module("plugin.personification.core.persona_contract")
 event_rules = load_personification_module("plugin.personification.handlers.event_rules")
+
+
+@pytest.fixture(autouse=True)
+def _allow_expression_visual_review(monkeypatch):
+    # Tool tests isolate policy/queue behavior.  The production preparation
+    # function is separately covered with controlled image bytes.
+    async def _allow(**_kwargs):
+        return "data:image/png;base64,iVBORw0KGgo="
+    monkeypatch.setattr(qq_tools, "prepare_remote_qq_expression", _allow)
+    monkeypatch.setattr(action_executor_mod, "review_native_qq_expression", _allow)
 reply_buffer = load_personification_module("plugin.personification.handlers.reply_buffer")
 tool_catalog = load_personification_module("plugin.personification.agent.runtime.tool_catalog")
 tool_registry_mod = load_personification_module("plugin.personification.agent.tool_registry")
@@ -113,19 +124,10 @@ def test_send_favorite_expression_fetches_url_and_queues_image() -> None:
 
     assert calls == [("fetch_custom_face", {"count": 3})]
     assert payload["kind"] == "qq_favorite_expression"
-    assert queued == [
-        {
-            "type": "send_qq_image_expression",
-            "params": {
-                "url": "https://example.test/a.png",
-                "text": "",
-                "summary": "",
-                "history_text": "[QQ收藏表情]",
-                "expression_source": "qq_favorite",
-            },
-        }
-    ]
-    assert sent and sent[0].startswith("[CQ:image,file=https://example.test/a.png")
+    assert queued[0]["type"] == "send_qq_image_expression"
+    assert set(queued[0]["params"]) == {"expression_token", "text", "summary", "history_text"}
+    assert "url" not in queued[0]["params"] and "expression_source" not in queued[0]["params"]
+    assert sent and sent[0].startswith("[CQ:image,file=base64://iVBORw0KGgo=")
 
 
 def test_send_favorite_expression_string_false_keeps_index_pick() -> None:
@@ -146,7 +148,7 @@ def test_send_favorite_expression_string_false_keeps_index_pick() -> None:
 
     queued = asyncio.run(_run())
 
-    assert queued[0]["params"]["url"] == "https://example.test/b.png"
+    assert queued[0]["params"]["expression_token"]
 
 
 def test_send_recommended_expression_uses_word_parameter() -> None:
@@ -163,7 +165,7 @@ def test_send_recommended_expression_uses_word_parameter() -> None:
 
     assert calls == [("get_recommend_face", {"word": "开心"})]
     assert payload["queued"] is True
-    assert queued[0]["params"]["url"] == "https://example.test/happy.png"
+    assert queued[0]["params"]["expression_token"]
     assert queued[0]["params"]["history_text"] == "[QQ推荐表情:开心]"
 
 
@@ -193,10 +195,10 @@ def test_send_recommended_expression_falls_back_to_message_parameter() -> None:
         ("get_recommend_face", {"message": "开心"}),
     ]
     assert payload["queued"] is True
-    assert queued[0]["params"]["url"] == "https://example.test/happy.png"
+    assert queued[0]["params"]["expression_token"]
 
 
-def test_render_recommended_expression_uses_word_parameter() -> None:
+def test_render_recommended_expression_without_trusted_persona_fails_closed() -> None:
     async def _run() -> tuple[str, list[tuple[str, dict]]]:
         bot = FakeBot()
         bot.api_results["get_recommend_face"] = {"url": ["https://example.test/happy.png"]}
@@ -211,7 +213,7 @@ def test_render_recommended_expression_uses_word_parameter() -> None:
     message, calls = asyncio.run(_run())
 
     assert calls == [("get_recommend_face", {"word": "开心"})]
-    assert message.startswith("[CQ:image,file=https://example.test/happy.png")
+    assert message == ""
 
 
 def test_render_qq_expression_marker_as_inline_face_segment() -> None:
@@ -412,10 +414,44 @@ def test_build_qq_expression_test_messages_cover_three_command_kinds() -> None:
     assert super_face.marker == "[QQ超级表情:笑哭]"
     assert str(super_face.render.message) == "[CQ:face,id=182]"
     assert super_face.render.history_text == "[QQ表情:笑哭]"
-    assert favorite.ok is True
+    # Diagnostics do not have a trusted per-turn persona/runtime.  Remote
+    # image markers therefore fail closed instead of emitting an unreviewed
+    # URL, while fixed protocol faces remain observable.
+    assert favorite.ok is False
     assert favorite.marker == "[QQ收藏表情:随机]"
-    assert str(favorite.render.message).startswith("[CQ:image,file=https://example.test/fav.png")
+    assert str(favorite.render.message) == ""
     assert calls == [("fetch_custom_face", {"count": 20})]
+
+
+def test_render_remote_marker_freezes_reviewed_bytes_and_rechecks_source(monkeypatch) -> None:
+    async def _run():
+        bot = FakeBot()
+        bot.api_results["get_recommend_face"] = {"url": ["https://example.test/replaced.png"]}
+        config = _config(personification_qq_recommended_expression_enabled=True)
+        preparation = load_personification_module("plugin.personification.core.expression_preparation")
+
+        async def freeze(**kwargs):
+            assert kwargs["url"] == "https://example.test/replaced.png"
+            assert kwargs["source"] == "qq_recommended"
+            return "data:image/png;base64,iVBORw0KGgo="
+
+        monkeypatch.setattr(preparation, "prepare_remote_expression", freeze)
+        rendered = await qq_library.render_qq_expression_message(
+            "[QQ推荐表情:开心]",
+            message_segment_cls=action_executor_mod.MessageSegment,
+            bot=bot,
+            plugin_config=config,
+            core_persona="管理员核心人格",
+            runtime=SimpleNamespace(),
+            context="当前对话",
+            group_id="10001",
+        )
+        return str(rendered.message), bot.calls
+
+    message, calls = asyncio.run(_run())
+    assert calls == [("get_recommend_face", {"word": "开心"})]
+    assert "https://example.test/replaced.png" not in message
+    assert message.startswith("[CQ:image,file=base64://iVBORw0KGgo=")
 
 
 def test_qq_expression_prompt_warns_about_ambiguous_smile() -> None:
@@ -466,15 +502,17 @@ def test_final_dispatch_rechecks_recommended_source_after_queue() -> None:
         bot = FakeBot()
         config = _config()
         executor = action_executor_mod.ActionExecutor(bot, object(), config, _Logger())
-        result = await executor.execute(
-            "send_qq_image_expression",
-            {"url": "https://example.test/a.png", "expression_source": "qq_recommended"},
+        assert executor.queue_remote_expression(
+            image_ref="data:image/png;base64,iVBORw0KGgo=", source="qq_recommended"
         )
+        action = executor.pending_actions.pop()
+        result = await executor.execute(action["type"], action["params"])
+        assert executor.queue_remote_expression(
+            image_ref="data:image/png;base64,iVBORw0KGgo=", source="qq_recommended"
+        )
+        action = executor.pending_actions.pop()
         config.personification_qq_recommended_expression_enabled = False
-        blocked = await executor.execute(
-            "send_qq_image_expression",
-            {"url": "https://example.test/b.png", "expression_source": "qq_recommended"},
-        )
+        blocked = await executor.execute(action["type"], action["params"])
         return result + "|" + blocked, bot.sent
 
     result, sent = asyncio.run(_run())
