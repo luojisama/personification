@@ -7,7 +7,7 @@ import json
 import mimetypes
 import time
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
 import httpx
@@ -22,6 +22,7 @@ from .media_provider_adapters import (
     MEDIA_PROTOCOL_ANTIGRAVITY,
     MEDIA_PROTOCOL_GEMINI,
     MEDIA_PROTOCOL_MIMO,
+    MEDIA_PROTOCOL_OPENAI_GEMINI_INLINE,
     MEDIA_PROTOCOL_QWEN,
     resolve_media_provider_adapter,
 )
@@ -77,7 +78,11 @@ def _build_tool_caller(config: Any) -> Any:
     return build_tool_caller(config)
 
 
-_VIDEO_INLINE_MAX_BYTES = 20 * 1024 * 1024
+_INLINE_MEDIA_REQUEST_MAX_BYTES = 20 * 1024 * 1024
+# Base64 expands raw bytes by roughly 4/3.  Reserve a small amount for the
+# JSON envelope and require the aggregate request, not merely each file, to
+# stay below the externally observable 20 MiB budget.
+_VIDEO_INLINE_MAX_BYTES = (_INLINE_MEDIA_REQUEST_MAX_BYTES * 3 // 4) - 4096
 _QWEN_BASE64_MAX_BYTES = 10 * 1024 * 1024
 _QWEN_RAW_INLINE_MAX_BYTES = (_QWEN_BASE64_MAX_BYTES * 3 // 4) - 4
 # Kept as an internal compatibility alias for focused tests and older imports.
@@ -477,6 +482,7 @@ async def _try_primary_video_routes(
             MEDIA_PROTOCOL_ANTIGRAVITY: "video_primary_agy",
             MEDIA_PROTOCOL_QWEN: "video_primary_qwen_omni",
             MEDIA_PROTOCOL_MIMO: "video_primary_mimo",
+            MEDIA_PROTOCOL_OPENAI_GEMINI_INLINE: "video_primary_openai_gemini_inline",
         }.get(adapter.protocol, "")
         if attempt_route and attempted_routes is not None:
             attempted_routes.append(attempt_route)
@@ -510,6 +516,15 @@ async def _try_primary_video_routes(
                     fps=float(provider.get("video_fps", 2.0) or 2.0),
                     media_resolution=str(provider.get("media_resolution", "default") or "default"),
                 )
+            elif adapter.protocol == MEDIA_PROTOCOL_OPENAI_GEMINI_INLINE:
+                result = await _call_openai_gemini_inline_media(
+                    api_key=str(provider.get("api_key", "") or ""),
+                    base_url=str(provider.get("api_url", "") or ""),
+                    model=model,
+                    prompt=prompt,
+                    video_refs=refs,
+                    timeout=_media_request_timeout(provider),
+                )
             elif adapter.protocol == MEDIA_PROTOCOL_ANTIGRAVITY:
                 caller = _build_tool_caller(_ProviderConfigProxy(runtime.plugin_config, provider))
                 remote_refs = [ref for ref in refs if str(ref).startswith(("http://", "https://"))]
@@ -532,12 +547,14 @@ async def _try_primary_video_routes(
             else:
                 continue
         except Exception as exc:
+            if getattr(runtime,"strict_probe",False): raise
             if not error_indicates_vision_unavailable(exc):
                 _log_warning(
                     runtime,
                     f"[video] primary route failed provider={provider_name}: {sanitize_text(exc)}",
                 )
             continue
+        if getattr(runtime,"strict_probe",False): runtime.probe_transport_verified=True
         if _media_result_has_evidence(result):
             return str(result or "").strip()
     return ""
@@ -587,6 +604,15 @@ async def _try_primary_audio_routes(
                     prompt=prompt,
                     audio_refs=refs,
                 )
+            elif adapter.protocol == MEDIA_PROTOCOL_OPENAI_GEMINI_INLINE:
+                result = await _call_openai_gemini_inline_media(
+                    api_key=str(provider.get("api_key", "") or ""),
+                    base_url=str(provider.get("api_url", "") or ""),
+                    model=model,
+                    prompt=prompt,
+                    audio_refs=refs,
+                    timeout=_media_request_timeout(provider),
+                )
             elif adapter.protocol == MEDIA_PROTOCOL_ANTIGRAVITY:
                 caller = _build_tool_caller(_ProviderConfigProxy(runtime.plugin_config, provider))
                 remote_refs = [ref for ref in refs if str(ref).startswith(("http://", "https://"))]
@@ -609,12 +635,14 @@ async def _try_primary_audio_routes(
             else:
                 continue
         except Exception as exc:
+            if getattr(runtime,"strict_probe",False): raise
             if not error_indicates_vision_unavailable(exc):
                 _log_warning(
                     runtime,
                     f"[audio] primary route failed provider={provider_name}: {sanitize_text(exc)}",
                 )
             continue
+        if getattr(runtime,"strict_probe",False): runtime.probe_transport_verified=True
         if not _invalid_media_text(result):
             return str(result or "").strip()
     return ""
@@ -692,6 +720,7 @@ def _build_video_fallback_provider_config(runtime: Any) -> dict[str, str] | None
         ).strip().lower().replace("-", "_")
         if protocol not in {
             "gemini_native",
+            "openai_gemini_inline",
             "openai_qwen_omni",
             "openai_mimo_v25",
             "openai_custom_video_url",
@@ -1169,6 +1198,33 @@ def _gemini_image_part(image_ref: str) -> dict[str, Any]:
     }
 
 
+def _canonical_local_media_mime(path: Path, *, default: str) -> str:
+    """Use stable wire MIME names instead of host mimetypes' aliases."""
+    return {
+        ".mp3": "audio/mp3",
+        ".wav": "audio/wav",
+        ".flac": "audio/flac",
+        ".mp4": "video/mp4",
+        ".webm": "video/webm",
+    }.get(path.suffix.lower(), default)
+
+
+def _is_official_google_gemini_endpoint(base_url: str) -> bool:
+    """Files API is reserved for Google's own endpoint family, never a proxy."""
+    try:
+        host = str(urlsplit(str(base_url or "")).hostname or "").lower().rstrip(".")
+    except Exception:
+        return False
+    return host == "generativelanguage.googleapis.com" or host.endswith(".googleapis.com")
+
+
+def _nonempty_local_media_size(path: Path, *, kind: str) -> int:
+    size = path.stat().st_size
+    if size <= 0:
+        raise ValueError(f"{kind}_file_empty")
+    return size
+
+
 def _gemini_video_part(video_ref: str) -> dict[str, Any]:
     normalized_video_ref, problem = normalize_video_ref(video_ref)
     if not normalized_video_ref:
@@ -1183,13 +1239,16 @@ def _gemini_video_part(video_ref: str) -> dict[str, Any]:
         }
 
     path = Path(normalized_video_ref)
-    payload = path.read_bytes()
-    if len(payload) > _VIDEO_INLINE_MAX_BYTES:
+    size = _nonempty_local_media_size(path, kind="video")
+    if size > _VIDEO_INLINE_MAX_BYTES:
         raise ValueError("video_file_too_large_for_inline_data")
-    mime_type, _ = mimetypes.guess_type(str(path))
+    payload = path.read_bytes()
+    mime_type = _canonical_local_media_mime(
+        path, default=mimetypes.guess_type(str(path))[0] or "video/mp4"
+    )
     return {
         "inlineData": {
-            "mimeType": mime_type or "video/mp4",
+            "mimeType": mime_type,
             "data": base64.b64encode(payload).decode("ascii"),
         }
     }
@@ -1209,18 +1268,154 @@ def _gemini_audio_part(audio_ref: str) -> dict[str, Any]:
         }
 
     path = Path(normalized_audio_ref)
-    payload = path.read_bytes()
-    if len(payload) > _VIDEO_INLINE_MAX_BYTES:
+    size = _nonempty_local_media_size(path, kind="audio")
+    if size > _VIDEO_INLINE_MAX_BYTES:
         raise ValueError("audio_file_too_large_for_inline_data")
-    mime_type, _ = mimetypes.guess_type(str(path))
-    if path.suffix.lower() == ".mp3":
-        mime_type = "audio/mp3"
+    payload = path.read_bytes()
+    mime_type = _canonical_local_media_mime(
+        path, default=mimetypes.guess_type(str(path))[0] or "audio/wav"
+    )
     return {
         "inlineData": {
-            "mimeType": mime_type or "audio/wav",
+            "mimeType": mime_type,
             "data": base64.b64encode(payload).decode("ascii"),
         }
     }
+
+
+def _inline_data_size(parts: Sequence[Mapping[str, Any]]) -> int:
+    """Count encoded local media only; external file references are not uploaded here."""
+    total = 0
+    for part in parts:
+        inline = part.get("inlineData")
+        if isinstance(inline, Mapping):
+            total += len(str(inline.get("data") or "").encode("ascii", "ignore"))
+        audio = part.get("input_audio")
+        if isinstance(audio, Mapping):
+            total += len(str(audio.get("data") or "").encode("ascii", "ignore"))
+        image_url = part.get("image_url")
+        if isinstance(image_url, Mapping):
+            value = str(image_url.get("url") or "")
+            if value.startswith("data:"):
+                total += len(value.encode("ascii", "ignore"))
+    return total
+
+
+def _ensure_inline_request_budget(parts: Sequence[Mapping[str, Any]]) -> None:
+    if _inline_data_size(parts) > _INLINE_MEDIA_REQUEST_MAX_BYTES:
+        raise ValueError("inline_media_request_too_large")
+
+
+def _ensure_inline_raw_budget(raw_bytes: int, *, prompt: str) -> None:
+    # Gate aggregate local bytes before reading/base64-encoding every file.
+    prompt_bytes = len(str(prompt or "").encode("utf-8"))
+    if raw_bytes > max(0, _VIDEO_INLINE_MAX_BYTES - prompt_bytes):
+        raise ValueError("inline_media_request_too_large")
+
+
+def _ensure_inline_payload_budget(payload: Mapping[str, Any]) -> None:
+    # JSON framing and prompt text count too; this is the final wire guard.
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > _INLINE_MEDIA_REQUEST_MAX_BYTES:
+        raise ValueError("inline_media_request_too_large")
+
+
+def _gemini_inline_raw_preflight(
+    *, video_refs: Sequence[str], audio_refs: Sequence[str], allow_google_files: bool
+) -> int:
+    """Validate local media sizes before reading all inline candidates into memory."""
+    total = 0
+    for refs, kind, normalizer in (
+        (video_refs, "video", normalize_video_ref),
+        (audio_refs, "audio", normalize_audio_ref),
+    ):
+        for ref in refs:
+            normalized, problem = normalizer(str(ref or ""))
+            if not normalized:
+                raise ValueError(f"invalid_{kind}_ref:{problem or 'unknown'}")
+            if normalized.startswith(("http://", "https://")):
+                continue
+            size = _nonempty_local_media_size(Path(normalized), kind=kind)
+            if size > _VIDEO_INLINE_MAX_BYTES:
+                if not allow_google_files:
+                    raise ValueError(f"{kind}_file_too_large_for_inline_data")
+                continue
+            total += size
+    return total
+
+
+def _openai_inline_bytes(ref: str, *, kind: str) -> tuple[str, str]:
+    normalized, problem = (
+        normalize_video_ref(ref) if kind == "video" else normalize_audio_ref(ref)
+    )
+    if not normalized:
+        raise ValueError(f"invalid_{kind}_ref:{problem or 'unknown'}")
+    if normalized.startswith(("http://", "https://")):
+        raise ValueError(f"openai_gemini_inline_{kind}_remote_ref_unsupported")
+    path = Path(normalized)
+    if _nonempty_local_media_size(path, kind=kind) > _VIDEO_INLINE_MAX_BYTES:
+        raise ValueError(f"{kind}_file_too_large_for_inline_data")
+    default_mime = "video/mp4" if kind == "video" else "audio/wav"
+    mime = _canonical_local_media_mime(
+        path, default=mimetypes.guess_type(str(path))[0] or default_mime
+    )
+    return mime, base64.b64encode(path.read_bytes()).decode("ascii")
+
+
+async def _call_openai_gemini_inline_media(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    prompt: str,
+    video_refs: Sequence[str] = (),
+    audio_refs: Sequence[str] = (),
+    timeout: float = 200.0,
+) -> str:
+    """Use an explicitly configured OpenAI gateway extension with bounded inline data."""
+    selected_model = str(model or "").strip()
+    if not selected_model:
+        raise ValueError("openai_gemini_inline_model_missing")
+    raw_bytes = 0
+    for refs, kind, normalizer in (
+        (video_refs, "video", normalize_video_ref),
+        (audio_refs, "audio", normalize_audio_ref),
+    ):
+        for ref in refs:
+            normalized, problem = normalizer(str(ref or ""))
+            if not normalized:
+                raise ValueError(f"invalid_{kind}_ref:{problem or 'unknown'}")
+            if normalized.startswith(("http://", "https://")):
+                raise ValueError(f"openai_gemini_inline_{kind}_remote_ref_unsupported")
+            raw_bytes += _nonempty_local_media_size(Path(normalized), kind=kind)
+    _ensure_inline_raw_budget(raw_bytes, prompt=prompt)
+    content: list[dict[str, Any]] = []
+    for ref in video_refs:
+        mime, encoded = _openai_inline_bytes(str(ref or "").strip(), kind="video")
+        content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}})
+    for ref in audio_refs:
+        _mime, encoded = _openai_inline_bytes(str(ref or "").strip(), kind="audio")
+        content.append(
+            {"type": "input_audio", "input_audio": {"data": encoded, "format": _audio_format(str(ref or ""))}}
+        )
+    content.append({"type": "text", "text": str(prompt or "").strip() or "请分析这段媒体内容"})
+    endpoint = _openai_compatible_endpoint(
+        base_url, default_root="/v1", error_prefix="openai_gemini_inline"
+    )
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(max(20.0, min(float(timeout or 200.0), 600.0)), connect=15.0),
+        follow_redirects=False,
+    ) as client:
+        payload = {"model": selected_model, "messages": [{"role": "user", "content": content}]}
+        _ensure_inline_request_budget(content)
+        _ensure_inline_payload_budget(payload)
+        response = await client.post(
+            endpoint,
+            headers=_custom_openai_auth_headers(api_key, "auto"),
+            json=payload,
+        )
+        response.raise_for_status()
+        return _qwen_text_delta(response.json())
 
 
 async def _upload_gemini_video_file(
@@ -1362,6 +1557,13 @@ async def _call_gemini_media(
     parts: list[dict[str, Any]] = []
     for ref in image_refs:
         parts.append(_gemini_image_part(str(ref or "").strip()))
+    allow_google_files = _is_official_google_gemini_endpoint(base_url)
+    estimated_raw = (_inline_data_size(parts) * 3 // 4) + _gemini_inline_raw_preflight(
+        video_refs=video_refs,
+        audio_refs=audio_refs,
+        allow_google_files=allow_google_files,
+    )
+    _ensure_inline_raw_budget(estimated_raw, prompt=prompt)
     endpoint = _gemini_endpoint(base_url, model or _GEMINI_DEFAULT_MODEL)
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(max(20.0, min(float(timeout or 200.0), 600.0)), connect=15.0),
@@ -1370,42 +1572,42 @@ async def _call_gemini_media(
         uploaded_files: list[str] = []
         try:
             for ref in video_refs:
-                normalized, problem = normalize_video_ref(str(ref or "").strip())
+                normalized, _problem = normalize_video_ref(str(ref or "").strip())
                 if not normalized:
-                    raise ValueError(f"invalid_video_ref:{problem or 'unknown'}")
-                if normalized.startswith(("http://", "https://")) or Path(normalized).stat().st_size <= _VIDEO_INLINE_MAX_BYTES:
+                    raise ValueError("invalid_video_ref")
+                if (
+                    not normalized.startswith(("http://", "https://"))
+                    and Path(normalized).stat().st_size > _VIDEO_INLINE_MAX_BYTES
+                ):
+                    part, file_name = await _upload_gemini_video_file(
+                        client=client, api_key=api_key, base_url=base_url, auth_mode=auth_mode, path=Path(normalized)
+                    )
+                    parts.append(part)
+                    uploaded_files.append(file_name)
+                else:
                     parts.append(_gemini_video_part(normalized))
-                else:
-                    part, file_name = await _upload_gemini_video_file(
-                        client=client,
-                        api_key=api_key,
-                        base_url=base_url,
-                        auth_mode=auth_mode,
-                        path=Path(normalized),
-                    )
-                    parts.append(part)
-                    uploaded_files.append(file_name)
             for ref in audio_refs:
-                normalized, problem = normalize_audio_ref(str(ref or "").strip())
+                normalized, _problem = normalize_audio_ref(str(ref or "").strip())
                 if not normalized:
-                    raise ValueError(f"invalid_audio_ref:{problem or 'unknown'}")
-                if normalized.startswith(("http://", "https://")) or Path(normalized).stat().st_size <= _VIDEO_INLINE_MAX_BYTES:
-                    parts.append(_gemini_audio_part(normalized))
-                else:
+                    raise ValueError("invalid_audio_ref")
+                if (
+                    not normalized.startswith(("http://", "https://"))
+                    and Path(normalized).stat().st_size > _VIDEO_INLINE_MAX_BYTES
+                ):
                     part, file_name = await _upload_gemini_video_file(
-                        client=client,
-                        api_key=api_key,
-                        base_url=base_url,
-                        auth_mode=auth_mode,
-                        path=Path(normalized),
+                        client=client, api_key=api_key, base_url=base_url, auth_mode=auth_mode, path=Path(normalized)
                     )
                     parts.append(part)
                     uploaded_files.append(file_name)
+                else:
+                    parts.append(_gemini_audio_part(normalized))
+            _ensure_inline_request_budget(parts)
             parts.append({"text": str(prompt or "").strip() or "请分析这段媒体内容"})
             payload = {
                 "contents": [{"role": "user", "parts": parts}],
                 "generationConfig": {"temperature": 0.2},
             }
+            _ensure_inline_payload_budget(payload)
 
             async def _send(auth):  # noqa: ANN001, ANN202
                 return await client.post(
@@ -1605,6 +1807,7 @@ async def analyze_videos_with_route_or_fallback(
             "qwen_omni": "video_external_qwen_omni",
             "openai_mimo_v25": "video_external_mimo",
             "openai_custom_video_url": "video_external_custom",
+            "openai_gemini_inline": "video_external_openai_gemini_inline",
         }
         attempt_route = route_by_protocol.get(protocol, "video_external_fullmodal")
         if not fallback or not fallback.get("api_key"):
@@ -1656,6 +1859,11 @@ async def analyze_videos_with_route_or_fallback(
                     auth_mode=fallback.get("auth_mode", "auto"),
                     stream=str(fallback.get("stream", "false")).lower() == "true",
                     timeout=timeout,
+                )
+            elif protocol == "openai_gemini_inline":
+                result = await _call_openai_gemini_inline_media(
+                    api_key=fallback["api_key"], base_url=fallback.get("api_url", ""),
+                    model=fallback.get("model", ""), prompt=prompt, video_refs=refs, timeout=timeout,
                 )
             else:
                 result = await _call_gemini_media(
@@ -2008,6 +2216,11 @@ async def analyze_audios_with_route_or_fallback(
                     prompt=prompt,
                     audio_refs=refs,
                     timeout=timeout,
+                )
+            elif protocol == "openai_gemini_inline":
+                result = await _call_openai_gemini_inline_media(
+                    api_key=fallback["api_key"], base_url=fallback.get("api_url", ""),
+                    model=fallback.get("model", ""), prompt=prompt, audio_refs=refs, timeout=timeout,
                 )
             else:
                 result = await _call_gemini_media(

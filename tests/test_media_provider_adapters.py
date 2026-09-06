@@ -57,7 +57,7 @@ def test_auto_only_accepts_confirmed_official_video_contracts() -> None:
         ).supports_video is False
 
 
-def test_custom_gemini_gateway_requires_explicit_media_protocol() -> None:
+def test_gemini_api_type_is_a_probe_candidate_at_any_administrator_endpoint() -> None:
     inferred = adapters.resolve_media_provider_adapter(
         {
             "api_type": "gemini",
@@ -66,7 +66,11 @@ def test_custom_gemini_gateway_requires_explicit_media_protocol() -> None:
             "media_protocol": "auto",
         }
     )
-    assert inferred.supports_video is False
+    assert inferred.protocol == "gemini_native"
+    assert inferred.supports_video is True
+    # This is an administrator-declared wire contract only.  No successful
+    # provider/media verification is inferred by the adapter itself.
+    assert inferred.source == "official_preset"
 
     explicit = adapters.resolve_media_provider_adapter(
         {

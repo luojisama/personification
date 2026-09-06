@@ -136,7 +136,7 @@ def test_video_understanding_uses_structured_form_instead_of_json_editor() -> No
     assert "Qwen3.5-Omni 官方扩展" in app_config_js
     assert "qwen3.5-omni-plus" in app_config_js
     assert "qwen3.5-omni-flash" in app_config_js
-    assert "Gemini 原生 Files API" in app_config_js
+    assert "Gemini Native inline / 官方 Files" in app_config_js
     assert "MiMo-V2.5 官方扩展" in app_config_js
     assert "function renderVideoBudgetEditor" in app_config_js
     assert '"15":"15 秒"' in app_config_js

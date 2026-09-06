@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Mapping
-from urllib.parse import urlsplit
 
 from .provider_types import is_removed_provider_type
 
@@ -13,6 +12,7 @@ MEDIA_PROTOCOL_GEMINI = "gemini_native"
 MEDIA_PROTOCOL_ANTIGRAVITY = "antigravity_native"
 MEDIA_PROTOCOL_QWEN = "openai_qwen_omni"
 MEDIA_PROTOCOL_MIMO = "openai_mimo_v25"
+MEDIA_PROTOCOL_OPENAI_GEMINI_INLINE = "openai_gemini_inline"
 
 _KNOWN_PROTOCOLS = {
     MEDIA_PROTOCOL_AUTO,
@@ -21,6 +21,7 @@ _KNOWN_PROTOCOLS = {
     MEDIA_PROTOCOL_ANTIGRAVITY,
     MEDIA_PROTOCOL_QWEN,
     MEDIA_PROTOCOL_MIMO,
+    MEDIA_PROTOCOL_OPENAI_GEMINI_INLINE,
 }
 
 
@@ -48,6 +49,8 @@ def normalize_media_protocol(value: Any) -> str:
         "mimo": MEDIA_PROTOCOL_MIMO,
         "mimo_v25": MEDIA_PROTOCOL_MIMO,
         "mimo_v2_5": MEDIA_PROTOCOL_MIMO,
+        "gemini_inline": MEDIA_PROTOCOL_OPENAI_GEMINI_INLINE,
+        "openai_gemini": MEDIA_PROTOCOL_OPENAI_GEMINI_INLINE,
     }
     normalized = aliases.get(normalized, normalized)
     return normalized if normalized in _KNOWN_PROTOCOLS else MEDIA_PROTOCOL_AUTO
@@ -55,23 +58,17 @@ def normalize_media_protocol(value: Any) -> str:
 
 def _adapter(protocol: str, *, source: str) -> MediaProviderAdapter:
     if protocol == MEDIA_PROTOCOL_GEMINI:
-        return MediaProviderAdapter(protocol, True, True, "files_api", source)
+        # Native generateContent accepts bounded inlineData.  Files API is an
+        # optional large-file feature, not a prerequisite for an explicitly
+        # configured Gemini-compatible endpoint.
+        return MediaProviderAdapter(protocol, True, True, "inline_data", source)
     if protocol == MEDIA_PROTOCOL_ANTIGRAVITY:
         return MediaProviderAdapter(protocol, True, True, "inlineData_or_fileData", source)
     if protocol in {MEDIA_PROTOCOL_QWEN, MEDIA_PROTOCOL_MIMO}:
         return MediaProviderAdapter(protocol, True, True, "base64_or_url", source)
+    if protocol == MEDIA_PROTOCOL_OPENAI_GEMINI_INLINE:
+        return MediaProviderAdapter(protocol, True, True, "openai_inline_data", source)
     return MediaProviderAdapter(MEDIA_PROTOCOL_NONE, False, False, "none", source)
-
-
-def _is_google_gemini_endpoint(api_url: str) -> bool:
-    raw = str(api_url or "").strip()
-    if not raw:
-        return True
-    try:
-        host = str(urlsplit(raw).hostname or "").lower().rstrip(".")
-    except Exception:
-        return False
-    return host == "generativelanguage.googleapis.com" or host.endswith(".googleapis.com")
 
 
 def _official_protocol(api_type: str, api_url: str, model: str) -> str:
@@ -83,12 +80,11 @@ def _official_protocol(api_type: str, api_url: str, model: str) -> str:
         return MEDIA_PROTOCOL_QWEN
     if model_text == "mimo-v2.5":
         return MEDIA_PROTOCOL_MIMO
-    # AGY 模型目录没有稳定的远程能力探测契约；auto 模式保持 fail-closed。
-    if (
-        api in {"gemini", "gemini_official"}
-        and model_text.startswith("gemini-")
-        and _is_google_gemini_endpoint(api_url)
-    ):
+    # API type is an explicit administrator-declared wire contract.  It is a
+    # candidate for media probing, never proof that a third-party endpoint has
+    # implemented the capability.  Do not use a hostname or model spelling as
+    # a capability gate.
+    if api in {"gemini", "gemini_official"}:
         return MEDIA_PROTOCOL_GEMINI
     return MEDIA_PROTOCOL_NONE
 
@@ -116,6 +112,7 @@ __all__ = [
     "MEDIA_PROTOCOL_ANTIGRAVITY",
     "MEDIA_PROTOCOL_GEMINI",
     "MEDIA_PROTOCOL_MIMO",
+    "MEDIA_PROTOCOL_OPENAI_GEMINI_INLINE",
     "MEDIA_PROTOCOL_NONE",
     "MEDIA_PROTOCOL_QWEN",
     "MediaProviderAdapter",

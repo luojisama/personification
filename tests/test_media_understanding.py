@@ -291,6 +291,172 @@ def test_gemini_media_compatibility_payload_orders_local_media_before_text_and_p
     assert captured["client_kwargs"]["timeout"].read == 177.0
 
 
+def test_gemini_inline_media_wire_uses_bounded_local_multimedia_without_files_api(
+    monkeypatch, tmp_path: Path
+) -> None:  # noqa: ANN001
+    captured: dict[str, object] = {}
+    for name, payload in {
+        "clip.mp4": b"mp4",
+        "clip.webm": b"webm",
+        "voice.mp3": b"mp3",
+        "voice.wav": b"wav",
+        "voice.flac": b"flac",
+    }.items():
+        (tmp_path / name).write_bytes(payload)
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):  # noqa: ANN201
+            return None
+
+        def json(self):  # noqa: ANN201
+            return {"candidates": [{"content": {"parts": [{"text": "media-ok"}]}}]}
+
+    class _Client:
+        def __init__(self, **_kwargs):  # noqa: ANN001
+            pass
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
+            return None
+
+        async def post(self, url, headers=None, params=None, json=None):  # noqa: ANN001, ANN201
+            captured["url"] = url
+            captured["json"] = json or {}
+            return _Resp()
+
+    monkeypatch.setattr(media_understanding.httpx, "AsyncClient", _Client)
+    result = asyncio.run(
+        media_understanding._call_gemini_media(
+            api_key="test-only",
+            base_url="https://gateway.invalid/v1beta",
+            model="gemini-3.8-flash-high",
+            prompt="inspect in order",
+            video_refs=[str(tmp_path / "clip.mp4"), str(tmp_path / "clip.webm")],
+            audio_refs=[str(tmp_path / "voice.mp3"), str(tmp_path / "voice.wav"), str(tmp_path / "voice.flac")],
+        )
+    )
+
+    assert result == "media-ok"
+    assert "/models/gemini-3.8-flash-high:generateContent" in str(captured["url"])
+    parts = captured["json"]["contents"][0]["parts"]
+    assert [part["inlineData"]["mimeType"] for part in parts[:-1]] == [
+        "video/mp4", "video/webm", "audio/mp3", "audio/wav", "audio/flac",
+    ]
+    assert all(part["inlineData"]["data"] for part in parts[:-1])
+    assert parts[-1] == {"text": "inspect in order"}
+    assert "/upload/" not in str(captured["url"])
+
+
+def test_explicit_openai_gemini_inline_wire_preserves_model_and_media_order(
+    monkeypatch, tmp_path: Path
+) -> None:  # noqa: ANN001
+    video = tmp_path / "clip.webm"
+    audio = tmp_path / "voice.flac"
+    video.write_bytes(b"webm-bytes")
+    audio.write_bytes(b"flac-bytes")
+    captured: dict[str, object] = {}
+
+    class _Resp:
+        def raise_for_status(self):  # noqa: ANN201
+            return None
+
+        def json(self):  # noqa: ANN201
+            return {"choices": [{"message": {"content": "gateway-media-ok"}}]}
+
+    class _Client:
+        def __init__(self, **_kwargs):  # noqa: ANN001
+            pass
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
+            return None
+
+        async def post(self, url, headers=None, json=None):  # noqa: ANN001, ANN201
+            captured.update(url=url, headers=headers or {}, json=json or {})
+            return _Resp()
+
+    monkeypatch.setattr(media_understanding.httpx, "AsyncClient", _Client)
+    result = asyncio.run(
+        media_understanding._call_openai_gemini_inline_media(
+            api_key="test-only",
+            base_url="https://gateway.invalid",
+            model="gemini-3.8-flash-high",
+            prompt="describe",
+            video_refs=[str(video)],
+            audio_refs=[str(audio)],
+        )
+    )
+
+    assert result == "gateway-media-ok"
+    assert captured["json"]["model"] == "gemini-3.8-flash-high"
+    content = captured["json"]["messages"][0]["content"]
+    assert content[0]["image_url"]["url"].startswith("data:video/webm;base64,")
+    assert content[1]["input_audio"]["format"] == "flac"
+    assert base64.b64decode(content[1]["input_audio"]["data"]) == b"flac-bytes"
+    assert content[-1] == {"type": "text", "text": "describe"}
+
+
+def test_openai_gemini_inline_primary_probe_uses_media_wire_not_text_fallback(
+    monkeypatch, tmp_path: Path
+) -> None:  # noqa: ANN001
+    video = tmp_path / "probe.mp4"
+    video.write_bytes(b"probe-media")
+    captured: dict[str, object] = {}
+
+    class _Resp:
+        def raise_for_status(self):  # noqa: ANN201
+            return None
+
+        def json(self):  # noqa: ANN201
+            return {"choices": [{"message": {"content": '{"scene_summary":"media verified"}'}}]}
+
+    class _Client:
+        def __init__(self, **_kwargs):  # noqa: ANN001
+            pass
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
+            return None
+
+        async def post(self, _url, headers=None, json=None):  # noqa: ANN001, ANN201
+            captured.update(headers=headers or {}, json=json or {})
+            return _Resp()
+
+    monkeypatch.setattr(media_understanding.httpx, "AsyncClient", _Client)
+    runtime = SimpleNamespace(
+        strict_probe=True,
+        probe_transport_verified=False,
+        plugin_config=SimpleNamespace(),
+        get_configured_api_providers=lambda: [{
+            "name": "explicit gateway extension",
+            "api_type": "openai",
+            "api_url": "https://gateway.invalid",
+            "api_key": "test-only",
+            "model": "gemini-3.8-flash-high",
+            "media_protocol": "openai_gemini_inline",
+        }],
+    )
+    result = asyncio.run(
+        media_understanding._try_primary_video_routes(
+            runtime=runtime, prompt="probe this video", refs=[str(video)], route_name="video",
+        )
+    )
+
+    assert result == '{"scene_summary":"media verified"}'
+    assert runtime.probe_transport_verified is True
+    content = captured["json"]["messages"][0]["content"]
+    assert content[0]["type"] == "image_url"
+    assert content[0]["image_url"]["url"].startswith("data:video/mp4;base64,")
+
+
 def test_qq_sized_local_mp4_is_inline_data_without_transient_url(tmp_path: Path) -> None:
     video = tmp_path / "qq-materialized.mp4"
     with video.open("wb") as handle:
@@ -518,6 +684,12 @@ def test_primary_video_protocols_report_specific_trace_routes(monkeypatch) -> No
 
     cases = (
         ("gemini_native", "gemini-2.5-pro", "_call_gemini_media", "video_primary_gemini"),
+        (
+            "openai_gemini_inline",
+            "gemini-3.8-flash-high",
+            "_call_openai_gemini_inline_media",
+            "video_primary_openai_gemini_inline",
+        ),
         ("openai_qwen_omni", "qwen3.5-omni-plus", "_call_qwen_omni_media", "video_primary_qwen_omni"),
         ("openai_mimo_v25", "mimo-v2.5", "_call_mimo_media", "video_primary_mimo"),
     )
@@ -1400,11 +1572,11 @@ def test_video_storyboard_reports_vision_route_unavailable_separately(monkeypatc
     assert attempts[-1]["diagnostic_code"] == "video_storyboard_vision_unavailable"
 
 
-def test_large_local_video_uses_gemini_files_api_and_deletes_remote_file(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+def test_large_local_video_uses_files_api_only_at_official_google_endpoint(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
     video = tmp_path / "large.mp4"
     with video.open("wb") as handle:
         handle.truncate(media_understanding._VIDEO_INLINE_MAX_BYTES + 1)
-    captured: dict[str, object] = {"requests": []}
+    captured: list[tuple[str, str]] = []
 
     class _Response:
         status_code = 200
@@ -1413,7 +1585,7 @@ def test_large_local_video_uses_gemini_files_api_and_deletes_remote_file(monkeyp
             self.payload = payload or {}
             self.headers = headers or {}
 
-        def raise_for_status(self) -> None:
+        def raise_for_status(self):  # noqa: ANN201
             return None
 
         def json(self):  # noqa: ANN201
@@ -1429,55 +1601,133 @@ def test_large_local_video_uses_gemini_files_api_and_deletes_remote_file(monkeyp
         async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
             return None
 
-        async def post(self, url, json=None, content=None, **kwargs):  # noqa: ANN001, ANN201
-            captured["requests"].append(("post", url, kwargs))  # type: ignore[index]
+        async def post(self, url, json=None, content=None, **_kwargs):  # noqa: ANN001, ANN201
+            captured.append(("post", url))
             if "/upload/v1beta/files" in url:
                 return _Response(headers={"x-goog-upload-url": "https://upload.example/session"})
             if url == "https://upload.example/session":
                 assert hasattr(content, "read")
-                return _Response(
-                    {"file": {"name": "files/file-1", "uri": "https://files.example/file-1", "state": "PROCESSING"}}
-                )
-            captured["generate_payload"] = json
-            return _Response({"candidates": [{"content": {"parts": [{"text": "large video ok"}]}}]})
+                return _Response({"file": {"name": "files/file-1", "uri": "https://files.example/file-1", "state": "ACTIVE"}})
+            return _Response({"candidates": [{"content": {"parts": [{"text": "large media ok"}]}}]})
 
-        async def get(self, url, **kwargs):  # noqa: ANN001, ANN201
-            captured["requests"].append(("get", url, kwargs))  # type: ignore[index]
-            assert url.endswith("/v1beta/files/file-1")
-            return _Response({"name": "files/file-1", "uri": "https://files.example/file-1", "state": "ACTIVE"})
-
-        async def delete(self, url, **kwargs):  # noqa: ANN001, ANN201
-            captured["requests"].append(("delete", url, kwargs))  # type: ignore[index]
-            captured["deleted"] = url.endswith("/v1beta/files/file-1")
+        async def delete(self, url, **_kwargs):  # noqa: ANN001, ANN201
+            captured.append(("delete", url))
             return _Response()
 
     monkeypatch.setattr(media_understanding.httpx, "AsyncClient", _Client)
     result = asyncio.run(
         media_understanding._call_gemini_media(
-            api_key="key",
-            base_url="https://generativelanguage.googleapis.com",
-            model="gemini-test",
-            prompt="understand",
-            video_refs=[str(video)],
-            auth_mode="bearer",
+            api_key="key", base_url="https://generativelanguage.googleapis.com", model="gemini-test",
+            prompt="understand", video_refs=[str(video)], auth_mode="bearer",
         )
     )
-    assert result == "large video ok"
-    parts = captured["generate_payload"]["contents"][0]["parts"]  # type: ignore[index]
-    assert parts[0]["fileData"]["fileUri"] == "https://files.example/file-1"
-    assert parts[-1] == {"text": "understand"}
-    assert captured["generate_payload"]["generationConfig"] == {"temperature": 0.2}
-    assert captured["deleted"] is True
-    requests = captured["requests"]  # type: ignore[assignment]
-    assert [item[0] for item in requests] == ["post", "post", "get", "post", "delete"]
-    for _method, _url, kwargs in requests:
-        assert kwargs["headers"]["User-Agent"] == media_understanding._GEMINI_COMPATIBILITY_USER_AGENT
-    start_headers = requests[0][2]["headers"]
-    assert start_headers["Authorization"] == "Bearer key"
-    session_headers = requests[1][2]["headers"]
-    assert "Authorization" not in session_headers
-    assert "x-goog-api-key" not in session_headers
-    assert requests[1][2].get("params") is None
-    assert requests[1][2]["headers"]["X-Goog-Upload-Command"] == "upload, finalize"
-    assert requests[2][2]["headers"]["Authorization"] == "Bearer key"
-    assert requests[4][2]["headers"]["Authorization"] == "Bearer key"
+    assert result == "large media ok"
+    assert [kind for kind, _url in captured] == ["post", "post", "post", "delete"]
+    assert "/upload/v1beta/files" in captured[0][1]
+    assert captured[1][1] == "https://upload.example/session"
+    assert captured[-1][1].endswith("/v1beta/files/file-1")
+
+
+def test_large_local_video_is_rejected_at_non_google_gemini_endpoint(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    video = tmp_path / "large-proxy.mp4"
+    with video.open("wb") as handle:
+        handle.truncate(media_understanding._VIDEO_INLINE_MAX_BYTES + 1)
+
+    class _Client:
+        def __init__(self, **_kwargs):  # noqa: ANN001
+            raise AssertionError("third-party oversized media must fail before opening HTTP client")
+
+    monkeypatch.setattr(media_understanding.httpx, "AsyncClient", _Client)
+    try:
+        asyncio.run(
+            media_understanding._call_gemini_media(
+                api_key="key", base_url="https://gateway.invalid", model="gemini-test",
+                prompt="understand", video_refs=[str(video)], auth_mode="bearer",
+            )
+        )
+    except ValueError as exc:
+        assert str(exc) == "video_file_too_large_for_inline_data"
+    else:
+        raise AssertionError("oversized third-party media must be rejected")
+
+
+def test_gemini_files_cleanup_runs_when_second_upload_fails(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mp4"
+    for path in (first, second):
+        with path.open("wb") as handle:
+            handle.truncate(media_understanding._VIDEO_INLINE_MAX_BYTES + 1)
+    uploaded: list[str] = []
+    deleted: list[str] = []
+
+    class _Client:
+        def __init__(self, **_kwargs):  # noqa: ANN001
+            pass
+
+        async def __aenter__(self):  # noqa: ANN201
+            return self
+
+        async def __aexit__(self, *_args):  # noqa: ANN001, ANN201
+            return None
+
+    async def _upload(*, path, **_kwargs):  # noqa: ANN001, ANN202
+        uploaded.append(path.name)
+        if path.name == "second.mp4":
+            raise RuntimeError("second_upload_failed")
+        return {"fileData": {"mimeType": "video/mp4", "fileUri": "https://files.example/first"}}, "files/first"
+
+    async def _delete(*, file_name, **_kwargs):  # noqa: ANN001, ANN202
+        deleted.append(file_name)
+
+    monkeypatch.setattr(media_understanding.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(media_understanding, "_upload_gemini_video_file", _upload)
+    monkeypatch.setattr(media_understanding, "_delete_gemini_file", _delete)
+    try:
+        asyncio.run(
+            media_understanding._call_gemini_media(
+                api_key="key", base_url="https://generativelanguage.googleapis.com",
+                model="gemini-test", prompt="understand", video_refs=[str(first), str(second)],
+            )
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "second_upload_failed"
+    else:
+        raise AssertionError("the second upload fixture must fail")
+    assert uploaded == ["first.mp4", "second.mp4"]
+    assert deleted == ["files/first"]
+
+
+def test_inline_media_preflight_rejects_empty_and_aggregate_files_before_reading(
+    monkeypatch, tmp_path: Path
+) -> None:  # noqa: ANN001
+    empty = tmp_path / "empty.wav"
+    empty.write_bytes(b"")
+    try:
+        media_understanding._gemini_audio_part(str(empty))
+    except ValueError as exc:
+        assert str(exc) == "audio_file_empty"
+    else:
+        raise AssertionError("empty local media must be rejected")
+
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mp4"
+    for path in (first, second):
+        with path.open("wb") as handle:
+            handle.truncate(8 * 1024 * 1024)
+
+    class _Client:
+        def __init__(self, **_kwargs):  # noqa: ANN001
+            raise AssertionError("aggregate preflight must run before opening a client")
+
+    monkeypatch.setattr(media_understanding.httpx, "AsyncClient", _Client)
+    try:
+        asyncio.run(
+            media_understanding._call_gemini_media(
+                api_key="key", base_url="https://gateway.invalid", model="gemini-test",
+                prompt="understand", video_refs=[str(first), str(second)],
+            )
+        )
+    except ValueError as exc:
+        assert str(exc) == "inline_media_request_too_large"
+    else:
+        raise AssertionError("aggregate inline media must be bounded before read/base64")

@@ -301,7 +301,8 @@ function videoConfigMiB(value, fallback) {
 function videoProviderNote(provider) {
   if (provider === "openai_qwen_omni") return "Qwen 使用官方 video_url / input_audio 扩展并要求流式返回；本地 Base64 编码后必须小于 10 MiB。";
   if (provider === "openai_mimo_v25") return "MiMo 使用官方 video_url、fps 与媒体分辨率参数；远程 URL 与本地 Base64 受各自官方上限约束。";
-  if (provider === "gemini_native") return "Gemini 使用原生 Files API 与 generateContent；不会把视频伪装成 OpenAI 图片内容块。";
+  if (provider === "gemini_native") return "Gemini Native 小媒体使用受控 inlineData；仅官方 Google 端点可将超限本地媒体经 Files API 上传，再调用 generateContent。";
+  if (provider === "openai_gemini_inline") return "显式网关扩展：音频使用 input_audio，视频使用 data: URL image_url；只接受本地受控媒体，不根据模型名或域名猜测支持。";
   if (provider === "openai_custom_video_url") return "自定义协议只发送固定 video_url 内容块，不支持原始 JSON 模板或任意脚本。";
   return "外部全模态 Provider 已关闭；主模型失败后将继续网页路线或最终分镜兜底。";
 }
@@ -695,7 +696,7 @@ function renderVideoUnderstandingEditor(items) {
       <div class="video-config-grid">
         ${videoConfigToggle("personification_fullmodal_provider_enabled", value("personification_fullmodal_provider_enabled", false), "启用外部全模态 API", "主模型与消费者网页不可用时允许调用。")}
         ${videoConfigSelect("personification_fullmodal_provider_protocol", provider, [
-          {value:"gemini_native",label:"Gemini 原生 Files API（推荐）"},{value:"openai_qwen_omni",label:"Qwen3.5-Omni 官方扩展"},{value:"openai_mimo_v25",label:"MiMo-V2.5 官方扩展"},{value:"openai_custom_video_url",label:"自定义 OpenAI video_url"},{value:"disabled",label:"禁用"}
+          {value:"gemini_native",label:"Gemini Native inline / 官方 Files"},{value:"openai_gemini_inline",label:"OpenAI Gemini inline 网关扩展"},{value:"openai_qwen_omni",label:"Qwen3.5-Omni 官方扩展"},{value:"openai_mimo_v25",label:"MiMo-V2.5 官方扩展"},{value:"openai_custom_video_url",label:"自定义 OpenAI video_url"},{value:"disabled",label:"禁用"}
         ], "协议")}
         ${videoConfigInput("personification_fullmodal_provider_model", providerModel, "模型", {list:"video-native-models",placeholder:"留空使用协议预设模型",description:"自定义协议必须明确填写模型 ID。"})}
         ${videoConfigInput("personification_fullmodal_provider_api_key", providerKeyConfigured?"***":"", "API Key", {kind:"secret"})}
@@ -1553,9 +1554,10 @@ function renderApiProviderCard(field, provider, index) {
   const mediaProtocolFieldHtml = () => {
     const value = String(provider.media_protocol || "auto");
     const options = [
-      ["auto", "自动（仅官方已确认模型）"],
+      ["auto", "自动（声明 API 类型后待探测验证）"],
       ["none", "无音视频输入"],
-      ["gemini_native", "Gemini 原生 Files API"],
+      ["gemini_native", "Gemini Native inline / 官方 Files"],
+      ["openai_gemini_inline", "OpenAI Gemini inline 网关扩展"],
       ["antigravity_native", "AGY 原生 inlineData / fileData"],
       ["openai_qwen_omni", "Qwen3.5-Omni video_url / input_audio"],
       ["openai_mimo_v25", "MiMo-V2.5 video_url / input_audio"],
