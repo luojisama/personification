@@ -5,7 +5,7 @@ import json
 import re
 import threading
 import time
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
@@ -76,7 +76,7 @@ _SOURCE_PRIORITY = {
 _DEFAULT_TTL_SECONDS: dict[CapabilitySource, float | None] = {
     CapabilitySource.MANUAL: None,
     CapabilitySource.RUNTIME_SUCCESS: 7 * 24 * 60 * 60,
-    CapabilitySource.PROBE: 24 * 60 * 60,
+    CapabilitySource.PROBE: None,
     CapabilitySource.PROVIDER_CATALOG: 24 * 60 * 60,
     CapabilitySource.MODEL_CATALOG: 24 * 60 * 60,
     CapabilitySource.HEURISTIC: 60 * 60,
@@ -154,7 +154,7 @@ def api_url_fingerprint(api_url: Any) -> str:
 
 @dataclass(frozen=True, slots=True)
 class RouteKey:
-    provider: str
+    provider: str = field(compare=False)
     api_type: str
     api_url_fingerprint: str
     model: str
@@ -180,8 +180,15 @@ class RouteKey:
 
     @property
     def fingerprint(self) -> str:
+        # Provider name is an operator-facing display label, not a request
+        # identity.  Renaming it must not invalidate verified evidence.
         payload = json.dumps(
-            self.to_safe_dict(),
+            {
+                "api_type": self.api_type,
+                "api_url_fingerprint": self.api_url_fingerprint,
+                "model": self.model,
+                "media_protocol": self.media_protocol,
+            },
             ensure_ascii=True,
             sort_keys=True,
             separators=(",", ":"),
@@ -321,8 +328,9 @@ class RouteCapabilityRegistry:
             if previous == route_key:
                 return False
             self._route_bindings[name] = route_key
-            if previous is not None and previous not in self._route_bindings.values():
-                self._remove_route_evidence_locked(previous)
+            # A fingerprint change triggers a fresh probe for the new route,
+            # but old evidence is audit history.  Do not erase it merely
+            # because a display name, endpoint, protocol, or encoding changed.
             return True
 
     def configure_route(

@@ -40,9 +40,9 @@ def test_route_key_uses_safe_normalized_url_fingerprint() -> None:
     assert "example.test" not in serialized
 
 
-def test_route_identity_includes_provider_protocol_model_and_media_protocol() -> None:
+def test_route_identity_ignores_display_name_but_keeps_protocol_model_and_encoding() -> None:
     baseline = _route()
-    assert _route(provider="backup") != baseline
+    assert _route(provider="renamed display") == baseline
     assert _route(api_type="anthropic") != baseline
     assert _route(model="other-model") != baseline
     assert _route(media_protocol="gemini-native") != baseline
@@ -200,7 +200,7 @@ def test_expired_stronger_evidence_falls_back_to_weaker_current_evidence() -> No
     assert selected.source == capabilities.CapabilitySource.HEURISTIC
 
 
-def test_route_reconfiguration_invalidates_orphaned_old_evidence() -> None:
+def test_route_reconfiguration_preserves_old_evidence_but_uses_new_route_key() -> None:
     registry = capabilities.RouteCapabilityRegistry(clock=lambda: 100.0)
     old_key = registry.configure_route(
         "agent",
@@ -220,7 +220,7 @@ def test_route_reconfiguration_invalidates_orphaned_old_evidence() -> None:
     )
 
     assert new_key != old_key
-    assert registry.get(old_key, "function_call").state == capabilities.CapabilityState.UNKNOWN
+    assert registry.get(old_key, "function_call").state == capabilities.CapabilityState.SUPPORTED
     assert registry.route_key("agent") == new_key
 
 

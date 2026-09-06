@@ -104,6 +104,16 @@ class Config(BaseModel):
     personification_image_input_mode: str = "auto"
     personification_image_detail: str = "auto"
     personification_visual_probe_timeout_seconds: float = 45.0
+    # Route capability probes are isolated management reads: they never use
+    # chat fallback or QQ delivery. Daily execution is enabled and coalesced.
+    personification_route_probe_daily_enabled: bool = True
+    personification_route_probe_daily_hour: int = 3
+    personification_route_probe_daily_minute: int = 30
+    personification_route_probe_item_timeout_seconds: float = 45.0
+    personification_route_probe_route_budget_seconds: float = 480.0
+    personification_route_probe_retention_days: int = 90
+    personification_controlled_moderation_enabled: bool = False
+    personification_controlled_moderation_authorized_groups: List[str] = []
     personification_sticker_vision_max: int = 3
     personification_gif_understanding_enabled: bool = False
     personification_gif_understanding_timeout: float = 12.0
