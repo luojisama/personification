@@ -20,10 +20,10 @@ from .paths import get_data_dir
 from .safe_media_download import SafeMediaDownloadError, download_public_media_to_path
 
 
-MediaOrigin = Literal["current", "quoted", "batch", "antecedent"]
+MediaOrigin = Literal["current", "quoted", "batch", "antecedent", "forward"]
 MediaReferenceRole = Literal["current", "selected_referent", "address_only", "background"]
 
-_ALLOWED_ORIGINS = {"current", "quoted", "batch", "antecedent"}
+_ALLOWED_ORIGINS = {"current", "quoted", "batch", "antecedent", "forward"}
 _ALLOWED_REFERENCE_ROLES = {"current", "selected_referent", "address_only", "background"}
 _ALLOWED_KINDS = {"image", "sticker", "gif", "mface", "video", "audio", "unknown"}
 _MEDIA_RESOLUTION_CODES = {

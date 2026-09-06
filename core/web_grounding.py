@@ -10,6 +10,13 @@ from urllib.parse import quote
 import httpx
 
 
+def _iter_forward_nodes_in_order(nodes: Any):
+    """Yield every normalised forward node in source order, including children."""
+    for node in tuple(nodes or ()):
+        yield node
+        yield from _iter_forward_nodes_in_order(getattr(node, "children", ()) or ())
+
+
 # personification-semantic-boundary: grounding-context-only
 # Keyword buckets here only choose web-search context shape. They must not be
 # used as normal-chat intent routing, emotion inference, TTS/sticker mood, or
@@ -86,6 +93,36 @@ async def extract_forward_message_content(
                 if not isinstance(messages, list):
                     messages = [forward_data] if isinstance(forward_data, dict) else []
                 
+                # The shared normalizer enforces depth/node/text bounds and
+                # retains source order and sender provenance.  Its output is
+                # untrusted conversation evidence, never a prompt authority.
+                from .shared_content import normalize_merged_forward
+                bundle = normalize_merged_forward(messages[:max_nodes])
+                rendered_nodes = 0
+                for node in _iter_forward_nodes_in_order(bundle.nodes):
+                    if rendered_nodes >= max_nodes:
+                        all_content.append("[不可信转发记录：内容已按安全上限截断]")
+                        break
+                    rendered_nodes += 1
+                    sender = node.sender
+                    text = str(node.text or "").strip()
+                    media = tuple(getattr(node, "media_refs", ()) or ())
+                    if media:
+                        # The URL/file reference is deliberately not narrated
+                        # as vision evidence.  Keep only a neutral marker and
+                        # the source node so later media projection may handle
+                        # it once, under its own controlled transport budget.
+                        text = (text + " " if text else "") + "[转发媒体：尚未理解]"
+                    if text:
+                        author = str(sender.nickname or sender.user_id or "未知发送者").strip()
+                        ref = str(node.node_id or f"node:{rendered_nodes - 1}").strip()
+                        all_content.append(f"[不可信转发记录 #{rendered_nodes} 来源={ref} 作者={author}] {text}")
+                if bundle.truncated:
+                    all_content.append("[不可信转发记录：内容已按安全上限截断]")
+                # Legacy fallback only applies when normalization found no
+                # readable nodes (e.g. adapter-specific expanded payload).
+                if bundle.nodes:
+                    continue
                 for i, node in enumerate(messages[:max_nodes]):
                     if not isinstance(node, dict):
                         continue
