@@ -1397,14 +1397,15 @@ def test_media_upload_probe_streams_a_bounded_sample_then_cleans_it(monkeypatch,
 
     async def _fake_run(
         _runtime,
-        route_fingerprint,
+        route_key,
+        provider,
         capability,
         *,
         media_path=None,
         sample_mode="builtin",
         sample_id="",
     ):  # noqa: ANN001
-        assert route_fingerprint == key.fingerprint
+        assert route_key.fingerprint == key.fingerprint
         assert capability == "audio_input"
         assert sample_mode == "upload"
         assert sample_id == ""
@@ -1416,9 +1417,9 @@ def test_media_upload_probe_streams_a_bounded_sample_then_cleans_it(monkeypatch,
             route_capabilities.CapabilityObservation.PARSE_ERROR,
             "audio_input_custom_media_transport_verified",
         )
-        return "unknown", "audio_input_custom_media_transport_verified"
+        return v2_routes.ProbeResult("unknown", "inconclusive", "audio_input_custom_media_transport_verified", transport_verified=True)
 
-    monkeypatch.setattr(v2_routes, "_run_route_capability_probe", _fake_run)
+    monkeypatch.setattr(v2_routes, "run_route_probe", _fake_run)
 
     class _Request:
         headers = {
@@ -1445,7 +1446,7 @@ def test_media_upload_probe_streams_a_bounded_sample_then_cleans_it(monkeypatch,
             confirmed=True,
             _=None,
         )
-        await asyncio.sleep(0)
+        await v2_routes._route_probe_service(runtime).wait(report["operation_id"])
         await asyncio.sleep(0)
         return report
 

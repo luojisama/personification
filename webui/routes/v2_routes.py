@@ -30,6 +30,8 @@ from ...core.operation_diagnostics import diagnostic as operation_diagnostic
 from ...core.operation_diagnostics import step as operation_step
 from ...core.route_capabilities import CAPABILITY_NAMES, DEFAULT_ROUTE_CAPABILITY_REGISTRY
 from ...core.route_capabilities import CapabilityObservation, RouteKey
+from ...core.route_probe_service import ProbeResult, RouteProbeService, get_route_probe_service, restore_route_probe_facts
+from ...core.route_probe_runtime import run_route_probe
 from ...core.qzone_capability_matrix import DEFAULT_QZONE_CAPABILITY_MATRIX
 from ...core.runtime_events import get_runtime_event_bus
 from ...core.runtime_events import publish_runtime_event
@@ -864,6 +866,13 @@ def _route_probe_catalog() -> dict[str, dict[str, Any]]:
 
 def _route_probe_task_key(route_fingerprint: str, capability: str) -> tuple[str, str]:
     return str(route_fingerprint or ""), str(capability or "")
+
+
+def _route_probe_service(runtime: Any) -> RouteProbeService:
+    """Return the durable operation service without exposing its database path."""
+    service = get_route_probe_service(runtime)
+    restore_route_probe_facts(DEFAULT_ROUTE_CAPABILITY_REGISTRY, service)
+    return service
 
 
 def _ensure_route_probe_idle(route_fingerprint: str, capability: str) -> None:
@@ -1723,24 +1732,19 @@ async def _run_route_capability_probe(
     sample_mode: str = "builtin",
     sample_id: str = "",
 ) -> tuple[str, str]:
-    if capability == "image_input":
-        return await _run_route_visual_probe(runtime, route_fingerprint)
-    if capability == "function_call":
-        return await _run_route_function_call_probe(runtime, route_fingerprint)
-    if capability == "native_web_search":
-        return await _run_route_native_search_probe(runtime, route_fingerprint)
-    if capability == "reasoning":
-        return await _run_route_reasoning_probe(runtime, route_fingerprint)
-    if capability in _ROUTE_MEDIA_PROBE_SPECS:
-        return await _run_route_media_probe(
-            runtime,
-            route_fingerprint,
-            capability,
-            media_path,
-            sample_mode=sample_mode,
-            sample_id=sample_id,
-        )
-    return "unknown", "probe_unavailable"
+    # Production entrypoint: all WebUI, daily and durable operations converge
+    # on the framework-neutral core runner.  The older helpers below remain
+    # compatibility seams for focused tests only.
+    target = _route_probe_target(runtime, route_fingerprint)
+    if target is None:
+        _record_unavailable_route_probe(route_fingerprint, capability)
+        return "unknown", "probe_route_caller_unavailable"
+    _route_name, route_key, provider = target
+    result = await run_route_probe(
+        runtime, route_key, provider, capability,
+        media_path=media_path, sample_mode=sample_mode, sample_id=sample_id,
+    )
+    return result.capability_state, result.detail_code
 
 
 class _SilentProbeLogger:
@@ -3072,10 +3076,19 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
         outcome: str = Query(default="", max_length=32),
         target: str = Query(default="", max_length=64),
         cursor: int = Query(default=0, ge=0),
+        page: int = Query(default=0, ge=0),
         limit: int = Query(default=50, ge=1, le=100),
         _: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
-        return await run_in_threadpool(proactive_diagnostics.query_page, scope=scope, outcome=outcome, target=target, cursor=cursor, limit=limit)
+        return await run_in_threadpool(
+            proactive_diagnostics.query_page,
+            scope=scope,
+            outcome=outcome,
+            target=target,
+            cursor=cursor,
+            page=page,
+            limit=limit,
+        )
 
     @router.get("/proactive/next-eligible")
     async def proactive_next_eligible(
@@ -3496,7 +3509,12 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
     async def route_capabilities(
         _: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
-        return {"items": DEFAULT_ROUTE_CAPABILITY_REGISTRY.snapshot()}
+        service = _route_probe_service(runtime)
+        rows = DEFAULT_ROUTE_CAPABILITY_REGISTRY.snapshot()
+        for row in rows:
+            fingerprint = str(row.get("route_fingerprint") or "")
+            row["probe_facts"] = {capability: service.store.facts(fingerprint, capability) for capability in CAPABILITY_NAMES}
+        return {"items": rows}
 
     @router.get("/routes/capabilities")
     async def paged_route_capabilities(
@@ -3505,6 +3523,7 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
         search: str = Query(default=""),
         _: AdminIdentity = Depends(require_admin),
     ) -> dict[str, Any]:
+        service = _route_probe_service(runtime)
         params = normalize_pagination(page=page, page_size=page_size)
         needle = str(search or "").strip().casefold()
         rows = []
@@ -3521,7 +3540,18 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                 "probe_statuses": _route_probe_statuses(str(item.get("route_fingerprint") or "")),
                 "probe_results": _route_probe_results(str(item.get("route_fingerprint") or "")),
                 "probe_status": _route_probe_status(str(item.get("route_fingerprint") or "")),
+                "probe_facts": {capability: service.store.facts(str(item.get("route_fingerprint") or ""), capability) for capability in CAPABILITY_NAMES},
             }
+            for capability, facts in flat["probe_facts"].items():
+                operation = facts.get("latest_attempt")
+                if not operation:
+                    continue
+                status = operation["status"]
+                legacy_status = "finished" if status in {"succeeded", "inconclusive", "skipped"} else "failed" if status in {"failed", "cancelled", "interrupted"} else "running" if status == "cancel_requested" else status
+                flat["probe_statuses"][capability] = legacy_status
+                flat["probe_results"][capability] = {**operation, "status": legacy_status}
+            statuses = set(flat["probe_statuses"].values())
+            flat["probe_status"] = next((status for status in ("running", "queued", "failed", "finished") if status in statuses), "idle")
             haystack = " ".join(str(value) for value in flat.values()).casefold()
             if not needle or needle in haystack:
                 rows.append(flat)
@@ -3531,72 +3561,111 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             params=params,
         ).to_dict()
 
-    async def _finish_probe(
-        route_fingerprint: str,
-        capability: str,
-        *,
-        media_path: Path | None = None,
-        cleanup_dir: Path | None = None,
-        sample_mode: str = "builtin",
-        sample_id: str = "",
-    ) -> None:
-        task = _ROUTE_PROBE_TASKS.get(_route_probe_task_key(route_fingerprint, capability))
-        if task is None:
-            if cleanup_dir is not None:
-                _cleanup_route_probe_upload(cleanup_dir)
-            return
-        try:
+    async def _queue_compat_probe(
+        route_fingerprint: str, capability: str, *,
+        media_path: Path | None = None, cleanup_dir: Path | None = None,
+        sample_mode: str = "builtin", sample_id: str = "",
+    ) -> dict[str, Any]:
+        service = _route_probe_service(runtime)
+        task_key = _route_probe_task_key(route_fingerprint, capability)
+        task = _ROUTE_PROBE_TASKS[task_key]
+
+        async def runner() -> ProbeResult:
             task.update({"status": "running", "started_at": time.time()})
-            try:
-                capability_state, detail_code = await _run_route_capability_probe(
-                    runtime,
-                    route_fingerprint,
-                    capability,
-                    media_path=media_path,
-                    sample_mode=sample_mode,
-                    sample_id=sample_id,
-                )
-            except Exception:
-                capability_state = "unknown"
-                detail_code = "probe_internal_failed"
-                route = _route_key_for_fingerprint(route_fingerprint)
-                if route is not None:
-                    _record_route_probe_observation(
-                        route[1],
-                        capability,
-                        CapabilityObservation.PARSE_ERROR,
-                        detail_code,
-                    )
-            route = _route_key_for_fingerprint(route_fingerprint)
-            verification_state = "not_run"
-            if route is not None:
-                verification_state = DEFAULT_ROUTE_CAPABILITY_REGISTRY.get(
-                    route[1], capability
-                ).verification_state.value
-            task.update(
-                {
-                    "status": "finished",
-                    "finished_at": time.time(),
-                    "capability_state": capability_state,
-                    "verification_state": verification_state,
-                    "detail_code": detail_code,
-                    "sample_mode": sample_mode if capability in _ROUTE_MEDIA_PROBE_SPECS else "",
-                }
+            target = _route_probe_target(runtime, route_fingerprint)
+            if target is None:
+                return ProbeResult(detail_code="probe_route_caller_unavailable")
+            return await run_route_probe(
+                runtime, target[1], target[2], capability,
+                media_path=media_path, sample_mode=sample_mode, sample_id=sample_id,
             )
-            publish_runtime_event(
-                "provider.status_changed",
-                payload={
-                    "route_fingerprint": route_fingerprint,
-                    "capability": capability,
-                    "probe_status": "finished",
-                    "capability_state": capability_state,
-                    "verification_state": verification_state,
-                    "detail_code": detail_code,
-                },
-            )
-        finally:
+
+        def finished() -> None:
+            operation = service.store.get(str(task.get("operation_id") or "")) or {}
+            task.update({
+                **operation,
+                "status": "finished" if operation.get("status") in {"succeeded", "inconclusive", "skipped"} else "failed",
+            })
             if cleanup_dir is not None:
                 _cleanup_route_probe_upload(cleanup_dir)
+
+        operation = await service.queue(
+            route_fingerprint=route_fingerprint, capability=capability, runner=runner,
+            source="manual", probe_version="v1", on_done=finished,
+        )
+        task["operation_id"] = operation["operation_id"]
+        return operation
+
+    @router.get("/route-probe-operations")
+    async def list_route_probe_operations(
+        route_fingerprint: str = Query(default=""),
+        status: str = Query(default=""),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        """Bounded durable history; DTO intentionally excludes payloads and URLs."""
+        return _route_probe_service(runtime).store.list(
+            route_fingerprint=route_fingerprint, status=status, page=page, page_size=page_size
+        )
+
+    @router.get("/route-probe-operations/{operation_id}")
+    async def get_route_probe_operation(
+        operation_id: str, _: AdminIdentity = Depends(require_admin)
+    ) -> dict[str, Any]:
+        operation = _route_probe_service(runtime).store.get(operation_id)
+        if operation is None:
+            raise HTTPException(status_code=404, detail={"code": "route_probe_operation_not_found", "message": "未找到能力探针任务。"})
+        operation["facts"] = _route_probe_service(runtime).store.facts(
+            operation["route_fingerprint"], operation["capability"]
+        )
+        return operation
+
+    @router.delete("/route-probe-operations/{operation_id}")
+    async def cancel_route_probe_operation(
+        operation_id: str, _: AdminIdentity = Depends(require_admin)
+    ) -> dict[str, Any]:
+        operation = await _route_probe_service(runtime).cancel(operation_id)
+        if operation is None:
+            raise HTTPException(status_code=404, detail={"code": "route_probe_operation_not_found", "message": "未找到能力探针任务。"})
+        return operation
+
+    @router.post("/route-probe-operations")
+    async def queue_durable_route_probe(
+        body: dict[str, Any] = Body(default_factory=dict),
+        _: AdminIdentity = Depends(require_admin),
+    ) -> dict[str, Any]:
+        route_fingerprint = str(body.get("route_fingerprint") or "").strip()
+        capability = str(body.get("capability") or "image_input").strip().lower()
+        if capability not in CAPABILITY_NAMES or _route_key_for_fingerprint(route_fingerprint) is None:
+            raise HTTPException(status_code=422, detail={"code": "route_probe_target_invalid", "message": "路由或能力无效，未执行探针。"})
+        catalog = _route_probe_catalog()[capability]
+        if not catalog.get("available"):
+            raise HTTPException(status_code=409, detail={"code": "route_probe_unavailable", "message": "当前运行时没有可安全执行的该能力探针。"})
+        sample_id = str(body.get("sample_id") or "").strip()[:80]
+        if capability in _ROUTE_MEDIA_PROBE_SPECS:
+            sample = get_diagnostic_media_sample(capability, sample_id)
+            if sample is None or not validate_diagnostic_media_sample(sample)[0]:
+                raise HTTPException(status_code=409, detail={"code": "builtin_sample_not_available", "message": "内置媒体样例不可用；未调用 Provider。"})
+            sample_id = sample.sample_id
+
+        async def runner() -> ProbeResult:
+            route = _route_key_for_fingerprint(route_fingerprint)
+            target = _route_probe_target(runtime, route_fingerprint)
+            if route is None or target is None:
+                return ProbeResult(detail_code="probe_route_caller_unavailable")
+            return await run_route_probe(runtime, route[1], target[2], capability, sample_id=sample_id)
+
+        operation = await _route_probe_service(runtime).queue(
+            route_fingerprint=route_fingerprint, capability=capability, runner=runner,
+            source="manual", probe_version="v1",
+        )
+        return operation_diagnostic(
+            ok=True, code="route_probe_queued", phase="queued", title="路由能力探针已排队",
+            message="探针异步执行，不占聊天回合预算，也不会发送 QQ 消息。",
+            steps=(operation_step("probe", "执行能力探针", "pending", "等待任务开始。"),),
+            retryable=False, operation_id=operation["operation_id"],
+        )
 
     @router.post("/routes/capabilities/{route_fingerprint}/probes")
     async def queue_route_probe(
@@ -3679,18 +3748,8 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             "capability": capability,
             "sample_mode": sample_mode if capability in _ROUTE_MEDIA_PROBE_SPECS else "",
         }
-        _prune_terminal_tasks(
-            _ROUTE_PROBE_TASKS,
-            terminal_states={"finished", "failed"},
-            state_key="status",
-        )
-        asyncio.create_task(
-            _finish_probe(
-                route_fingerprint,
-                capability,
-                sample_mode=sample_mode,
-                sample_id=sample_id,
-            )
+        durable = await _queue_compat_probe(
+            route_fingerprint, capability, sample_mode=sample_mode, sample_id=sample_id,
         )
         return operation_diagnostic(
             ok=True,
@@ -3700,7 +3759,7 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             message="探针在管理任务中异步执行，不占聊天回合预算，也不会发送 QQ 消息。",
             steps=(operation_step("probe", "执行能力探针", "pending", "等待 Provider 探针任务开始。"),),
             retryable=False,
-            operation_id=f"{route_fingerprint}:{capability}",
+            operation_id=durable["operation_id"],
         )
 
     @router.post("/routes/capabilities/{route_fingerprint}/probes/media")
@@ -3859,19 +3918,9 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                 "media_upload": True,
                 "sample_mode": "upload",
             }
-            _prune_terminal_tasks(
-                _ROUTE_PROBE_TASKS,
-                terminal_states={"finished", "failed"},
-                state_key="status",
-            )
-            asyncio.create_task(
-                _finish_probe(
-                    route_fingerprint,
-                    capability,
-                    media_path=target_path,
-                    cleanup_dir=probe_dir,
-                    sample_mode="upload",
-                )
+            durable = await _queue_compat_probe(
+                route_fingerprint, capability, media_path=target_path,
+                cleanup_dir=probe_dir, sample_mode="upload",
             )
             handed_to_probe = True
             return operation_diagnostic(
@@ -3886,7 +3935,7 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
                     operation_step("cleanup", "删除临时媒体样例", "pending", "探针结束后自动执行。"),
                 ),
                 retryable=False,
-                operation_id=f"{route_fingerprint}:{capability}",
+                operation_id=durable["operation_id"],
             )
         finally:
             if not handed_to_probe:
@@ -4101,6 +4150,7 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
     async def logs(
         limit: int = Query(default=100, ge=1, le=500),
         cursor: int = Query(default=0, ge=0),
+        page: int = Query(default=0, ge=0),
         level: str = Query(default="", max_length=16),
         search: str = Query(default="", max_length=120),
         trace_id: str = Query(default="", max_length=64),
@@ -4112,6 +4162,7 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             plugin_runtime_logs.query_page,
             limit=limit,
             cursor=cursor,
+            page=page,
             level=level,
             q=search,
             trace_id=trace_id,
@@ -4121,6 +4172,10 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             "next_cursor": int(result.get("next_cursor") or 0),
             "has_more": bool(result.get("has_more", False)),
             "limit": int(result.get("limit") or limit),
+            "page": int(result.get("page") or 0),
+            "page_size": int(result.get("page_size") or result.get("limit") or limit),
+            "total": int(result.get("total") or 0),
+            "total_pages": int(result.get("total_pages") or 1),
             "filters": result.get("filters") or {},
         }
 

@@ -78,7 +78,6 @@ def _deps(monkeypatch, observed: list[list[dict]]):  # noqa: ANN001
     async def empty(): return ""
     async def none(): return None
     monkeypatch.setattr(processor, "refresh_bot_group_mute_state", lambda *_a, **_k: false())
-    monkeypatch.setattr(processor, "extract_forward_message_content", lambda *_a, **_k: empty())
     monkeypatch.setattr(processor, "review_pending_sticker_reaction", lambda *_a, **_k: none())
     monkeypatch.setattr(processor, "get_recent_group_msgs", lambda *_a, **_k: [])
     monkeypatch.setattr(processor, "build_group_context_window", lambda *_a, **_k: [])

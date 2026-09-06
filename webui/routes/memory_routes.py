@@ -445,16 +445,22 @@ def build_memory_router(*, runtime) -> APIRouter:
         context_type: str = Query(default="auto"),
         limit: int = Query(default=8, ge=1, le=32),
         _: AdminIdentity = Depends(require_admin),
+        platform: str = Query(default="onebot", max_length=32),
+        bot_id: str = Query(default="", max_length=64),
     ) -> dict:
         store = _memory_store(runtime)
         if store is None:
             _raise_operation(503, _store_unavailable_report(mutation=True))
+        requested_platform = str(platform).strip() if isinstance(platform, str) else "onebot"
+        requested_bot_id = str(bot_id).strip() if isinstance(bot_id, str) else ""
         try:
             items = list(
                 store.recall_memories(
                     query=str(query or "").strip(),
                     group_id=str(group_id or "").strip(),
                     user_id=str(user_id or "").strip(),
+                    platform=requested_platform or "onebot",
+                    bot_id=requested_bot_id,
                     context_type=str(context_type or "auto").strip() or "auto",
                     limit=int(limit or 8),
                 )

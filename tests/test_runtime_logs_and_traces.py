@@ -85,6 +85,24 @@ def test_plugin_runtime_logs_cursor_page_contract(_db_tmp) -> None:
     assert logs.writer_status()["pending"] == 0
 
 
+def test_plugin_runtime_logs_page_contract_is_bounded_and_keeps_cursor_compatibility(_db_tmp) -> None:
+    logs = load_personification_module("plugin.personification.core.plugin_runtime_logs")
+    logs.clear_all()
+    for index in range(5):
+        logs.record(level="INFO", source="unit", message=f"offset-item-{index}", min_level="DEBUG")
+
+    second = logs.query_page(limit=2, page=2)
+    legacy = logs.query_page(limit=2, page=2, cursor=5)
+
+    assert [item["message"] for item in second["entries"]] == ["offset-item-2", "offset-item-1"]
+    assert second["page"] == 2
+    assert second["page_size"] == 2
+    assert second["total"] == 5
+    assert second["total_pages"] == 3
+    # A supplied cursor keeps its old keyset meaning and does not become an offset.
+    assert legacy["page"] == 0
+
+
 def test_plugin_runtime_logs_search_treats_wildcards_literally(_db_tmp) -> None:
     logs = load_personification_module("plugin.personification.core.plugin_runtime_logs")
     logs.clear_all()

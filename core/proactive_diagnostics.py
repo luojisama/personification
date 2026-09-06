@@ -108,6 +108,7 @@ def query_page(
     outcome: str = "",
     target: str = "",
     cursor: int = 0,
+    page: int = 0,
     limit: int = 50,
 ) -> dict[str, Any]:
     """按稳定递减 ID 返回主动行为记录，供持续追加型管理页使用。"""
@@ -123,21 +124,29 @@ def query_page(
         clauses.append("target LIKE ? ESCAPE '\\'")
         escaped = str(target).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         params.append(f"%{escaped}%")
+    use_page = max(0, int(page or 0)) if int(cursor or 0) <= 0 else 0
     if int(cursor or 0) > 0:
         clauses.append("id < ?")
         params.append(int(cursor))
     safe_limit = max(1, min(int(limit), 100))
-    params.append(safe_limit + 1)
     with connect_sync() as conn:
+        total = int(conn.execute(
+            f"SELECT COUNT(*) FROM proactive_diagnostics WHERE {' AND '.join(clauses)}", tuple(params)
+        ).fetchone()[0] or 0)
+        query_params = [*params, safe_limit + 1]
+        offset_clause = ""
+        if use_page:
+            offset_clause = " OFFSET ?"
+            query_params.append((max(1, use_page) - 1) * safe_limit)
         rows = conn.execute(
             f"""
             SELECT id, ts, scope, target, outcome, detail, next_eligible_at
             FROM proactive_diagnostics
             WHERE {' AND '.join(clauses)}
             ORDER BY id DESC
-            LIMIT ?
+            LIMIT ?{offset_clause}
             """,
-            tuple(params),
+            tuple(query_params),
         ).fetchall()
     has_more = len(rows) > safe_limit
     selected = rows[:safe_limit]
@@ -163,6 +172,10 @@ def query_page(
         "next_cursor": int(selected[-1]["id"]) if has_more and selected else 0,
         "has_more": has_more,
         "limit": safe_limit,
+        "page": max(1, use_page) if use_page else 0,
+        "page_size": safe_limit,
+        "total": total,
+        "total_pages": max(1, (total + safe_limit - 1) // safe_limit),
         "filters": {"scope": scope, "outcome": outcome, "target": target},
     }
 

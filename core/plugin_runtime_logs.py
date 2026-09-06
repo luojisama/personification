@@ -197,6 +197,7 @@ def query_page(
     level: str = "",
     q: str = "",
     cursor: int = 0,
+    page: int = 0,
     trace_id: str = "",
 ) -> dict[str, Any]:
     flush_pending()
@@ -220,21 +221,32 @@ def query_page(
     if trace_id:
         clauses.append("trace_id = ?")
         params.append(str(trace_id)[:64])
+    # Keep the old cursor contract intact.  Page mode is used only when the
+    # caller deliberately omits a cursor, so existing incremental readers do
+    # not silently change their place in the timeline.
+    use_page = max(0, int(page or 0)) if int(cursor or 0) <= 0 else 0
     if cursor > 0:
         clauses.append("id < ?")
         params.append(int(cursor))
     page_limit = max(1, min(int(limit or 200), 500))
-    params.append(page_limit + 1)
     with connect_sync() as conn:
+        total = int(conn.execute(
+            f"SELECT COUNT(*) FROM plugin_runtime_logs WHERE {' AND '.join(clauses)}", tuple(params)
+        ).fetchone()[0] or 0)
+        query_params = [*params, page_limit + 1]
+        offset_clause = ""
+        if use_page:
+            offset_clause = " OFFSET ?"
+            query_params.append((max(1, use_page) - 1) * page_limit)
         rows = conn.execute(
             f"""
             SELECT id, ts, level, source, message, context, trace_id
             FROM plugin_runtime_logs
             WHERE {' AND '.join(clauses)}
             ORDER BY id DESC
-            LIMIT ?
+            LIMIT ?{offset_clause}
             """,
-            tuple(params),
+            tuple(query_params),
         ).fetchall()
     has_more = len(rows) > page_limit
     out: list[dict[str, Any]] = []
@@ -259,6 +271,10 @@ def query_page(
         "has_more": has_more,
         "next_cursor": out[-1]["id"] if has_more and out else 0,
         "limit": page_limit,
+        "page": max(1, use_page) if use_page else 0,
+        "page_size": page_limit,
+        "total": total,
+        "total_pages": max(1, (total + page_limit - 1) // page_limit),
         "filters": {
             "level": normalized_level,
             "q": normalized_query,
