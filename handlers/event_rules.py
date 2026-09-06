@@ -34,6 +34,20 @@ except Exception:  # pragma: no cover - fallback for lightweight unit-test stubs
     T_State = dict[str, Any]
 
 
+def _is_group_event(event: Any, group_event_cls: Any) -> bool:
+    envelope = getattr(event, "_personification_interaction_envelope", None)
+    if envelope is not None:
+        return str(getattr(envelope, "conversation_kind", "") or "") == "channel"
+    return isinstance(event, group_event_cls)
+
+
+def _is_private_event(event: Any, private_event_cls: Any) -> bool:
+    envelope = getattr(event, "_personification_interaction_envelope", None)
+    if envelope is not None:
+        return str(getattr(envelope, "conversation_kind", "") or "") == "private"
+    return isinstance(event, private_event_cls)
+
+
 def _detect_solo_speaker_follow(
     recent_msgs: list[dict[str, Any]],
     *,
@@ -119,11 +133,11 @@ async def personification_rule(
         )
         state["user_policy_decision"] = decision.to_dict()
         if not decision.allow_normal_processing:
-            if isinstance(event, private_event_cls) and looks_like_private_command(
+            if _is_private_event(event, private_event_cls) and looks_like_private_command(
                 event.get_plaintext()
             ):
                 return False
-            if isinstance(event, group_event_cls):
+            if _is_group_event(event, group_event_cls):
                 group_id = str(event.group_id)
                 if not is_group_whitelisted(group_id, plugin_whitelist):
                     return False
@@ -145,7 +159,7 @@ async def personification_rule(
         del user_blacklist[user_id]
         logger.info(f"用户 {user_id} 的拉黑时间已到，已自动恢复。")
 
-    if isinstance(event, group_event_cls):
+    if _is_group_event(event, group_event_cls):
         group_id = str(event.group_id)
         if not is_group_whitelisted(group_id, plugin_whitelist):
             return False
@@ -390,7 +404,7 @@ async def personification_rule(
         state.setdefault("favorability_frequency", {})["gate_result"] = "fail"
         return False
 
-    if isinstance(event, private_event_cls):
+    if _is_private_event(event, private_event_cls):
         if looks_like_private_command(event.get_plaintext()):
             return False
         state["attention_admitted"] = True

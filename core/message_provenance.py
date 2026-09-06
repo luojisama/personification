@@ -46,9 +46,32 @@ def is_bot_self_message_event(event: Any) -> bool:
     )
     if not is_message_shape:
         return False
+    envelope = _field(event, "_personification_interaction_envelope", None)
+    # The Satori bridge intentionally namespaces projected legacy fields so
+    # IDs from different platforms cannot collide.  Compare the immutable
+    # bridge envelope before that projection; its raw sender/bot IDs share
+    # the same platform scope and therefore preserve the self-echo guard.
+    if envelope is not None:
+        sender_id = str(_field(envelope, "sender_id", "") or "").strip()
+        bot_id = str(_field(envelope, "bot_id", "") or "").strip()
+        if sender_id and bot_id and sender_id == bot_id:
+            return True
+        # The bridge replaces sender_id with a collision-safe namespace for
+        # legacy session structures.  Its retained source event is still the
+        # adapter-validated identity projection and lets this comparison stay
+        # metadata-only without parsing the namespace back into an ID.
+        source = _field(event, "_satori_source_event", None)
+        source_user = _text_id(_field(_field(source, "user", None), "id", ""))
+        login_user = _text_id(_field(_field(_field(source, "login", None), "user", None), "id", ""))
+        if source_user and login_user and source_user == login_user:
+            return True
     self_id = str(_field(event, "self_id", "") or "").strip()
     user_id = str(_field(event, "user_id", "") or "").strip()
     return bool(self_id and user_id and self_id == user_id)
+
+
+def _text_id(value: Any) -> str:
+    return str(value or "").strip()
 
 
 def is_personification_reply_record(record: Any, bot_self_id: str = "") -> bool:

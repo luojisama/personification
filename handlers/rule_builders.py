@@ -64,7 +64,12 @@ def build_personification_rule(
         )
         if attention_service is None or not bool(state.get("attention_admitted", False)):
             return legacy_should_reply
-        is_group = isinstance(event, group_event_cls)
+        envelope = getattr(event, "_personification_interaction_envelope", None)
+        is_group = (
+            str(getattr(envelope, "conversation_kind", "") or "") == "channel"
+            if envelope is not None
+            else isinstance(event, group_event_cls)
+        )
         target = str(state.get("message_target", "") or "").strip().lower()
         is_at_bot = bool(
             getattr(event, "to_me", False)
