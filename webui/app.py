@@ -43,6 +43,7 @@ from .routes.user_policy_routes import build_user_policy_router
 from .routes.outbound_routes import build_outbound_router
 from .routes.performance_routes import build_performance_router
 from .routes.v2_routes import build_v2_router
+from .routes.moderation_routes import build_moderation_router
 from .routes.v2_compat_routes import build_v2_business_router
 from .routes.whole_backup_routes import build_whole_backup_router
 from ..core.runtime_performance import register_cache_reporter
@@ -98,6 +99,7 @@ def get_runtime_context() -> _RuntimeContext:
 def build_router() -> APIRouter:
     runtime = get_runtime_context()
     router = APIRouter(prefix="/personification")
+    router.include_router(build_moderation_router(runtime=runtime))
     router.include_router(build_auth_router(runtime=runtime))
     router.include_router(build_config_router(runtime=runtime))
     router.include_router(build_metrics_router(runtime=runtime))
