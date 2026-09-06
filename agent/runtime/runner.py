@@ -374,6 +374,7 @@ async def run_agent(
                     record_trace=_record_reply_trace_stage,
                     logger=logger,
                     reason=reason,
+                    response_deadline=phase_deadlines.quality_deadline,
                 ),
                 phase_deadlines.quality_deadline,
             )

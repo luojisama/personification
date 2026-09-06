@@ -1213,6 +1213,7 @@ async def finalize_agent_reply_quality(
     record_trace: Callable[..., None] | None = None,
     logger: Any = None,
     reason: str = "",
+    response_deadline: float | None = None,
 ) -> AgentResult:
     """Run one final output-style quality pass for Agent text.
 
@@ -1223,6 +1224,10 @@ async def finalize_agent_reply_quality(
     """
 
     started_at = time.monotonic()
+    # The turn already owns an absolute deadline. A separate eight-second
+    # rewrite timer cancelled healthy fallback providers while minutes remained.
+    def remaining_quality_budget() -> float:
+        return max(0.0, float(response_deadline) - time.monotonic()) if response_deadline is not None else 8.0
     raw_text = str(getattr(result, "text", "") or "").strip()
     quality_context = str(getattr(result, "quality_context", "") or "").strip()
     direct_output = bool(getattr(result, "direct_output", False))
@@ -1526,7 +1531,7 @@ async def finalize_agent_reply_quality(
                 label="Agent 回复质量复写开始",
                 status="warn",
                 detail=(
-                    f"flags={','.join(flags)} timeout_ms=8000 "
+                    f"flags={','.join(flags)} timeout_ms={int(remaining_quality_budget() * 1000)} "
                     f"chars={len(raw_text)}"
                 ),
                 hint="候选回复命中可见风格风险，开始一次受限人设改写；仅记录结构化标记，不记录正文。",
@@ -1536,7 +1541,7 @@ async def finalize_agent_reply_quality(
             tool_caller=tool_caller,
             original_text=raw_text,
             persona_system=_persona_system_from_messages(messages),
-            timeout=8.0,
+            timeout=remaining_quality_budget(),
             output_mode=_turn_plan_output_mode(turn_plan),
             avoid_questions=group_context,
             allow_rhetorical_banter=allow_rhetorical_banter,

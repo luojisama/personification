@@ -6,7 +6,13 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from .llm_context import use_single_attempt_retry_policy
+from .llm_context import (
+    LLM_MAX_WIRE_ATTEMPTS,
+    remaining_llm_deadline_seconds,
+    reset_llm_context,
+    set_wire_retry_disabled,
+    use_single_attempt_retry_policy,
+)
 from .message_parts import normalize_message_parts
 from .provider_types import (
     PROVIDER_TYPE_REMOVED,
@@ -27,8 +33,10 @@ _LOGGED_PROVIDER_CONFIG_SIGNATURES: set[tuple[str, tuple[tuple[str, str, str], .
 _RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS = 10 * 60
 _RATE_LIMIT_MAX_COOLDOWN_SECONDS = 30 * 60
 _DEFAULT_PROVIDER_TIMEOUT_SECONDS = 200.0
-_DEFAULT_PROVIDER_MAX_ATTEMPTS = 5
-_MAX_PROVIDER_ATTEMPTS = 10
+_DEFAULT_PROVIDER_MAX_ATTEMPTS = LLM_MAX_WIRE_ATTEMPTS
+# Keep parsing legacy ``max_retries`` values for UI/config compatibility, but
+# a visible chat request is always bounded to first request plus three retries.
+_MAX_PROVIDER_ATTEMPTS = LLM_MAX_WIRE_ATTEMPTS
 _RETRYABLE_HTTP_STATUSES = {408, 409, 425, 429}
 _CANONICAL_PROVIDER_CODES = {
     "provider_auth_failed",
@@ -833,6 +841,7 @@ async def _call_provider_once(
     start_ts = time.monotonic()
     success = False
     error_kind = ""
+    wire_retry_token = set_wire_retry_disabled()
     try:
         response = await caller.chat_with_tools(
             messages=messages,
@@ -856,6 +865,7 @@ async def _call_provider_once(
             error_kind = "other"
         raise
     finally:
+        reset_llm_context(wire_retry_token)
         try:
             from . import provider_health
 
@@ -984,6 +994,8 @@ def _provider_error_kind(error: Exception) -> str:
 
 
 def _is_retryable_provider_error(error: Exception) -> bool:
+    if getattr(error, "_personification_deadline_exhausted", False):
+        return True
     status = _error_http_status(error)
     canonical_code = ""
     current: BaseException | None = error
@@ -1018,6 +1030,8 @@ def _is_retryable_provider_error(error: Exception) -> bool:
 
 
 def _provider_failure_code(error: Exception) -> str:
+    if getattr(error, "_personification_deadline_exhausted", False):
+        return "provider_timeout"
     current: BaseException | None = error
     seen: set[int] = set()
     canonical_code = ""
@@ -1128,7 +1142,7 @@ def _select_provider_attempt(attempts: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _provider_retry_delay(error: Exception, attempt: int) -> float:
-    delay = float(min(8, 2 ** max(0, int(attempt))))
+    delay = float(min(4, 2 ** max(0, int(attempt))))
     if _error_http_status(error) == 429:
         delay = max(delay, min(30.0, _retry_after_seconds(error)))
     return delay
@@ -1147,6 +1161,46 @@ def _errors_include_rate_limit(errors: List[str]) -> bool:
         if "429" in lowered or "too many requests" in lowered or "rate limit" in lowered:
             return True
     return False
+
+
+def _deadline_exhausted_error() -> TimeoutError:
+    error = TimeoutError("provider request deadline exhausted")
+    error.code = "provider_timeout"
+    error.retryable = True
+    error._personification_deadline_exhausted = True
+    return error
+
+
+async def _call_provider_with_turn_deadline(
+    provider: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    *,
+    plugin_config: Any,
+    tools: Optional[List[Dict[str, Any]]],
+    use_builtin_search: bool,
+) -> ToolCallerResponse:
+    """Run one wire request without granting it a fresh timeout window."""
+    remaining = remaining_llm_deadline_seconds()
+    if remaining is not None and remaining <= 0:
+        raise _deadline_exhausted_error()
+    request = _call_provider_once(
+        provider,
+        messages,
+        plugin_config=plugin_config,
+        tools=tools,
+        use_builtin_search=use_builtin_search,
+    )
+    if remaining is None:
+        return await request
+    try:
+        return await asyncio.wait_for(request, timeout=remaining)
+    except asyncio.TimeoutError as exc:
+        # A provider may raise TimeoutError before the shared deadline; that
+        # remains transient.  Only wait_for's elapsed turn budget is terminal.
+        after = remaining_llm_deadline_seconds()
+        if after is not None and after <= 0:
+            raise _deadline_exhausted_error() from exc
+        raise
 
 
 async def _try_provider_chain(
@@ -1186,7 +1240,7 @@ async def _try_provider_chain(
         safety_reframed = False
         for attempt in range(retries):
             try:
-                response = await _call_provider_once(
+                response = await _call_provider_with_turn_deadline(
                     provider,
                     provider_messages,
                     plugin_config=plugin_config,
@@ -1205,7 +1259,7 @@ async def _try_provider_chain(
                         provider_messages = build_safe_reframe_messages(provider_messages)
                         safety_reframed = True
                         try:
-                            response = await _call_provider_once(
+                            response = await _call_provider_with_turn_deadline(
                                 provider,
                                 provider_messages,
                                 plugin_config=plugin_config,
@@ -1271,10 +1325,19 @@ async def _try_provider_chain(
                 error_text = _error_text(e)
                 errors.append(f"{provider['name']}#{attempt + 1}: {error_text}")
                 route_attempts.append(_provider_route_attempt(provider, e, attempt=attempt + 1))
+                if getattr(e, "_personification_deadline_exhausted", False):
+                    _mark_provider_failure(provider["name"], e)
+                    break
                 retryable = _is_retryable_provider_error(e)
                 has_next_attempt = attempt + 1 < retries
                 if retryable and has_next_attempt:
                     delay = _provider_retry_delay(e, attempt)
+                    remaining = remaining_llm_deadline_seconds()
+                    if remaining is not None:
+                        if remaining <= 0:
+                            _mark_provider_failure(provider["name"], _deadline_exhausted_error())
+                            break
+                        delay = min(delay, remaining)
                     logger.warning(
                         f"personification: provider {provider['name']} transient failure "
                         f"attempt={attempt + 1}/{retries} {error_text}; retry_in={delay:g}s"

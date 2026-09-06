@@ -24,7 +24,11 @@ from plugin.personification.core.gemini_transport import (
     raise_for_gemini_status,
     request_with_gemini_auth,
 )
-from plugin.personification.core.llm_context import current_llm_context, use_single_attempt_retry_policy
+from plugin.personification.core.llm_context import (
+    current_llm_context,
+    use_single_attempt_retry_policy,
+    use_single_wire_attempt_policy,
+)
 from plugin.personification.core.message_parts import extract_text_from_parts, normalize_message_parts
 from plugin.personification.core.media_refs import normalize_audio_ref, normalize_video_ref
 from plugin.personification.core.provider_types import (
@@ -1047,6 +1051,16 @@ def _maybe_anthropic_thinking(thinking_mode: str) -> Optional[dict]:
     return ANTHROPIC_THINKING_MAP.get(thinking_mode)
 
 
+def _probe_request_shape(payload: dict, protocol: str) -> dict:
+    """Non-content evidence of the request shape actually sent to the SDK."""
+    generation = payload.get("generationConfig") or {}
+    return {
+        "protocol": protocol,
+        "reasoning_requested": bool(payload.get("reasoning") or payload.get("reasoning_effort") or
+                                    payload.get("thinking") or generation.get("thinkingConfig")),
+    }
+
+
 # Custom Gemini gateways often lag the current JSON Schema surface. Keep
 # FunctionDeclaration.parameters on the conservative OpenAPI subset; omitted
 # annotation fields such as default do not change runtime argument validation.
@@ -1818,7 +1832,7 @@ class OpenAIToolCaller(ToolCaller):
                 "base_url": self.base_url,
                 "http_client": http_client,
             }
-            if use_single_attempt_retry_policy():
+            if use_single_wire_attempt_policy():
                 client_kwargs["max_retries"] = 0
             client = AsyncOpenAI(**client_kwargs)
             if True:
@@ -1873,6 +1887,7 @@ class OpenAIToolCaller(ToolCaller):
                                 # omit the event stream contract, especially
                                 # with built-in search. No tool has run yet.
                                 _stream_trace_stage("provider_stream_fallback", status="warn", detail="route_supported=false diagnostic_code=stream_unsupported")
+                        self.last_probe_request_shape = _probe_request_shape(payload, "responses")
                         response = await client.responses.create(**payload)
                         response_data = _response_to_dict(response)
                         content, tool_calls, used_builtin_search = _parse_openai_responses_output(response_data)
@@ -1897,6 +1912,7 @@ class OpenAIToolCaller(ToolCaller):
                             payload.pop("reasoning", None)
                             self._supports_reasoning = False
                             try:
+                                self.last_probe_request_shape = _probe_request_shape(payload, "responses")
                                 response = await client.responses.create(**payload)
                                 response_data = _response_to_dict(response)
                                 content, tool_calls, used_builtin_search = _parse_openai_responses_output(response_data)
@@ -1955,7 +1971,7 @@ class OpenAIToolCaller(ToolCaller):
                         payload["web_search_options"] = {}
                     reasoning = _maybe_openai_reasoning(self.model, self.thinking_mode)
                     if reasoning and self._supports_reasoning is not False:
-                        payload["reasoning"] = reasoning
+                        payload["reasoning_effort"] = reasoning["effort"]
                     return payload
 
                 payload = _build_chat_payload(
@@ -1973,6 +1989,7 @@ class OpenAIToolCaller(ToolCaller):
                                 status="info",
                                 detail=f"provider=openai model={str(self.model or '')[:96]} route_supported=true",
                             )
+                            self.last_probe_request_shape = _probe_request_shape(payload, "chat_completions")
                             provider_stream = await client.chat.completions.create(**payload, stream=True)
                             stream_created = True
                             response = await _assemble_openai_chat_stream(
@@ -1998,16 +2015,19 @@ class OpenAIToolCaller(ToolCaller):
                                 status="warn",
                                 detail="route_supported=true diagnostic_code=provider_stream_fallback",
                             )
+                    self.last_probe_request_shape = _probe_request_shape(payload, "chat_completions")
                     response = await client.chat.completions.create(**payload)
                 except TypeError as e:
                     error_msg = str(e).lower()
                     if "reasoning" in error_msg and "unexpected keyword" in error_msg:
-                        payload.pop("reasoning", None)
+                        payload.pop("reasoning_effort", None)
                         self._supports_reasoning = False
+                        self.last_probe_request_shape = _probe_request_shape(payload, "chat_completions")
                         response = await client.chat.completions.create(**payload)
                     elif use_builtin_search and chat_supports_native_search and not responses_failed:
                         payload = _build_chat_payload(use_native_search=False, use_original_tools=True)
                         wire_tools_count = len(list(payload.get("tools") or []))
+                        self.last_probe_request_shape = _probe_request_shape(payload, "chat_completions")
                         response = await client.chat.completions.create(**payload)
                     else:
                         raise
@@ -2015,6 +2035,7 @@ class OpenAIToolCaller(ToolCaller):
                     if use_builtin_search and chat_supports_native_search and not responses_failed:
                         payload = _build_chat_payload(use_native_search=False, use_original_tools=True)
                         wire_tools_count = len(list(payload.get("tools") or []))
+                        self.last_probe_request_shape = _probe_request_shape(payload, "chat_completions")
                         response = await client.chat.completions.create(**payload)
                     else:
                         raise
@@ -2118,6 +2139,7 @@ class GeminiToolCaller(ToolCaller):
                 }
             }
 
+        self.last_probe_request_shape = _probe_request_shape(payload, "gemini")
         url = f"{self.base_url.rstrip('/')}/models/{self.model}:generateContent"
         try:
             async with httpx.AsyncClient(
@@ -2308,7 +2330,7 @@ class AnthropicToolCaller(ToolCaller):
                 "api_key": self.api_key,
                 "timeout": self.timeout,
             }
-            if use_single_attempt_retry_policy():
+            if use_single_wire_attempt_policy():
                 client_kwargs["max_retries"] = 0
             if self.base_url:
                 client_kwargs["base_url"] = self.base_url.rstrip("/")
@@ -2326,6 +2348,7 @@ class AnthropicToolCaller(ToolCaller):
             thinking = _maybe_anthropic_thinking(self.thinking_mode)
             if thinking:
                 payload["thinking"] = thinking
+                payload["max_tokens"] = max(1024, int(thinking.get("budget_tokens", 0)) + 1024)
 
             if self.streaming_mode == "buffered":
                 assembler: BufferedToolResponseAssembler | None = None
@@ -2398,6 +2421,7 @@ class AnthropicToolCaller(ToolCaller):
                             assembler.snapshot(mode="buffered", route_supported=True), fallback=True
                         )
                     _stream_trace_stage("provider_stream_fallback", status="warn", detail="route_supported=true diagnostic_code=provider_stream_fallback")
+            self.last_probe_request_shape = _probe_request_shape(payload, "anthropic")
             response = await client.messages.create(**payload)
 
             content_blocks = list(_obj_get(response, "content", []) or [])
@@ -2956,7 +2980,7 @@ class OpenAICodexToolCaller(ToolCaller):
         if not access_token:
             access_token, _ = await self._get_access_token()
         last_error: Optional[Exception] = None
-        for attempt in range(1 if use_single_attempt_retry_policy() else 2):
+        for attempt in range(1 if use_single_wire_attempt_policy() else 2):
             try:
                 connect_timeout = 15.0
                 client_kwargs: dict[str, Any] = {
@@ -3037,7 +3061,7 @@ class OpenAICodexToolCaller(ToolCaller):
                 break
             except (httpx.RemoteProtocolError, httpx.ReadError, httpx.WriteError, httpx.ConnectError) as e:
                 last_error = e
-                if attempt == 0 and not use_single_attempt_retry_policy():
+                if attempt == 0 and not use_single_wire_attempt_policy():
                     await asyncio.sleep(0.8)
                     continue
                 raise RuntimeError(
@@ -3047,7 +3071,7 @@ class OpenAICodexToolCaller(ToolCaller):
                 last_error = e
                 if (
                     attempt == 0
-                    and not use_single_attempt_retry_policy()
+                    and not use_single_wire_attempt_policy()
                     and "Server disconnected without sending a response" in str(e)
                 ):
                     await asyncio.sleep(0.8)
@@ -5185,7 +5209,7 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                         "requestId": _uuid.uuid4().hex,
                     }
                     last_network_exc: Exception | None = None
-                    for attempt in range(1 if use_single_attempt_retry_policy() else 4):
+                    for attempt in range(1 if use_single_wire_attempt_policy() else 4):
                         try:
                             resp = await client.post(
                                 _ANTIGRAVITY_CLI_STREAM_ENDPOINT,

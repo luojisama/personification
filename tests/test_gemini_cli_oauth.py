@@ -10,6 +10,40 @@ from ._loader import load_personification_module
 impl = load_personification_module("plugin.personification.skills.skillpacks.tool_caller.scripts.impl")
 
 
+def test_outer_wire_retry_guard_preserves_one_expired_oauth_refresh(monkeypatch) -> None:
+    import asyncio
+    import httpx
+
+    context = load_personification_module("plugin.personification.core.llm_context")
+    caller = impl.GeminiCliToolCaller(model="gemini-test")
+    monkeypatch.setattr(type(caller), "_project_cache", {})
+    observed = []
+
+    async def load_project(token):
+        observed.append(token)
+        if token == "synthetic-expired":
+            response = httpx.Response(401, request=httpx.Request("POST", "https://example.test/project"))
+            response.raise_for_status()
+        return "synthetic-project"
+
+    async def refresh(*, force_refresh=False):
+        assert force_refresh is True
+        return "synthetic-refreshed", None
+
+    monkeypatch.setattr(caller, "_load_code_assist_project", load_project)
+    monkeypatch.setattr(caller, "_get_access_token", refresh)
+
+    async def exercise():
+        token = context.set_wire_retry_disabled()
+        try:
+            assert await caller._resolve_project("synthetic-expired") == "synthetic-project"
+        finally:
+            context.reset_llm_context(token)
+
+    asyncio.run(exercise())
+    assert observed == ["synthetic-expired", "synthetic-refreshed"]
+
+
 def test_extract_access_token_from_flat_layout() -> None:
     auth = {"access_token": "abc", "refresh_token": "rrr"}
     assert impl._get_gemini_cli_access_token(auth) == "abc"

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from plugin.personification.core import provider_router
+from plugin.personification.core import llm_context, provider_router
 from plugin.personification.skills.skillpacks.tool_caller.scripts.impl import ToolCallerResponse
 
 
@@ -37,6 +37,8 @@ def _provider(name: str, *, attempts: int = 5) -> dict:
     return {
         "name": name,
         "api_type": "openai",
+        "api_url": "https://example.test/v1",
+        "api_key": "test-key",
         "model": "test-model",
         "max_retries": attempts,
     }
@@ -59,7 +61,7 @@ def test_provider_defaults_and_explicit_overrides() -> None:
     overridden = provider_router.parse_api_pool_config([{**base, "timeout": 90, "max_retries": 3}])[0]
 
     assert defaulted["timeout"] == 200
-    assert defaulted["max_retries"] == 5
+    assert defaulted["max_retries"] == 4
     assert overridden["timeout"] == 90
     assert overridden["max_retries"] == 3
 
@@ -80,14 +82,14 @@ def test_gemini_caller_receives_provider_timeout() -> None:
     assert caller.timeout == 73
 
 
-def test_transient_failure_retries_up_to_five_attempts(monkeypatch) -> None:  # noqa: ANN001
+def test_transient_failure_retries_up_to_four_attempts(monkeypatch) -> None:  # noqa: ANN001
     calls = 0
     delays: list[float] = []
 
     async def _call(*_args, **_kwargs):  # noqa: ANN202
         nonlocal calls
         calls += 1
-        if calls < 5:
+        if calls < 4:
             raise _HttpError(503)
         return _success()
 
@@ -108,10 +110,10 @@ def test_transient_failure_retries_up_to_five_attempts(monkeypatch) -> None:  # 
     )
 
     assert response is not None and response.content == "ok"
-    assert calls == 5
-    assert delays == [1.0, 2.0, 4.0, 8.0]
-    assert len(errors) == 4
-    assert len(attempts) == 4
+    assert calls == 4
+    assert delays == [1.0, 2.0, 4.0]
+    assert len(errors) == 3
+    assert len(attempts) == 3
     assert all(item["code"] == "provider_call_failed" for item in attempts)
     assert "primary" not in provider_router.PROVIDER_FAILURE_STATE
 
@@ -146,6 +148,98 @@ def test_timeout_retries_instead_of_skipping_remaining_attempts(monkeypatch) -> 
     assert calls == 2
     assert delays == [1.0]
     assert attempts[0]["request_count"] == 1
+
+
+def test_legacy_retry_value_is_runtime_capped_at_four() -> None:
+    assert provider_router._provider_max_retries(_provider("old", attempts=99)) == 4
+    assert provider_router._provider_max_retries(_provider("one", attempts=1)) == 1
+
+
+def test_single_route_attempt_setting_is_respected(monkeypatch) -> None:  # noqa: ANN001
+    calls = 0
+
+    async def _call(*_args, **_kwargs):  # noqa: ANN202
+        nonlocal calls
+        calls += 1
+        raise _HttpError(503)
+
+    monkeypatch.setattr(provider_router, "_call_provider_once", _call)
+    response, _errors, _attempts, _ = asyncio.run(
+        provider_router._try_provider_chain(
+            [_provider("one", attempts=1)],
+            messages=[],
+            plugin_config=SimpleNamespace(),
+            logger=_Logger(),
+        )
+    )
+
+    assert response is None
+    assert calls == 1
+
+
+def test_provider_router_deadline_cancels_wire_request_without_retry(monkeypatch) -> None:  # noqa: ANN001
+    calls = 0
+
+    async def _call(*_args, **_kwargs):  # noqa: ANN202
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(1)
+        return _success()
+
+    monkeypatch.setattr(provider_router, "_call_provider_once", _call)
+
+    async def run() -> None:
+        token = llm_context.set_llm_context(
+            purpose="reply", deadline_monotonic=asyncio.get_running_loop().time() + 0.2
+        )
+        try:
+            response, _errors, attempts, _ = await provider_router._try_provider_chain(
+                [_provider("slow")],
+                messages=[],
+                plugin_config=SimpleNamespace(),
+                logger=_Logger(),
+            )
+        finally:
+            llm_context.reset_llm_context(token)
+        assert response is None
+        assert len(attempts) == 1
+        assert attempts[0]["code"] == "provider_timeout"
+
+    asyncio.run(run())
+    assert calls == 1
+
+
+def test_provider_router_retries_only_wire_request_not_tool_execution(monkeypatch) -> None:  # noqa: ANN001
+    calls = 0
+    observed_tools: list[list[dict]] = []
+
+    async def _call(_provider, _messages, *, tools=None, **_kwargs):  # noqa: ANN001, ANN202
+        nonlocal calls
+        calls += 1
+        observed_tools.append(list(tools or []))
+        if calls < 4:
+            raise _HttpError(503)
+        return _success()
+
+    async def _sleep(_delay: float) -> None:
+        return None
+
+    schemas = [{"type": "function", "function": {"name": "controlled_noop"}}]
+    monkeypatch.setattr(provider_router, "_call_provider_once", _call)
+    monkeypatch.setattr(provider_router.asyncio, "sleep", _sleep)
+    response, _errors, _attempts, _ = asyncio.run(
+        provider_router._try_provider_chain(
+            [_provider("primary")],
+            messages=[],
+            plugin_config=SimpleNamespace(),
+            logger=_Logger(),
+            tools=schemas,
+        )
+    )
+
+    assert response is not None
+    assert calls == 4
+    assert observed_tools == [schemas, schemas, schemas, schemas]
 
 
 def test_http_400_does_not_retry_and_switches_provider(monkeypatch) -> None:  # noqa: ANN001

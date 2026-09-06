@@ -8,7 +8,15 @@ import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
-from .llm_context import current_llm_context, use_single_attempt_retry_policy
+from .llm_context import (
+    LLM_MAX_WIRE_ATTEMPTS,
+    current_llm_context,
+    remember_successful_route,
+    reset_llm_context,
+    set_wire_retry_disabled,
+    successful_route_key,
+    use_single_attempt_retry_policy,
+)
 from .gemini_transport import safe_upstream_diagnostics
 from .provider_types import (
     PROVIDER_TYPE_REMOVED,
@@ -1343,6 +1351,7 @@ class RoutedToolCaller:
         response: ToolCallerResponse | None = None
         error: BaseException | None = None
         cancelled = False
+        wire_retry_token = set_wire_retry_disabled()
         try:
             response = await caller.chat_with_tools(
                 self._strip_route_markers(messages),
@@ -1357,6 +1366,7 @@ class RoutedToolCaller:
             error = exc
             raise
         finally:
+            reset_llm_context(wire_retry_token)
             self._record_provider_request(
                 caller,
                 request_shape=request_shape,
@@ -1366,6 +1376,83 @@ class RoutedToolCaller:
                 cancelled=cancelled,
                 reframe=reframe,
             )
+
+    async def _call_provider_with_retry(
+        self,
+        caller: ToolCaller,
+        messages: list[dict],
+        wire_tools: list[dict],
+        use_builtin_search: bool,
+        request_shape: dict[str, Any],
+        *,
+        reframe: bool = False,
+    ) -> ToolCallerResponse:
+        """Retry one provider request only; never rerun tools or change route."""
+        deadline = current_llm_context().get("deadline_monotonic")
+        last_error: Exception | None = None
+        max_attempts = 1 if use_single_attempt_retry_policy() else LLM_MAX_WIRE_ATTEMPTS
+        for attempt in range(max_attempts):  # first request plus three transient retries
+            try:
+                remaining: float | None = None
+                if deadline is not None:
+                    try:
+                        remaining = float(deadline) - time.monotonic()
+                    except (TypeError, ValueError):
+                        remaining = 0.0
+                    if remaining <= 0:
+                        timeout_error = TimeoutError("provider request deadline exhausted")
+                        timeout_error.code = "provider_timeout"
+                        timeout_error.retryable = True
+                        timeout_error._personification_deadline_exhausted = True
+                        raise timeout_error
+                request = self._call_provider_with_trace(
+                    caller, messages, wire_tools, use_builtin_search, request_shape, reframe=reframe
+                )
+                if remaining is not None:
+                    try:
+                        return await asyncio.wait_for(request, timeout=remaining)
+                    except asyncio.TimeoutError as exc:
+                        if time.monotonic() < float(deadline):
+                            # The provider itself raised TimeoutError before
+                            # our absolute budget ended.  It remains a normal
+                            # transient failure and may consume a retry.
+                            raise
+                        # ``wait_for`` has cancelled the underlying request;
+                        # this deadline, unlike a provider's own timeout, may
+                        # not be retried with a fresh window.
+                        exc.code = "provider_timeout"
+                        exc.retryable = True
+                        exc._personification_deadline_exhausted = True
+                        raise
+                return await request
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                _status, _code, retryable, *_rest = _exception_route_metadata(exc)
+                if getattr(exc, "_personification_deadline_exhausted", False):
+                    # This is the shared turn deadline, not a provider-side
+                    # timeout eligible for another fresh budget window.
+                    raise
+                if not retryable:
+                    raise
+                if attempt >= max_attempts - 1:
+                    raise
+                delay = float(2 ** attempt)
+                if deadline is not None:
+                    try:
+                        remaining = float(deadline) - time.monotonic()
+                    except (TypeError, ValueError):
+                        remaining = 0.0
+                    if remaining <= 0:
+                        raise
+                    # Sleeping up to the deadline is permissible, but never
+                    # start a new request after it.  The next loop performs
+                    # the authoritative remaining-budget check.
+                    delay = min(delay, remaining)
+                await asyncio.sleep(delay)
+        assert last_error is not None
+        raise last_error
 
     def _record_route_success(
         self,
@@ -1440,9 +1527,16 @@ class RoutedToolCaller:
         if pinned_caller is not None:
             call_chain = [pinned_caller]
         else:
-            call_chain = list(self._primary_callers)
+            # A route which already succeeded in this turn's ContextVar is
+            # preferred for later review/quality calls, but not persisted on
+            # the shared RoutedToolCaller across unrelated turns.  Tool-result
+            # markers above remain stricter and never permit route fallback.
+            scoped = self._caller_by_route_key.get(successful_route_key())
+            primary = list(self._primary_callers)
+            call_chain = ([scoped] if scoped is not None else []) + [item for item in primary if item is not scoped]
             if self._fallback_caller is not None:
-                call_chain.append(self._fallback_caller)
+                if self._fallback_caller is not scoped:
+                    call_chain.append(self._fallback_caller)
         for caller in call_chain:
             wire_tools, request_shape = self._prepare_route_tools(
                 caller,
@@ -1451,7 +1545,7 @@ class RoutedToolCaller:
                 use_builtin_search,
             )
             try:
-                response = await self._call_provider_with_trace(
+                response = await self._call_provider_with_retry(
                     caller,
                     messages,
                     wire_tools,
@@ -1481,7 +1575,7 @@ class RoutedToolCaller:
                     use_builtin_search,
                 )
                 try:
-                    response = await self._call_provider_with_trace(
+                    response = await self._call_provider_with_retry(
                         caller,
                         reframe_messages,
                         wire_tools,
@@ -1516,6 +1610,7 @@ class RoutedToolCaller:
                 response.route_key = str(self._caller_route_keys.get(id(caller), "") or "")
             except Exception:
                 pass
+            remember_successful_route(str(getattr(response, "route_key", "") or self._caller_route_keys.get(id(caller), "")))
             self._record_route_success(
                 caller,
                 tools_declared=bool(wire_tools),

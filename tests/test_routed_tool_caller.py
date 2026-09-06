@@ -37,6 +37,16 @@ class _FakeCaller:
         }
 
 
+def _http_error(status_code: int) -> RuntimeError:
+    error = RuntimeError(f"HTTP {status_code}")
+    error.status_code = status_code
+    return error
+
+
+def _valid_response(text: str = "ok") -> object:
+    return tool_impl.ToolCallerResponse("stop", text, [], {})
+
+
 def test_routed_tool_caller_falls_back_after_invalid_primary_response() -> None:
     empty = tool_impl.ToolCallerResponse(
         finish_reason="stop",
@@ -415,8 +425,15 @@ def test_routed_tool_caller_marks_timeout_retryable() -> None:
         logger=None,
     )
 
-    with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
-        asyncio.run(routed.chat_with_tools([], [], False))
+    token = llm_context.set_llm_context(
+        purpose="legacy_timeout_assertion",
+        retry_policy=llm_context.LLM_RETRY_POLICY_SINGLE_ATTEMPT,
+    )
+    try:
+        with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+            asyncio.run(routed.chat_with_tools([], [], False))
+    finally:
+        llm_context.reset_llm_context(token)
 
     assert caught.value.code == "provider_timeout"
     assert caught.value.retryable is True
@@ -618,8 +635,15 @@ def test_routed_tool_caller_keeps_safe_shape_across_503_then_400(monkeypatch) ->
     )
     messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://private.invalid/a"}}]}]
 
-    with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
-        asyncio.run(routed.chat_with_tools(messages, [], False))
+    token = llm_context.set_llm_context(
+        purpose="safe_shape_route_assertion",
+        retry_policy=llm_context.LLM_RETRY_POLICY_SINGLE_ATTEMPT,
+    )
+    try:
+        with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+            asyncio.run(routed.chat_with_tools(messages, [], False))
+    finally:
+        llm_context.reset_llm_context(token)
 
     assert [item["status_code"] for item in caught.value.route_attempts] == [503, 400]
     assert [item["code"] for item in caught.value.route_attempts] == [
@@ -744,3 +768,204 @@ def test_qzone_probe_uses_response_scoped_route_state() -> None:
     assert response.route_key == routed._caller_route_keys[id(fallback)]
     assert not hasattr(routed, "_default_result_caller")
     assert not hasattr(routed, "_tool_call_callers")
+
+
+def test_provider_retry_makes_exactly_four_wire_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    caller = _FakeCaller(
+        "primary",
+        [_http_error(503), _http_error(503), _http_error(503), _valid_response("fourth")],
+    )
+    routed = ai_routes.RoutedToolCaller(primary_callers=[caller], fallback_caller=None, logger=None)
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(ai_routes.asyncio, "sleep", no_sleep)
+    response = asyncio.run(routed.chat_with_tools([], [], False))
+
+    assert response.content == "fourth"
+    assert len(caller.calls_seen) == 4
+
+
+def test_provider_timeout_retries_while_turn_deadline_remains(monkeypatch: pytest.MonkeyPatch) -> None:
+    caller = _FakeCaller("primary", [TimeoutError("upstream timeout"), _valid_response("recovered")])
+    routed = ai_routes.RoutedToolCaller(primary_callers=[caller], fallback_caller=None, logger=None)
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(ai_routes.asyncio, "sleep", no_sleep)
+
+    async def run() -> str:
+        token = llm_context.set_llm_context(
+            purpose="reply", deadline_monotonic=asyncio.get_running_loop().time() + 10
+        )
+        try:
+            return (await routed.chat_with_tools([], [], False)).content
+        finally:
+            llm_context.reset_llm_context(token)
+
+    assert asyncio.run(run()) == "recovered"
+    assert len(caller.calls_seen) == 2
+
+
+def test_provider_retry_does_not_replay_explicit_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    caller = _FakeCaller("primary", [_http_error(400)])
+    routed = ai_routes.RoutedToolCaller(primary_callers=[caller], fallback_caller=None, logger=None)
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(ai_routes.asyncio, "sleep", no_sleep)
+    with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+        asyncio.run(routed.chat_with_tools([], [], False))
+
+    assert len(caller.calls_seen) == 1
+    assert caught.value.code == "provider_request_rejected"
+
+
+def test_provider_retry_exposes_later_400_after_transient(monkeypatch: pytest.MonkeyPatch) -> None:
+    caller = _FakeCaller("primary", [_http_error(503), _http_error(400)])
+    routed = ai_routes.RoutedToolCaller(primary_callers=[caller], fallback_caller=None, logger=None)
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(ai_routes.asyncio, "sleep", no_sleep)
+    with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+        asyncio.run(routed.chat_with_tools([], [], False))
+
+    assert len(caller.calls_seen) == 2
+    assert caught.value.code == "provider_request_rejected"
+    assert caught.value.status_code == 400
+
+
+def test_single_attempt_policy_disables_outer_retry() -> None:
+    caller = _FakeCaller("primary", [_http_error(503)])
+    routed = ai_routes.RoutedToolCaller(primary_callers=[caller], fallback_caller=None, logger=None)
+    token = llm_context.set_llm_context(
+        purpose="capability_probe",
+        retry_policy=llm_context.LLM_RETRY_POLICY_SINGLE_ATTEMPT,
+    )
+    try:
+        with pytest.raises(ai_routes.RoutedToolCallerError):
+            asyncio.run(routed.chat_with_tools([], [], False))
+    finally:
+        llm_context.reset_llm_context(token)
+
+    assert len(caller.calls_seen) == 1
+
+
+def test_outer_wire_attempt_disables_sdk_retry_without_disabling_shape_policy() -> None:
+    class _PolicyCaller(_FakeCaller):
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            assert llm_context.use_single_wire_attempt_policy() is True
+            # The outer runtime must not masquerade as a probe/QZone policy:
+            # internal one-time request-shape compatibility remains separately
+            # controlled by the original policy flag.
+            assert llm_context.use_single_attempt_retry_policy() is False
+            return await super().chat_with_tools(messages, tools, use_builtin_search)
+
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[_PolicyCaller("primary", [_valid_response()])], fallback_caller=None, logger=None
+    )
+    assert asyncio.run(routed.chat_with_tools([], [], False)).content == "ok"
+
+
+def test_provider_retry_respects_absolute_deadline() -> None:
+    class _SlowCaller(_FakeCaller):
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            self.messages_seen.append(list(messages or []))
+            self.calls_seen.append((list(messages or []), list(tools or []), use_builtin_search))
+            await asyncio.sleep(1)
+            return _valid_response()
+
+    caller = _SlowCaller("slow", [])
+    routed = ai_routes.RoutedToolCaller(primary_callers=[caller], fallback_caller=None, logger=None)
+
+    async def run() -> None:
+        token = llm_context.set_llm_context(
+            purpose="reply", deadline_monotonic=asyncio.get_running_loop().time() + 0.02
+        )
+        try:
+            with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+                await routed.chat_with_tools([], [], False)
+            assert caught.value.code == "provider_timeout"
+        finally:
+            llm_context.reset_llm_context(token)
+
+    asyncio.run(run())
+    assert len(caller.calls_seen) == 1
+
+
+def test_provider_retry_sleep_cannot_open_a_new_deadline_window() -> None:
+    caller = _FakeCaller("primary", [_http_error(503), _valid_response("must not run")])
+    routed = ai_routes.RoutedToolCaller(primary_callers=[caller], fallback_caller=None, logger=None)
+
+    async def run() -> None:
+        token = llm_context.set_llm_context(
+            purpose="reply", deadline_monotonic=asyncio.get_running_loop().time() + 0.02
+        )
+        try:
+            with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+                await routed.chat_with_tools([], [], False)
+            assert caught.value.code == "provider_timeout"
+        finally:
+            llm_context.reset_llm_context(token)
+
+    asyncio.run(run())
+    assert len(caller.calls_seen) == 1
+
+
+def test_successful_route_scope_survives_wait_for_and_resets_next_turn() -> None:
+    primary = _FakeCaller(
+        "primary",
+        [tool_impl.ToolCallerResponse("stop", "", [], {}), _valid_response("new-turn")],
+    )
+    fallback = _FakeCaller("fallback", [_valid_response("first"), _valid_response("scoped")])
+    routed = ai_routes.RoutedToolCaller(primary_callers=[primary], fallback_caller=fallback, logger=None)
+
+    async def run() -> tuple[str, str, str]:
+        token = llm_context.set_llm_context(purpose="reply")
+        try:
+            # The fallback route succeeds *inside* wait_for's child task.
+            # Its affinity must reach the parent turn through the explicitly
+            # shared state object, rather than a child-only ContextVar value.
+            first = await asyncio.wait_for(routed.chat_with_tools([], [], False), 1)
+            second = await routed.chat_with_tools([], [], False)
+        finally:
+            llm_context.reset_llm_context(token)
+        next_token = llm_context.set_llm_context(purpose="reply")
+        try:
+            third = await routed.chat_with_tools([], [], False)
+        finally:
+            llm_context.reset_llm_context(next_token)
+        return first.content, second.content, third.content
+
+    assert asyncio.run(run()) == ("first", "scoped", "new-turn")
+    assert len(fallback.calls_seen) == 2
+    # First turn probes primary before fallback; only the fresh context for
+    # the third call probes it again.  The second call remained on fallback.
+    assert len(primary.calls_seen) == 2
+
+
+def test_tool_continuation_stays_pinned_despite_turn_route_preference() -> None:
+    primary = _FakeCaller("primary", [_valid_response("pinned")])
+    fallback = _FakeCaller("fallback", [AssertionError("must not run")])
+    routed = ai_routes.RoutedToolCaller(primary_callers=[primary], fallback_caller=fallback, logger=None)
+    token = llm_context.set_llm_context(purpose="reply")
+    try:
+        llm_context.remember_successful_route(routed._caller_route_keys[id(fallback)])
+        result = asyncio.run(
+            routed.chat_with_tools(
+                [{"role": "tool", "content": "done", "_personification_routed_caller": routed._caller_route_keys[id(primary)]}],
+                [],
+                False,
+            )
+        )
+    finally:
+        llm_context.reset_llm_context(token)
+
+    assert result.content == "pinned"
+    assert len(primary.calls_seen) == 1
+    assert len(fallback.calls_seen) == 0
