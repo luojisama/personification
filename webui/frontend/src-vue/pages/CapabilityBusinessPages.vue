@@ -111,23 +111,7 @@
           </div>
         </QueryBoundary>
 
-        <div v-if="skillsQuery.data.value && skillsQuery.data.value.total_pages > 1" class="pagination">
-          <button
-            type="button"
-            :disabled="skillPage <= 1"
-            @click="skillPage--"
-          >
-            上一页
-          </button>
-          <span>第 {{ skillsQuery.data.value.page }} / {{ skillsQuery.data.value.total_pages }} 页</span>
-          <button
-            type="button"
-            :disabled="skillPage >= skillsQuery.data.value.total_pages"
-            @click="skillPage++"
-          >
-            下一页
-          </button>
-        </div>
+        <Pagination v-if="skillsQuery.data.value" :page="skillPage" :total-pages="skillsQuery.data.value.total_pages" :total="skillsQuery.data.value.total" :disabled="skillsQuery.isFetching.value" @update:page="skillPage = $event" />
       </Panel>
 
       <DiagnosticPanel
@@ -462,26 +446,7 @@
           </div>
         </QueryBoundary>
 
-        <div
-          v-if="currentSection !== 'search' && knowledgeCatalogQuery.data.value && knowledgeCatalogQuery.data.value.total_pages > 1"
-          class="pagination"
-        >
-          <button
-            type="button"
-            :disabled="knowledgePage <= 1"
-            @click="knowledgePage--"
-          >
-            上一页
-          </button>
-          <span>第 {{ knowledgeCatalogQuery.data.value.page }} / {{ knowledgeCatalogQuery.data.value.total_pages }} 页</span>
-          <button
-            type="button"
-            :disabled="knowledgePage >= knowledgeCatalogQuery.data.value.total_pages"
-            @click="knowledgePage++"
-          >
-            下一页
-          </button>
-        </div>
+        <Pagination v-if="currentSection !== 'search' && knowledgeCatalogQuery.data.value" :page="knowledgePage" :total-pages="knowledgeCatalogQuery.data.value.total_pages" :total="knowledgeCatalogQuery.data.value.total" :disabled="knowledgeCatalogQuery.isFetching.value" @update:page="knowledgePage = $event" />
       </Panel>
 
       <Panel v-if="currentSection === 'rebuild'" eyebrow="PLUGIN KNOWLEDGE / BUILD STATUS" title="构建状态与单次重建">
@@ -742,6 +707,7 @@ import { formatDateTime } from "@/lib/format";
 import DiagnosticPanel from "@vue-app/components/DiagnosticPanel.vue";
 import SourceCoverage from "@vue-app/components/SourceCoverage.vue";
 import PageHeader from "@vue-app/components/PageHeader.vue";
+import Pagination from "@vue-app/components/Pagination.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";

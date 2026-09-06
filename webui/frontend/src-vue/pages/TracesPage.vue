@@ -13,7 +13,6 @@
           hide-label
           type="search"
           placeholder="搜索 Trace ID、会话、QQ、状态或诊断码"
-          @update:model-value="page = 1"
         />
       </template>
     </PageHeader>
@@ -38,7 +37,7 @@
                 <time>{{ formatDateTime(item.started_at) }}</time>
               </div>
               <strong>{{ item.user_name || item.user_id }}</strong>
-              <p>{{ item.input_summary || "没有可展示的消息摘要" }}</p>
+              <CollapsibleText :text="item.input_summary || '没有可展示的消息摘要'" :limit="180" />
               <div class="trace-index-meta">
                 <StateBadge :tone="outcomeTone(item.outcome)">{{ traceOutcomeLabel(item.outcome) }}</StateBadge>
                 <span>{{ formatDuration(item.elapsed_ms) }}</span>
@@ -47,11 +46,7 @@
           </div>
         </QueryBoundary>
 
-        <div v-if="listQuery.data.value && listQuery.data.value.total_pages > 1" class="pagination">
-          <button type="button" :disabled="page <= 1" @click="page--">上一页</button>
-          <span>{{ listQuery.data.value.page }} / {{ listQuery.data.value.total_pages }}</span>
-          <button type="button" :disabled="page >= listQuery.data.value.total_pages" @click="page++">下一页</button>
-        </div>
+        <Pagination v-if="listQuery.data.value" :page="page" :total-pages="listQuery.data.value.total_pages" :total="listQuery.data.value.total" :disabled="listQuery.isFetching.value" @update:page="page = $event" />
       </Panel>
 
       <QueryBoundary
@@ -81,7 +76,7 @@
 
             <article class="message-evidence">
               <span>收到的消息 · 安全摘要</span>
-              <p>{{ detailQuery.data.value.input_summary || "消息内容未进入可见 Trace。" }}</p>
+              <CollapsibleText :text="detailQuery.data.value.input_summary || '消息内容未进入可见 Trace。'" :limit="360" />
               <ul v-if="detailQuery.data.value.media_summary.length > 0">
                 <li v-for="(media, idx) in detailQuery.data.value.media_summary" :key="`${idx}:${media}`">{{ media }}</li>
               </ul>
@@ -145,7 +140,7 @@
                       {{ stageStatusLabel(stage.status) }}
                     </StateBadge>
                   </header>
-                  <p v-if="stage.summary">{{ stage.summary }}</p>
+                  <CollapsibleText v-if="stage.summary" :text="stage.summary" :limit="300" />
                   <footer>
                     <code>{{ stage.detail_code }}</code>
                     <span>{{ formatDuration(stage.duration_ms) }}</span>
@@ -234,6 +229,8 @@ import {
   traceOutcomeLabel,
 } from "@/lib/labels";
 import PageHeader from "@vue-app/components/PageHeader.vue";
+import CollapsibleText from "@vue-app/components/CollapsibleText.vue";
+import Pagination from "@vue-app/components/Pagination.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
@@ -257,6 +254,7 @@ const listQuery = useQuery({
 });
 
 watch(search, (value) => {
+  page.value = 1;
   if (searchTimer !== undefined) window.clearTimeout(searchTimer);
   searchTimer = window.setTimeout(() => {
     debouncedSearch.value = value.trim();
@@ -276,8 +274,15 @@ const detailQuery = useQuery({
 watch(
   () => listQuery.data.value,
   (data) => {
-    if (!currentTraceId.value && data?.items[0]?.trace_id) {
-      void router.replace(`/runtime/traces/timeline/${encodeURIComponent(data.items[0].trace_id)}`);
+    // The index is a stable landing target for old `/traces` links.  Only the
+    // explicit timeline view may choose the first record, and it keeps a
+    // caller's query/hash while doing so.
+    if (route.path === "/runtime/traces/timeline" && !currentTraceId.value && data?.items[0]?.trace_id) {
+      void router.replace({
+        path: `/runtime/traces/timeline/${encodeURIComponent(data.items[0].trace_id)}`,
+        query: route.query,
+        hash: route.hash,
+      });
     }
   },
   { immediate: true },

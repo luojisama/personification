@@ -198,11 +198,7 @@
         <span>索引时间 {{ formatDateTime(managementData.index.indexed_at) }}</span>
       </div>
 
-      <div v-if="listQuery.data.value && listQuery.data.value.total_pages > 1" class="pagination">
-        <button type="button" :disabled="pageQuery <= 1" @click="setPage(pageQuery - 1)">上一页</button>
-        <span>第 {{ listQuery.data.value.page }} / {{ listQuery.data.value.total_pages }} 页（共 {{ listQuery.data.value.total }} 条）</span>
-        <button type="button" :disabled="pageQuery >= listQuery.data.value.total_pages" @click="setPage(pageQuery + 1)">下一页</button>
-      </div>
+      <Pagination v-if="listQuery.data.value" :page="pageQuery" :total-pages="listQuery.data.value.total_pages" :total="listQuery.data.value.total" :disabled="listQuery.isFetching.value" @update:page="setPage" />
     </template>
 
     <!-- 画像详情视图 -->
@@ -339,11 +335,7 @@
             <GroupFavorabilityPanel :favorability="groupMemberFavorability" />
             <Panel eyebrow="GROUP / MEMBER FILTER" title="成员画像分页">
               <TextField v-model="groupPersonaSearch" label="搜索 QQ、昵称、别名或摘要" type="search" />
-              <div class="pagination">
-                <button type="button" :disabled="groupPersonaPage <= 1" @click="groupPersonaPage--">上一页</button>
-                <span>第 {{ groupPersonaPage }} 页 · 共 {{ groupPersonaTotal }} 条</span>
-                <button type="button" :disabled="!groupPersonaHasMore" @click="groupPersonaPage++">下一页</button>
-              </div>
+              <Pagination :page="groupPersonaPage" :total-pages="groupPersonaTotalPages" :total="groupPersonaTotal" :disabled="groupDetailQuery.isFetching.value" @update:page="groupPersonaPage = $event" />
             </Panel>
             <GroupMembersPanel :profiles="groupMemberProfiles" />
             <GroupAliasesPanel
@@ -471,6 +463,7 @@ import { resources } from "@/api/resources";
 import type { GroupListItem, Page, PersonaListItem, StickerListItem } from "@/api/types";
 import { formatDateTime, formatInteger } from "@/lib/format";
 import PageHeader from "@vue-app/components/PageHeader.vue";
+import Pagination from "@vue-app/components/Pagination.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
@@ -711,7 +704,10 @@ const groupAliases = computed(() => groupMemberProfiles.value
     updated_at: profile.alias_updated_at,
   })));
 const groupPersonaTotal = computed(() => Number(record(groupDetailData.value.personas).total ?? 0));
-const groupPersonaHasMore = computed(() => record(groupDetailData.value.personas).has_more === true);
+const groupPersonaTotalPages = computed(() => Math.max(1, Math.ceil(groupPersonaTotal.value / 20)));
+watch(groupPersonaTotalPages, (totalPages) => {
+  if (groupPersonaPage.value > totalPages) groupPersonaPage.value = totalPages;
+});
 const groupMemberFavorability = computed(() => record(record(groupDetailData.value.personas).group_favorability));
 const groupMemes = computed(() => records(record(groupDetailData.value.memes).items ?? record(groupDetailData.value.memes).memes));
 const groupKnowledge = computed(() => record(groupDetailData.value.knowledge));

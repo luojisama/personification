@@ -249,7 +249,7 @@ dd {
 }
 
 @media (max-width: 520px) {
-  .metric-rack,
+  .metric-rack:not(.overview-metric-rack),
   .count-ledger,
   .safe-settings-view {
     grid-template-columns: 1fr;
@@ -258,6 +258,14 @@ dd {
     width: 100%;
     margin-left: 0;
   }
+}
+
+@media (max-width: 520px) {
+  .overview-metric-rack { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
+  .overview-metric-rack article { gap: var(--space-1); min-height: 7.25rem; padding: var(--space-3); }
+  .overview-metric-rack strong { font-size: 1.3rem; }
+  .overview-metric-rack small { font-size: var(--text-xs); line-height: 1.35; }
+  .overview-grid { gap: var(--space-3); }
 }
 /* 路由能力 Dossier 与三态卡片 */
 .route-dossier-list {
@@ -978,8 +986,12 @@ dd {
 
 /* Agent 记忆与记忆宫殿样式 */
 .memory-nav {
-  margin-bottom: var(--space-4);
+  margin-block: var(--space-2);
 }
+.memory-navigation-details { color: var(--color-ink-muted); font-size: var(--text-sm); }
+.memory-navigation-details summary { cursor: pointer; }
+.moderation-table td { vertical-align: top; }
+.moderation-table td small { display: block; margin-top: .25rem; }
 
 .memory-nav .nav-tab {
   text-decoration: none;
@@ -1005,6 +1017,7 @@ dd {
 
 .data-table {
   width: 100%;
+  min-width: 42rem;
   border-collapse: collapse;
   text-align: left;
 }
@@ -1016,6 +1029,7 @@ dd {
 }
 
 .data-table th {
+  white-space: nowrap;
   font-size: var(--text-xs);
   color: var(--color-ink-muted);
 }
@@ -1167,6 +1181,7 @@ dd {
 .sticker-header-ledger {
   display: grid;
   gap: var(--space-4);
+  min-width: 0;
 }
 
 .sticker-upload-form,
@@ -1174,6 +1189,54 @@ dd {
 .sticker-edit-form {
   display: grid;
   gap: var(--space-3);
+}
+
+/* The sticker console has a three-control upload row.  It may live inside a
+ * clipped panel, so its own tracks must be shrinkable rather than relying on
+ * document scroll width to reveal a bad intrinsic minimum. */
+.persona-feature-page--stickers .metric-ribbon {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: 100%;
+  min-width: 0;
+}
+
+.persona-feature-page--stickers .metric-ribbon article {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.persona-feature-page--stickers .sticker-upload-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
+  width: 100%;
+  min-width: 0;
+}
+
+.persona-feature-page--stickers .sticker-upload-controls > input[type="file"],
+.persona-feature-page--stickers .sticker-upload-controls > .form-field {
+  width: 100%;
+  min-width: 0;
+}
+
+.persona-feature-page--stickers .sticker-upload-controls .form-control {
+  min-width: 0;
+}
+
+.persona-feature-page--stickers .sticker-upload-controls > .button {
+  max-width: 100%;
+}
+
+@media (max-width: 650px) {
+  .persona-feature-page--stickers .metric-ribbon,
+  .persona-feature-page--stickers .sticker-upload-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .persona-feature-page--stickers .sticker-upload-controls > .button {
+    justify-self: start;
+  }
 }
 
 .sticker-card-grid {

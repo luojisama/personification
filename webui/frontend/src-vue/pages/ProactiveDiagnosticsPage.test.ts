@@ -92,6 +92,10 @@ describe("ProactiveDiagnosticsPage.vue", () => {
       next_cursor: 0,
       has_more: false,
       limit: 50,
+      page: 1,
+      page_size: 50,
+      total: 1,
+      total_pages: 1,
       filters: {},
     });
 

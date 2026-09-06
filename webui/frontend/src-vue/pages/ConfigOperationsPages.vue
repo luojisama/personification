@@ -171,23 +171,7 @@
               </div>
             </QueryBoundary>
 
-            <div v-if="configQuery.data.value && configQuery.data.value.total_pages > 1" class="pagination">
-              <button
-                type="button"
-                :disabled="currentPage <= 1"
-                @click="setPage(currentPage - 1)"
-              >
-                上一页
-              </button>
-              <span>第 {{ currentPage }} / {{ configQuery.data.value.total_pages }} 页</span>
-              <button
-                type="button"
-                :disabled="currentPage >= configQuery.data.value.total_pages"
-                @click="setPage(currentPage + 1)"
-              >
-                下一页
-              </button>
-            </div>
+            <Pagination v-if="configQuery.data.value" :page="currentPage" :total-pages="configQuery.data.value.total_pages" :total="configQuery.data.value.total" :disabled="configQuery.isFetching.value" @update:page="setPage" />
           </div>
         </div>
       </div>
@@ -354,23 +338,7 @@
           </div>
         </QueryBoundary>
 
-        <div v-if="logSection === 'history' && logsQuery.data.value" class="pagination">
-          <button
-            type="button"
-            :disabled="cursorStack.length <= 1"
-            @click="popCursor"
-          >
-            较新
-          </button>
-          <span>游标页 {{ cursorStack.length }}</span>
-          <button
-            type="button"
-            :disabled="!logsQuery.data.value.has_more || !logsQuery.data.value.next_cursor"
-            @click="pushCursor(logsQuery.data.value.next_cursor)"
-          >
-            较早
-          </button>
-        </div>
+        <Pagination v-if="logSection === 'history' && logsQuery.data.value" :page="logPage" :total-pages="logsQuery.data.value.total_pages" :total="logsQuery.data.value.total" :disabled="logsQuery.isFetching.value" @update:page="setLogPage" />
       </Panel>
 
       <Panel v-if="logSection === 'cleanup'" eyebrow="LOGS / CLEANUP" title="清理插件日志">
@@ -415,10 +383,11 @@ import { useRoute, useRouter } from "vue-router";
 import { keepPreviousData, useQuery, useMutation, useQueryClient } from "@tanstack/vue-query";
 import { resources } from "@/api/resources";
 import { diagnosticFromError, safeDiagnostic } from "@/api/diagnostics";
-import type { ConfigListItem, OperationDiagnostic, CursorPage, CatalogItem } from "@/api/types";
+import type { ConfigListItem, OperationDiagnostic, PagedCursorPage, CatalogItem } from "@/api/types";
 import { formatDateTime } from "@/lib/format";
 import { useRuntimeEvents } from "@vue-app/realtime/runtimeEvents";
 import PageHeader from "@vue-app/components/PageHeader.vue";
+import Pagination from "@vue-app/components/Pagination.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
@@ -687,12 +656,19 @@ watch(logSearchInput, (val) => {
   if (logSearchTimer) clearTimeout(logSearchTimer);
   logSearchTimer = window.setTimeout(() => {
     debouncedLogSearch.value = val;
-    cursorStack.value = [0];
+    logPage.value = 1;
   }, 300);
 });
 
-const cursorStack = ref<number[]>([0]);
-const currentCursor = computed(() => cursorStack.value[cursorStack.value.length - 1] ?? 0);
+const logPage = computed({
+  get: () => Math.max(1, Number(route.query.page ?? 1) || 1),
+  set: (value: number) => {
+    const next = { ...route.query };
+    if (value > 1) next.page = String(value);
+    else delete next.page;
+    void router.replace({ query: next });
+  },
+});
 const cleanupConfirmation = ref("");
 const cleanupConfirmationError = computed(() =>
   cleanupConfirmation.value && cleanupConfirmation.value !== "CLEAR LOGS"
@@ -721,9 +697,9 @@ const liveEvents = computed<CatalogItem[]>(() => {
   return result;
 });
 
-const logsQuery = useQuery<CursorPage<CatalogItem>>({
-  queryKey: computed(() => ["logs", currentCursor.value, debouncedLogSearch.value]),
-  queryFn: ({ signal }) => resources.logs(100, currentCursor.value, debouncedLogSearch.value, signal),
+const logsQuery = useQuery<PagedCursorPage<CatalogItem>>({
+  queryKey: computed(() => ["logs", logPage.value, debouncedLogSearch.value]),
+  queryFn: ({ signal }) => resources.logs(logPage.value, 100, debouncedLogSearch.value, signal),
   enabled: computed(() => activeMode.value === "logs" && logSection.value === "history"),
 });
 
@@ -734,8 +710,7 @@ const clearLogsMutation = useMutation({
 function navigateLogSection(sec: string) {
   router.push(`/operations/logs/${sec}`);
 }
-function pushCursor(next: number) { cursorStack.value.push(next); }
-function popCursor() { if (cursorStack.value.length > 1) cursorStack.value.pop(); }
+function setLogPage(nextPage: number) { logPage.value = nextPage; }
 
 const currentLogRows = computed(() => {
   if (logSection.value === "live") return liveEvents.value;

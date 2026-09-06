@@ -37,7 +37,10 @@
 .rail-collapsed .nav-label { display: none; }
 .workbench { min-width: 0; min-height: 100vh; }
 .top-status-line { position: sticky; z-index: 50; top: 0; display: flex; gap: var(--space-4); align-items: center; min-height: 2.75rem; padding: .5rem var(--space-4); color: var(--color-ink-muted); background: var(--color-surface); border-bottom: 1px solid var(--color-line); backdrop-filter: blur(12px); font-size: var(--text-xs); }
-.top-status-line code { margin-left: auto; }
+.top-status-line code { overflow-wrap: anywhere; }
+.top-status-details { margin-left: auto; }
+.top-status-details summary { cursor: pointer; }
+.top-status-details[open] { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
 .workspace-navigation { position: sticky; z-index: 40; top: 2.75rem; background: var(--color-surface); border-bottom: 1px solid var(--color-line); }
 .secondary-navigation, .tertiary-navigation { display: flex; gap: var(--space-2); align-items: center; min-width: 0; overflow-x: auto; padding: .45rem var(--space-4); white-space: nowrap; }
 .secondary-navigation { min-height: 2.65rem; }
@@ -71,8 +74,9 @@
   .visual-section-nav { display: none; }
   .mobile-section-selector { display: block; padding: 0 var(--space-3); }
   .mobile-section-selector .form-field { min-width: 0; }
-  .mobile-nav-trigger { position: fixed; z-index: 90; right: 1rem; bottom: 1rem; display: inline-flex; gap: .4rem; align-items: center; padding: .75rem 1rem; color: var(--color-signal-ink); background: var(--color-signal); border: 0; border-radius: var(--radius-sm); box-shadow: var(--shadow-lg); font-weight: 700; }
+  .mobile-nav-trigger { display: inline-flex; flex: 0 0 auto; gap: .35rem; align-items: center; min-height: 2rem; padding: .35rem .55rem; color: var(--color-signal-ink); background: var(--color-signal); border: 0; border-radius: var(--radius-sm); font-size: var(--text-xs); font-weight: 700; }
   .drawer-scrim { position: fixed; z-index: 80; inset: 0; display: block; background: var(--dialog-backdrop); border: 0; }
+  .top-status-line { gap: var(--space-2); padding-inline: var(--space-3); }
   .top-status-line span:nth-of-type(n + 2), .top-status-line code { display: none; }
   .main-workspace { padding: var(--space-4); }
 }

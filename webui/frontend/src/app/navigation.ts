@@ -118,6 +118,7 @@ export const NAVIGATION_TREE: NavigationNode[] = [
     { id: "personas", label: "用户画像", aliases: ["用户", "头像", "好感度"], icon: "data", legacy: "personas", dataSource: "/api/v2/personas", leaves: [{ id: "list", label: "画像列表", slug: "list" }, { id: "detail", label: "画像详情", slug: "detail" }, { id: "refresh", label: "后台刷新", slug: "refresh" }] },
     { id: "groups", label: "群信息", aliases: ["群目录", "成员", "群知识", "Peer Bot", "空间互动"], icon: "data", legacy: "groups", dataSource: "/api/v2/groups", leaves: [{ id: "list", label: "群列表", slug: "list" }, { id: "detail", label: "群详情", slug: "detail" }, { id: "knowledge", label: "知识与风格", slug: "knowledge" }, { id: "members", label: "成员与别名", slug: "members" }, { id: "peer-bots", label: "Peer Bot 协作", slug: "peer-bots" }, { id: "qzone-agent", label: "空间互动", slug: "qzone-agent" }] },
     { id: "group-switches", label: "群开关", aliases: ["白名单", "启用群"], icon: "settings", legacy: "group_switch", dataSource: "/api/v2/group-switches", leaves: [{ id: "list", label: "开关列表", slug: "list" }] },
+    { id: "controlled-moderation", label: "受控禁言", aliases: ["两轮提醒", "解除禁言", "处罚记录"], icon: "shield", dataSource: "/api/v2/moderation", leaves: [{ id: "incidents", label: "事件与解除", slug: "incidents" }] },
     { id: "memories", label: "Agent 记忆", aliases: ["记忆", "召回", "向量"], icon: "data", legacy: "memory", dataSource: "/api/v2/memories", leaves: [{ id: "recent", label: "最近记忆", slug: "recent" }, { id: "search", label: "搜索与召回", slug: "search" }, { id: "index", label: "向量索引", slug: "vector-index" }] },
     { id: "memory-palace", label: "记忆宫殿", aliases: ["记忆图谱", "关系", "冲突"], icon: "route", legacy: "memory_graph", dataSource: "/api/v2/memory-palace", leaves: [{ id: "graph", label: "图谱", slug: "graph" }, { id: "zones", label: "分区", slug: "zones" }, { id: "conflicts", label: "关系与冲突", slug: "conflicts" }] },
     { id: "stickers", label: "表情包", aliases: ["贴纸", "标签", "索引"], icon: "data", legacy: "stickers", dataSource: "/api/v2/stickers", leaves: [{ id: "catalog", label: "贴纸目录", slug: "catalog" }, { id: "upload", label: "上传与编辑", slug: "upload" }, { id: "index", label: "索引任务", slug: "index" }] },
@@ -177,7 +178,7 @@ const NAVIGATION_SECTION_INPUTS: NavigationSectionInput[] = [
     label: "画像与群聊",
     aliases: ["用户画像", "群信息", "群开关"],
     icon: "data",
-    page_ids: ["persona.personas", "persona.groups", "persona.group-switches"],
+    page_ids: ["persona.personas", "persona.groups", "persona.group-switches", "persona.controlled-moderation"],
   },
   {
     id: "memory-expression",
@@ -259,7 +260,7 @@ export function navigationContext(pathname: string): NavigationContext | null {
 export const FLAT_ROUTE_REDIRECTS: Record<string, string> = {
   "/agent-status": "/runtime/agent/status", "/tokens": "/runtime/tokens/24h", "/health": "/runtime/health/catalog", "/model-tests": "/runtime/model-tests/chat",
   "/routes": "/runtime/routes/capabilities", "/proactive": "/runtime/proactive/recent", "/traces": "/runtime/traces/index", "/recovery": "/runtime/recovery/pending",
-  "/qzone": "/runtime/qzone/capabilities", "/personas": "/persona/personas/list", "/groups": "/persona/groups/list", "/group-switches": "/persona/group-switches/list",
+  "/qzone": "/runtime/qzone/capabilities", "/personas": "/persona/personas/list", "/groups": "/persona/groups/list", "/group-switches": "/persona/group-switches/list", "/controlled-moderation": "/persona/controlled-moderation/incidents",
   "/memories": "/persona/memories/recent", "/memory-palace": "/persona/memory-palace/graph", "/stickers": "/persona/stickers/catalog",
   "/persona-preview": "/persona/persona-preview/prompt", "/persona-builder": "/persona/persona-builder/tasks", "/skills": "/capability/skills/installed",
   "/mcp": "/capability/mcp/registry", "/tool-creator": "/capability/tool-creator/tasks", "/plugin-knowledge": "/capability/plugin-knowledge/catalog",

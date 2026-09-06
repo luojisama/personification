@@ -9,6 +9,8 @@ import { resources } from "@/api/resources";
 vi.mock("@/api/resources", () => ({
   resources: {
     catalog: vi.fn(),
+    memoryPage: vi.fn(),
+    memoryZonePage: vi.fn(),
     memoryBusiness: vi.fn(),
     memorySearch: vi.fn(),
     rebuildMemoryIndex: vi.fn(),
@@ -37,9 +39,9 @@ describe("MemoryPages.vue", () => {
   });
 
   it("renders recent memories table with structured columns", async () => {
-    vi.mocked(resources.catalog).mockResolvedValue({
+    vi.mocked(resources.memoryPage).mockResolvedValue({
       items: [
-        { id: "mem_1", summary: "用户喜欢喝乌龙茶", scope: "group_123", source: "dialogue", status: "active", expires_at: null },
+        { id: "mem_1", summary: "用户喜欢喝乌龙茶", scope: "group", source: "dialogue", status: "active", expires_at: null },
       ],
       page: 1,
       page_size: 20,
@@ -57,7 +59,37 @@ describe("MemoryPages.vue", () => {
     });
 
     expect(wrapper.text()).toContain("Agent 记忆与记忆宫殿");
-    expect(resources.catalog).toHaveBeenCalledWith("memories", 1, 20, "", expect.anything());
+    await flushPromises();
+    expect(resources.memoryPage).toHaveBeenCalledWith(1, 20, { search: "" }, expect.anything());
+    expect(wrapper.text()).toContain("群聊");
+    expect(wrapper.text()).toContain("聊天对话");
+    expect(wrapper.text()).toContain("有效");
+    expect(wrapper.find(".state-badge").attributes("title")).toBe("active");
+  });
+
+  it("uses Chinese labels for known memory enums and a diagnostic raw value for unknown ones", async () => {
+    vi.mocked(resources.memoryPage).mockResolvedValue({
+      items: [{ id: "mem_unknown", summary: "合成记录", scope: "unrecognized_scope", source_kind: "unrecognized_source", status: "unrecognized_status", expires_at: null }],
+      page: 1, page_size: 20, total: 1, total_pages: 1,
+    });
+
+    await router.push("/persona/memories/recent");
+    await router.isReady();
+    const wrapper = mount(MemoryPages, { global: { plugins: [router, [VueQueryPlugin, { queryClient }]] } });
+    await flushPromises();
+
+    const cells = wrapper.findAll("tbody td");
+    const [, scope, source, status] = cells;
+    expect(scope).toBeDefined();
+    expect(source).toBeDefined();
+    expect(status).toBeDefined();
+    if (!scope || !source || !status) throw new Error("memory row did not render expected cells");
+    expect(scope.text()).toBe("未知");
+    expect(scope.attributes("title")).toBe("unrecognized_scope");
+    expect(source.text()).toBe("未知");
+    expect(source.attributes("title")).toBe("unrecognized_source");
+    expect(status.text()).toContain("未知");
+    expect(status.find(".state-badge").attributes("title")).toBe("unrecognized_status");
   });
 
   it("requires explicit window.confirm before triggering rebuild", async () => {
@@ -67,6 +99,7 @@ describe("MemoryPages.vue", () => {
       updated_at: 1710000000000,
       diagnostic_code: "vector_index_ready",
     });
+    vi.mocked(resources.memoryZonePage).mockResolvedValue({ items: [], page: 1, page_size: 20, total: 0, total_pages: 1 });
     vi.mocked(resources.rebuildMemoryIndex).mockResolvedValue({ diagnostic_code: "rebuild_queued" });
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
 
@@ -113,7 +146,8 @@ describe("MemoryPages.vue", () => {
     expect(zone.attributes("aria-label")).toContain("人物记忆");
     await zone.trigger("click");
     expect(wrapper.text()).toContain("条目数");
-    expect(wrapper.text()).toContain("后端暂未提供该分区的条目明细");
+    await flushPromises();
+    expect(wrapper.text()).toContain("当前分区暂无可展示条目");
     expect(wrapper.text()).not.toContain("memory_1");
   });
 });

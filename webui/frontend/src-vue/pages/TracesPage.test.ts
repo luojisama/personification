@@ -1,6 +1,13 @@
-import { describe, expect, it } from "vitest";
-import type { TraceDetail } from "@/api/types";
+import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
+import { mount } from "@vue/test-utils";
+import { createMemoryHistory, createRouter } from "vue-router";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { resources } from "@/api/resources";
+import type { TraceDetail, TraceListItem } from "@/api/types";
 import { deriveTraceMetrics, traceTriageText } from "./tracesPageMetrics";
+import TracesPage from "./TracesPage.vue";
+
+vi.mock("@/api/resources", () => ({ resources: { traces: vi.fn(), trace: vi.fn() } }));
 
 const trace: TraceDetail = {
   trace_id: "trace-safe",
@@ -78,5 +85,58 @@ describe("Vue Traces metrics & triage logic", () => {
 
     expect(traceTriageText(noReply, deriveTraceMetrics(noReply))).toContain("没有发送可见回复");
     expect(traceTriageText(unknown, deriveTraceMetrics(unknown))).toContain("最终结果无法确认");
+  });
+});
+
+const listItem: TraceListItem = {
+  trace_id: "trace-first", started_at: "2026-09-06T03:30:00Z", finished_at: null,
+  session_type: "group", group_id: "30001", user_id: "20001", user_name: "合成用户",
+  avatar_url: null, outcome: "ok", diagnosis_code: "synthetic", input_summary: "合成摘要", elapsed_ms: 10,
+};
+
+async function renderTracePage(path: string) {
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: "/runtime/traces/index", component: TracesPage },
+      { path: "/runtime/traces/timeline", component: TracesPage },
+      { path: "/runtime/traces/timeline/:traceId", component: TracesPage },
+    ],
+  });
+  await router.push(path); await router.isReady();
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = mount(TracesPage, { global: { plugins: [router, [VueQueryPlugin, { queryClient }]] } });
+  await vi.waitFor(() => expect(vi.mocked(resources.traces)).toHaveBeenCalled());
+  return { router, wrapper, queryClient };
+}
+
+describe("Trace index route behavior", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(resources.traces).mockResolvedValue({ items: [listItem], page: 1, page_size: 20, total: 2, total_pages: 2 });
+    vi.mocked(resources.trace).mockResolvedValue(trace);
+  });
+
+  it("keeps old-link index landing on the index instead of auto-selecting a Trace", async () => {
+    const { router, wrapper, queryClient } = await renderTracePage("/runtime/traces/index?source=legacy#proof");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("合成用户"));
+    expect(router.currentRoute.value.fullPath).toBe("/runtime/traces/index?source=legacy#proof");
+    wrapper.unmount(); queryClient.clear();
+  });
+
+  it("only auto-selects from the explicit timeline and preserves query/hash", async () => {
+    const { router, wrapper, queryClient } = await renderTracePage("/runtime/traces/timeline?source=timeline#proof");
+    await vi.waitFor(() => expect(router.currentRoute.value.fullPath).toBe("/runtime/traces/timeline/trace-first?source=timeline#proof"));
+    wrapper.unmount(); queryClient.clear();
+  });
+
+  it("resets the list page as soon as a search changes", async () => {
+    const { wrapper, queryClient } = await renderTracePage("/runtime/traces/index");
+    await vi.waitFor(() => expect(wrapper.find("button[aria-label='下一页']").exists()).toBe(true));
+    await wrapper.get("button[aria-label='下一页']").trigger("click");
+    await vi.waitFor(() => expect(vi.mocked(resources.traces)).toHaveBeenLastCalledWith(2, 20, "", expect.anything()));
+    await wrapper.get("input[type='search']").setValue("trace-first");
+    await vi.waitFor(() => expect(vi.mocked(resources.traces)).toHaveBeenLastCalledWith(1, 20, "", expect.anything()));
+    wrapper.unmount(); queryClient.clear();
   });
 });

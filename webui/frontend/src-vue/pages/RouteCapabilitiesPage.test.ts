@@ -12,6 +12,9 @@ vi.mock("@/api/resources", () => ({
     routes: vi.fn(),
     queueRouteProbe: vi.fn(),
     uploadRouteMediaProbe: vi.fn(),
+    routeProbeOperation: vi.fn(),
+    routeProbeHistory: vi.fn(),
+    cancelRouteProbeOperation: vi.fn(),
   },
 }));
 
@@ -86,6 +89,7 @@ describe("RouteCapabilitiesPage", () => {
       warnings: [],
       steps: [],
     });
+    vi.mocked(resources.routeProbeHistory).mockResolvedValue({ items: [], page: 1, page_size: 20, total: 0, total_pages: 1 });
   });
 
   async function renderPage() {
@@ -167,5 +171,44 @@ describe("RouteCapabilitiesPage", () => {
     expect(resources.uploadRouteMediaProbe).toHaveBeenCalledWith("rf_test_1234567890", "audio_input", sample);
     wrapper.unmount();
     queryClient.clear();
+  });
+
+  it("显示持久化任务的真实阶段，并允许取消仍在运行的任务", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.mocked(resources.queueRouteProbe).mockResolvedValueOnce({
+      ok: true, code: "route_probe_queued", phase: "queued", title: "已排队", message: "等待执行", retryable: false,
+      partial: false, outcome_unknown: false, warnings: [], steps: [], operation_id: "rp-visible",
+    });
+    vi.mocked(resources.routeProbeOperation).mockResolvedValue({
+      operation_id: "rp-visible", route_fingerprint: "rf_test_1234567890", capability: "function_call", source: "manual",
+      status: "running", detail_code: "probe_running", capability_state: "unknown", verification_state: "not_run",
+      transport_verified: false, content_verified: false, queued_at: 1710000000000, started_at: 1710000001000,
+      finished_at: null, duration_ms: 0, facts: { last_verified: null, latest_attempt: null },
+    });
+    vi.mocked(resources.cancelRouteProbeOperation).mockResolvedValue({
+      ...(await vi.mocked(resources.routeProbeOperation)("rp-visible")), status: "cancel_requested",
+    });
+    const { wrapper, queryClient } = await renderPage();
+    await vi.waitFor(() => expect(wrapper.text()).toContain("函数: 支持"));
+    const functionCell = wrapper.findAll(".capability-cell").find((cell) => cell.text().includes("函数: 支持"));
+    await functionCell?.find("button").trigger("click");
+    await vi.waitFor(() => expect(resources.routeProbeOperation).toHaveBeenCalledWith("rp-visible"));
+    await vi.waitFor(() => expect(wrapper.text()).toContain("阶段：执行"));
+    await functionCell?.find(".probe-operation-feedback button").trigger("click");
+    expect(resources.cancelRouteProbeOperation).toHaveBeenCalledWith("rp-visible");
+    wrapper.unmount();
+    queryClient.clear();
+  });
+
+  it("排队失败有可见反馈且解除按钮忙碌状态", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.mocked(resources.queueRouteProbe).mockRejectedValueOnce(new Error("network"));
+    const { wrapper, queryClient } = await renderPage();
+    await vi.waitFor(() => expect(wrapper.text()).toContain("函数: 支持"));
+    const cell = wrapper.findAll(".capability-cell").find(item => item.text().includes("函数: 支持"))!;
+    await cell.find("button").trigger("click");
+    await vi.waitFor(() => expect(wrapper.get('[role="alert"]').text()).toContain("探针未能排队"));
+    expect(cell.find("button").attributes("disabled")).toBeUndefined();
+    wrapper.unmount(); queryClient.clear();
   });
 });

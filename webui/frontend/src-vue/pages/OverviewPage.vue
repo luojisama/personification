@@ -14,7 +14,7 @@
 
     <QueryBoundary :pending="isPending" :error="error">
       <template v-if="data">
-        <section class="metric-rack" aria-label="运行指标">
+        <section class="metric-rack overview-metric-rack" aria-label="运行指标">
           <article>
             <span>运行状态</span>
             <strong>
@@ -42,7 +42,7 @@
         </section>
 
         <div class="overview-grid">
-          <Panel eyebrow="EVIDENCE / ROUTES" title="路由能力证据">
+          <Panel eyebrow="EVIDENCE / ROUTES" title="路由能力">
             <div class="evidence-bars">
               <div>
                 <span>支持</span>
@@ -65,7 +65,7 @@
             </RouterLink>
           </Panel>
 
-          <Panel eyebrow="RECOVERY / INBOUND" title="失败恢复队列">
+          <Panel eyebrow="RECOVERY / INBOUND" title="恢复队列">
             <dl class="count-ledger">
               <div><dt>待恢复</dt><dd>{{ formatInteger(data.recovery_counts.pending) }}</dd></div>
               <div><dt>处理中</dt><dd>{{ formatInteger(data.recovery_counts.processing) }}</dd></div>

@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
+import { createMemoryHistory, createRouter } from "vue-router";
 
 import { FEATURE_PARITY_CONTRACTS } from "./parityContracts";
 import { FLAT_ROUTE_REDIRECTS, LEGACY_VIEW_MAPPINGS, NAVIGATION_GROUPS, NAVIGATION_ITEMS, NAVIGATION_LEAVES, NAVIGATION_SECTIONS, navigationContext } from "./navigation";
@@ -106,6 +107,17 @@ describe("新版分层导航与行为对齐合同", () => {
     expect(FLAT_ROUTE_REDIRECTS["/group-switches"]).toBe("/persona/group-switches/list");
     expect(FLAT_ROUTE_REDIRECTS).not.toHaveProperty("/data");
     expect(FLAT_ROUTE_REDIRECTS).not.toHaveProperty("/catalog");
+  });
+
+  it("静态旧 Trace 索引优先于参数化 Trace 详情并保留定位信息", async () => {
+    const router = createRouter({ history: createMemoryHistory(), routes });
+    const resolved = router.resolve("/traces?source=legacy#proof");
+    expect(resolved.matched.map((record) => record.path)).toEqual(["/traces"]);
+    await router.push("/traces?source=legacy#proof");
+    expect(router.currentRoute.value.fullPath).toBe("/runtime/traces/index?source=legacy#proof");
+    expect(router.currentRoute.value.redirectedFrom?.fullPath).toBe("/traces?source=legacy#proof");
+    await router.push("/traces/trace-1?source=legacy#proof");
+    expect(router.currentRoute.value.fullPath).toBe("/runtime/traces/timeline/trace-1?source=legacy#proof");
   });
 
   it("Vue 官方路由覆盖全部行为合同并保留旧深链", () => {

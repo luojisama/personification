@@ -1,5 +1,5 @@
 <template>
-  <div class="page-stack">
+  <div :class="['page-stack', { 'persona-feature-page--stickers': pageMode === 'stickers' }]">
     <!-- 1. 表情包管理 -->
     <template v-if="pageMode === 'stickers'">
       <PageHeader
@@ -36,8 +36,8 @@
             <article>
               <small>索引状态</small>
               <strong>
-                <StateBadge :tone="stickersQuery.data.value?.index_stale ? 'warn' : 'ok'">
-                  {{ stickersQuery.data.value?.index_status || "正常" }}
+                <StateBadge :tone="stickerIndexTone">
+                  {{ stickerIndexLabel }}
                 </StateBadge>
               </strong>
             </article>
@@ -52,7 +52,7 @@
           </div>
 
           <form class="sticker-upload-form" @submit.prevent="handleUpload">
-            <div class="inline-controls">
+            <div class="inline-controls sticker-upload-controls">
               <input
                 ref="fileInputRef"
                 type="file"
@@ -150,24 +150,7 @@
             </article>
           </div>
 
-          <!-- 分页控件 -->
-          <div class="pagination">
-            <button
-              type="button"
-              :disabled="stickerPage <= 1"
-              @click="stickerPage--"
-            >
-              上一页
-            </button>
-            <span>第 {{ stickerPage }} / {{ stickersQuery.data.value?.total_pages || 1 }} 页</span>
-            <button
-              type="button"
-              :disabled="stickerPage >= (stickersQuery.data.value?.total_pages || 1)"
-              @click="stickerPage++"
-            >
-              下一页
-            </button>
-          </div>
+          <Pagination :page="stickerPage" :total-pages="stickersQuery.data.value?.total_pages || 1" :total="stickersQuery.data.value?.total || 0" :disabled="stickersQuery.isFetching.value" @update:page="stickerPage = $event" />
         </QueryBoundary>
       </Panel>
 
@@ -413,6 +396,7 @@ import { resources } from "@/api/resources";
 import type { StickerListItem } from "@/api/types";
 import { formatDateTime, formatInteger } from "@/lib/format";
 import PageHeader from "@vue-app/components/PageHeader.vue";
+import Pagination from "@vue-app/components/Pagination.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
@@ -448,6 +432,29 @@ const stickersQuery = useQuery({
   queryKey: computed(() => ["stickers", stickerPage.value, stickerSearch.value]),
   queryFn: ({ signal }) => resources.stickers(stickerPage.value, 20, stickerSearch.value, signal),
   enabled: computed(() => pageMode.value === "stickers"),
+});
+
+const stickerIndexStatus = computed(() => String(stickersQuery.data.value?.index_status || "").trim().toLowerCase());
+
+const stickerIndexLabel = computed(() => {
+  const payload = stickersQuery.data.value;
+  if (!payload) {
+    if (stickersQuery.isPending.value) return "正在读取";
+    if (stickersQuery.error.value) return "不可用";
+    return "未知／未配置";
+  }
+  return stickerIndexStatus.value || "未知／未配置";
+});
+
+const stickerIndexTone = computed<"ok" | "warn" | "error" | "running" | "unknown">(() => {
+  if (!stickersQuery.data.value) {
+    return stickersQuery.isPending.value ? "running" : stickersQuery.error.value ? "error" : "unknown";
+  }
+  if (!stickerIndexStatus.value || ["unknown", "not_configured", "unconfigured"].includes(stickerIndexStatus.value)) {
+    return "unknown";
+  }
+  if (["error", "failed", "unavailable"].includes(stickerIndexStatus.value)) return "error";
+  return stickersQuery.data.value.index_stale ? "warn" : "ok";
 });
 
 const rescanMutation = useMutation({

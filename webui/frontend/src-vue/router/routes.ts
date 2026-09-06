@@ -8,6 +8,7 @@ import FunctionalTestsPage from "@vue-app/pages/FunctionalTestsPage.vue";
 import GroupSwitchesPage from "@vue-app/pages/GroupSwitchesPage.vue";
 import ManagementDataPage from "@vue-app/pages/ManagementDataPage.vue";
 import MemoryPages from "@vue-app/pages/MemoryPages.vue";
+import ControlledModerationPage from "@vue-app/pages/ControlledModerationPage.vue";
 import ModelTestsPage from "@vue-app/pages/ModelTestsPage.vue";
 import NotFoundPage from "@vue-app/pages/NotFoundPage.vue";
 import OverviewPage from "@vue-app/pages/OverviewPage.vue";
@@ -53,6 +54,7 @@ export const routes: RouteRecordRaw[] = [
   { path: "/persona/personas/:section", name: "persona-personas", component: ManagementDataPage, props: { dataset: "personas" }, meta: { title: "用户画像" } },
   { path: "/persona/groups/:section", name: "persona-groups", component: ManagementDataPage, props: { dataset: "groups" }, meta: { title: "群信息" } },
   { path: "/persona/group-switches/list", name: "persona-group-switches", component: GroupSwitchesPage, meta: { title: "群开关" } },
+  { path: "/persona/controlled-moderation/incidents", name: "persona-controlled-moderation", component: ControlledModerationPage, meta: { title: "受控禁言" } },
   { path: "/persona/memories/:section", name: "persona-memories", component: MemoryPages, meta: { title: "Agent 记忆", mode: "memory" } },
   { path: "/persona/memory-palace/:section", name: "persona-memory-palace", component: MemoryPages, meta: { title: "记忆宫殿", mode: "palace" } },
   { path: "/persona/stickers/:section", name: "persona-stickers", component: PersonaFeaturePages, meta: { title: "表情包", mode: "stickers" } },

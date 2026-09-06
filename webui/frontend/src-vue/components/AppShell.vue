@@ -1,12 +1,19 @@
 <template>
   <a class="skip-link" href="#main-content">跳到主要内容</a>
-  <button class="mobile-nav-trigger" type="button" :aria-expanded="drawerOpen" aria-controls="admin-navigation" @click="drawerOpen = !drawerOpen">
-    <Icon :name="drawerOpen ? 'close' : 'data'" /> 菜单
-  </button>
-  <button v-if="drawerOpen" class="drawer-scrim" type="button" aria-label="关闭导航" @click="drawerOpen = false" />
+  <button v-if="isMobile && drawerOpen" class="drawer-scrim" type="button" aria-label="关闭导航" @click="closeDrawer" />
 
   <div :class="['app-frame', { 'rail-collapsed': railCollapsed }]">
-    <aside id="admin-navigation" :class="['evidence-rail', { 'is-open': drawerOpen }]" aria-label="管理台一级导航">
+    <aside
+      id="admin-navigation"
+      ref="drawerElement"
+      :class="['evidence-rail', { 'is-open': drawerOpen }]"
+      :inert="isMobile && !drawerOpen ? true : undefined"
+      :aria-hidden="isMobile && !drawerOpen ? 'true' : undefined"
+      :role="isMobile && drawerOpen ? 'dialog' : undefined"
+      :aria-modal="isMobile && drawerOpen ? 'true' : undefined"
+      aria-label="管理台一级导航"
+      @keydown="onDrawerKeydown"
+    >
       <div class="brand-plate">
         <IdentityAvatar :src="selectedBot?.avatar_url" :label="selectedBot?.nickname || 'P/F'" size="large" square />
         <div class="brand-copy rail-expandable">
@@ -81,18 +88,22 @@
 
     <div class="workbench">
       <header class="top-status-line">
-        <span><Icon name="signal" /> 实时事件 {{ realtime.events.value.length }}/500</span>
+        <button ref="menuButton" class="mobile-nav-trigger" type="button" :aria-expanded="drawerOpen" aria-controls="admin-navigation" @click="openDrawer">
+          <Icon :name="drawerOpen ? 'close' : 'data'" /> 菜单
+        </button>
         <span>{{ selectedBot?.online ? "Bot 在线" : "Bot 未连接" }}{{ selectedBot?.bot_id ? ` · ${selectedBot.bot_id}` : "" }}</span>
-        <span v-if="adminIdentity">当前身份 {{ identitySourceLabel(adminIdentity.identity_source) }} · QQ {{ adminIdentity.qq }}</span>
-        <span v-if="realtime.resyncCount.value">REST 重同步 {{ realtime.resyncCount.value }} 次</span>
-        <code>{{ route.path }}</code>
+        <StateBadge :tone="realtimeTone" :raw="realtime.state.value">{{ realtimeLabel }}</StateBadge>
+        <details class="top-status-details">
+          <summary>诊断状态</summary>
+          <span><Icon name="signal" /> 实时事件 {{ realtime.events.value.length }}/500</span>
+          <span v-if="adminIdentity">当前身份 {{ identitySourceLabel(adminIdentity.identity_source) }} · QQ {{ adminIdentity.qq }}</span>
+          <span v-if="realtime.resyncCount.value">REST 重同步 {{ realtime.resyncCount.value }} 次</span>
+          <code>{{ route.path }}</code>
+        </details>
       </header>
 
       <div v-if="currentContext" class="workspace-navigation">
-        <nav class="secondary-navigation" :aria-label="`${currentContext.section.label}页面导航`">
-          <RouterLink v-for="item in currentContext.section.children" :key="item.id" :to="item.path || '#'" :class="{ active: currentContext.page.id === item.id }">{{ item.label }}</RouterLink>
-        </nav>
-        <nav class="tertiary-navigation" :aria-label="`${currentContext.page.label}三级导航`">
+        <nav v-if="currentContext.page.children.length" class="tertiary-navigation" :aria-label="`${currentContext.page.label}页面内导航`">
           <span class="workspace-breadcrumb">{{ currentContext.section.label }} / {{ currentContext.page.label }}</span>
           <RouterLink
             v-for="item in currentContext.page.children"
@@ -112,7 +123,7 @@
 
 <script setup lang="ts">
 import { useQuery } from "@tanstack/vue-query";
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import { resources } from "@/api/resources";
@@ -136,6 +147,12 @@ const uiStore = useUiStore();
 const realtime = useRuntimeEvents();
 const drawerOpen = ref(false);
 const searchQuery = ref("");
+const drawerElement = ref<HTMLElement | null>(null);
+const menuButton = ref<HTMLButtonElement | null>(null);
+const isMobile = ref(false);
+let mediaQuery: MediaQueryList | null = null;
+let updateMobileQuery: (() => void) | null = null;
+let previousBodyOverflow = "";
 
 try {
   uiStore.setSidebarCollapsed(window.localStorage.getItem("personification.nav.collapsed") === "1");
@@ -154,7 +171,10 @@ const bots = computed<BotIdentity[]>(() => botsQuery.data.value?.items ?? []);
 const selectedBot = computed(() => resolveSelectedBot(bots.value, botStore.selectedBotId));
 const selectedBotId = computed({
   get: () => selectedBot.value?.bot_id ?? botStore.selectedBotId,
-  set: (botId: string) => botStore.setBotId(botId),
+  set: (botId: string) => {
+    botStore.setBotId(botId);
+    void router.replace({ query: { ...route.query, bot_id: botId || undefined } });
+  },
 });
 const botOptions = computed(() => bots.value.map((bot) => ({
   value: bot.bot_id,
@@ -183,9 +203,85 @@ watch(() => currentContext.value?.leaf.path, (leafPath) => {
   }
 });
 
-watch(() => route.fullPath, () => {
-  drawerOpen.value = false;
+watch(() => route.fullPath, closeDrawer);
+
+watch([drawerOpen, isMobile], async ([isOpen, mobile]) => {
+  const shouldLock = mobile && isOpen;
+  if (shouldLock) {
+    previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    await nextTick();
+    const focusTarget = drawerElement.value?.querySelector<HTMLElement>(".global-page-search input:not([disabled])")
+      ?? drawerElement.value?.querySelector<HTMLElement>("input:not([disabled]), button:not([disabled]), select:not([disabled]), [href]");
+    focusTarget?.focus();
+  } else {
+    restoreBodyScroll();
+  }
 });
+
+onMounted(() => {
+  if (typeof window.matchMedia !== "function") return;
+  mediaQuery = window.matchMedia("(max-width: 760px)");
+  updateMobileQuery = () => {
+    isMobile.value = mediaQuery?.matches ?? false;
+    if (!isMobile.value) drawerOpen.value = false;
+  };
+  mediaQuery.addEventListener("change", updateMobileQuery);
+  updateMobileQuery();
+});
+
+onBeforeUnmount(() => {
+  if (mediaQuery && updateMobileQuery) mediaQuery.removeEventListener("change", updateMobileQuery);
+  restoreBodyScroll();
+});
+
+function restoreBodyScroll(): void {
+  if (document.body.style.overflow === "hidden") document.body.style.overflow = previousBodyOverflow;
+}
+
+function openDrawer(): void {
+  if (isMobile.value) drawerOpen.value = true;
+}
+
+function closeDrawer(): void {
+  if (!drawerOpen.value) return;
+  drawerOpen.value = false;
+  void nextTick(() => menuButton.value?.focus());
+}
+
+function drawerFocusableElements(): HTMLElement[] {
+  const root = drawerElement.value;
+  if (!root) return [];
+  return Array.from(root.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  )).filter((element) => !element.closest("[inert]") && getComputedStyle(element).visibility !== "hidden" && getComputedStyle(element).display !== "none");
+}
+
+function onDrawerKeydown(event: KeyboardEvent): void {
+  if (!isMobile.value || !drawerOpen.value) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeDrawer();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusable = drawerFocusableElements();
+  if (!focusable.length) {
+    event.preventDefault();
+    drawerElement.value?.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (!first || !last) return;
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
 
 function toggleRail(): void {
   uiStore.toggleSidebar();
@@ -194,7 +290,7 @@ function toggleRail(): void {
 
 function visit(path: string): void {
   searchQuery.value = "";
-  drawerOpen.value = false;
+  closeDrawer();
   void router.push(path);
 }
 

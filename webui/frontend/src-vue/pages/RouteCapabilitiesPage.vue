@@ -18,34 +18,7 @@
       </template>
     </PageHeader>
 
-    <nav class="tabs" aria-label="路由能力导航">
-      <div class="tab-list" role="tablist">
-        <RouterLink
-          to="/runtime/routes/capabilities"
-          role="tab"
-          :class="['tab-item', { active: currentSection === 'capabilities' || !currentSection }]"
-          :aria-selected="currentSection === 'capabilities' || !currentSection"
-        >
-          能力列表
-        </RouterLink>
-        <RouterLink
-          to="/runtime/routes/probes"
-          role="tab"
-          :class="['tab-item', { active: currentSection === 'probes' }]"
-          :aria-selected="currentSection === 'probes'"
-        >
-          探针状态
-        </RouterLink>
-        <RouterLink
-          to="/runtime/routes/video"
-          role="tab"
-          :class="['tab-item', { active: currentSection === 'video' }]"
-          :aria-selected="currentSection === 'video'"
-        >
-          视频协议与证据
-        </RouterLink>
-      </div>
-    </nav>
+    <p v-if="operationError" role="alert" class="muted-copy">{{ operationError }} <button type="button" class="text-button" @click="retryStatus">重新读取状态</button></p>
 
     <QueryBoundary :pending="isPending" :error="error">
       <template v-if="data">
@@ -99,6 +72,10 @@
                     <div><dt>要求</dt><dd>{{ probeRequirementLabel(probeFor(route, name as CapabilityName)) }}</dd></div>
                     <div><dt>诊断</dt><dd><code>{{ cap.detail_code }}</code></dd></div>
                   </dl>
+                  <div v-if="route.probe_facts?.[name as CapabilityName]" class="probe-fact-summary">
+                    <span>最近有效验证：{{ formatDateTime(route.probe_facts?.[name as CapabilityName]?.last_verified?.finished_at) }}</span>
+                    <span>最近探测：{{ formatDateTime(route.probe_facts?.[name as CapabilityName]?.latest_attempt?.finished_at || route.probe_facts?.[name as CapabilityName]?.latest_attempt?.queued_at) }}</span>
+                  </div>
                   <div v-if="isMediaProbe(probeFor(route, name as CapabilityName))" class="probe-media-input">
                     <fieldset class="media-mode-switch">
                       <legend>样例模式</legend>
@@ -151,6 +128,16 @@
                     <Icon name="refresh" />
                     {{ isProbing(route.route_fingerprint, name as CapabilityName) ? '正在排队' : probeButtonLabel(probeFor(route, name as CapabilityName)) }}
                   </button>
+                  <div v-if="operationFor(route.route_fingerprint, name as CapabilityName)" class="probe-operation-feedback" aria-live="polite">
+                    <StateBadge :tone="operationTone(operationFor(route.route_fingerprint, name as CapabilityName)?.status)">
+                      {{ operationStatusLabel(operationFor(route.route_fingerprint, name as CapabilityName)?.status) }}
+                    </StateBadge>
+                    <span>阶段：{{ operationPhaseLabel(operationFor(route.route_fingerprint, name as CapabilityName)?.detail_code) }}</span>
+                    <span>{{ operationReason(operationFor(route.route_fingerprint, name as CapabilityName)?.detail_code) }}</span>
+                    <span>最新尝试：{{ formatDateTime(operationFor(route.route_fingerprint, name as CapabilityName)?.finished_at || operationFor(route.route_fingerprint, name as CapabilityName)?.queued_at) }}</span>
+                    <span>最近有效验证：{{ formatDateTime(operationFor(route.route_fingerprint, name as CapabilityName)?.facts?.last_verified?.finished_at) }}</span>
+                    <button v-if="canCancel(operationFor(route.route_fingerprint, name as CapabilityName)?.status)" type="button" class="button button-quiet" @click="cancelOperation(operationFor(route.route_fingerprint, name as CapabilityName)!.operation_id)">取消任务</button>
+                  </div>
                 </div>
               </div>
 
@@ -162,34 +149,37 @@
             </Panel>
           </div>
 
-          <nav v-if="data.total_pages > 1" class="pagination" aria-label="分页导航">
-            <button
-              type="button"
-              :disabled="page <= 1"
-              aria-label="上一页"
-              @click="page = Math.max(1, page - 1)"
-            >
-              ‹
-            </button>
-            <span>第 {{ data.page }} / {{ data.total_pages }} 页</span>
-            <button
-              type="button"
-              :disabled="page >= data.total_pages"
-              aria-label="下一页"
-              @click="page = Math.min(data.total_pages, page + 1)"
-            >
-              ›
-            </button>
-          </nav>
+
+
+          <Pagination :page="page" :total-pages="data.total_pages" :total="data.total" :disabled="isPending" @update:page="page = $event" />
         </template>
       </template>
+    </QueryBoundary>
+    <QueryBoundary v-if="currentSection === 'probes'" :pending="operationHistoryQuery.isPending.value" :error="operationHistoryQuery.error.value">
+          <Panel v-if="currentSection === 'probes' && operationHistoryQuery.data.value" eyebrow="PROBE / HISTORY" title="最近探针任务">
+            <div v-if="operationHistoryQuery.data.value.items.length" class="trace-table-wrap">
+              <table class="forensic-table">
+                <thead><tr><th>任务</th><th>能力</th><th>状态</th><th>最近结果</th></tr></thead>
+                <tbody>
+                  <tr v-for="operation in operationHistoryQuery.data.value.items" :key="operation.operation_id">
+                    <td><code>{{ shortId(operation.operation_id, 12) }}</code></td>
+                    <td>{{ CAPABILITY_LABELS[operation.capability] || operation.capability }}</td>
+                    <td><StateBadge :tone="operationTone(operation.status)">{{ operationStatusLabel(operation.status) }}</StateBadge></td>
+                    <td class="wrap-cell">{{ operationPhaseLabel(operation.detail_code) }} · {{ formatDateTime(operation.finished_at || operation.queued_at) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <EmptyState v-else code="route_probe_history_empty">尚无持久化探针任务。</EmptyState>
+            <Pagination :page="historyPage" :total-pages="operationHistoryQuery.data.value.total_pages" :total="operationHistoryQuery.data.value.total" :disabled="operationHistoryQuery.isFetching.value" @update:page="historyPage = $event" />
+          </Panel>
     </QueryBoundary>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
-import { useRoute, RouterLink } from "vue-router";
+import { computed, reactive, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 
 import { resources } from "@/api/resources";
@@ -199,6 +189,7 @@ import type {
   RouteCapabilities,
   RouteCapabilityItem,
   RouteCapabilityProbe,
+  RouteProbeOperation,
   VerificationState,
 } from "@/api/types";
 import { formatDateTime, shortId } from "@/lib/format";
@@ -206,6 +197,7 @@ import { capabilitySourceLabel, capabilityStateLabel, verificationStateLabel } f
 import EmptyState from "@vue-app/components/EmptyState.vue";
 import Icon from "@vue-app/components/Icon.vue";
 import PageHeader from "@vue-app/components/PageHeader.vue";
+import Pagination from "@vue-app/components/Pagination.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
@@ -226,16 +218,25 @@ const queryClient = useQueryClient();
 const currentSection = computed(() => String(route.params.section || "capabilities"));
 
 const page = ref(1);
+const historyPage = ref(1);
+const operationError = ref("");
+let pollUntil = Date.now() + 10 * 60_000;
 const searchTerm = ref("");
 const probingMap = reactive<Record<string, boolean>>({});
 const selectedMedia = reactive<Record<string, File | undefined>>({});
 const selectedSampleModes = reactive<Record<string, "builtin" | "upload">>({});
+const operationIds = reactive<Record<string, string>>({});
 
 type MediaCapability = Extract<CapabilityName, "audio_input" | "video_input">;
 
 const { data, isPending, error } = useQuery({
   queryKey: computed(() => ["route-capabilities", page.value, searchTerm.value]),
   queryFn: ({ signal }) => resources.routes(page.value, 20, searchTerm.value, signal),
+});
+const operationHistoryQuery = useQuery({
+  queryKey: computed(() => ["route-probe-history", currentSection.value, historyPage.value]),
+  queryFn: ({ signal }) => resources.routeProbeHistory(historyPage.value, 20, "", signal),
+  enabled: computed(() => currentSection.value === "probes"),
 });
 
 const { mutate: mutateProbe, isPending: isPendingProbe } = useMutation({
@@ -251,30 +252,105 @@ const { mutate: mutateProbe, isPending: isPendingProbe } = useMutation({
         )
       : resources.queueRouteProbe(fingerprint, capability, true);
   },
-  onSuccess: (_, request) => {
+  onSuccess: (result, request) => {
+    if (result.operation_id) {
+      operationIds[probeMapKey(request.fingerprint, request.capability)] = result.operation_id;
+      void loadOperation(result.operation_id);
+    }
     probingMap[probeMapKey(request.fingerprint, request.capability)] = false;
     void queryClient.invalidateQueries({ queryKey: ["route-capabilities"] });
   },
   onError: (_, request) => {
     probingMap[probeMapKey(request.fingerprint, request.capability)] = false;
+    operationError.value = "探针未能排队。请检查服务连接和管理员会话后重试。";
   },
 });
 
 const { mutate: mutateMediaProbe, isPending: isPendingMediaProbe } = useMutation({
   mutationFn: ({ fingerprint, capability, file }: { fingerprint: string; capability: MediaCapability; file: File }) =>
     resources.uploadRouteMediaProbe(fingerprint, capability, file),
-  onSuccess: (_, request) => {
+  onSuccess: (result, request) => {
+    if (result.operation_id) {
+      operationIds[probeMapKey(request.fingerprint, request.capability)] = result.operation_id;
+      void loadOperation(result.operation_id);
+    }
     probingMap[probeMapKey(request.fingerprint, request.capability)] = false;
     selectedMedia[probeMapKey(request.fingerprint, request.capability)] = undefined;
     void queryClient.invalidateQueries({ queryKey: ["route-capabilities"] });
   },
   onError: (_, request) => {
     probingMap[probeMapKey(request.fingerprint, request.capability)] = false;
+    operationError.value = "媒体探针未能排队。请检查样例限制、服务连接和管理员会话。";
   },
 });
 
+const operationQueries = reactive<Record<string, RouteProbeOperation | undefined>>({});
+const activeOperationIds = computed(() => Object.values(operationIds).filter(id => id && (!operationQueries[id] || canCancel(operationQueries[id]?.status))).slice(0, 32));
+watch(data, (snapshot) => {
+  for (const item of snapshot?.items || []) {
+    for (const [capability, facts] of Object.entries(item.probe_facts || {})) {
+      const operation = facts?.latest_attempt;
+      if (operation?.operation_id && canCancel(operation.status)) {
+        operationIds[probeMapKey(item.route_fingerprint, capability as CapabilityName)] = operation.operation_id;
+        operationQueries[operation.operation_id] = operation;
+      }
+    }
+  }
+});
+useQuery({
+  queryKey: computed(() => ["route-probe-operation", ...activeOperationIds.value]),
+  queryFn: async ({ signal }) => {
+    const operations = await Promise.all(activeOperationIds.value.map(async operationId => {
+      try { return await resources.routeProbeOperation(operationId, signal); }
+      catch { operationError.value = "任务状态暂时不可用，正在有界重连；请勿重复提交。"; return undefined; }
+    }));
+    for (const operation of operations) if (operation) operationQueries[operation.operation_id] = operation;
+    if (operations.every(Boolean)) operationError.value = "";
+    return operations;
+  },
+  enabled: computed(() => activeOperationIds.value.length > 0),
+  refetchInterval: () => activeOperationIds.value.length && Date.now() < pollUntil ? 2_500 : false,
+});
+const cancelOperationMutation = useMutation({
+  mutationFn: (operationId: string) => resources.cancelRouteProbeOperation(operationId),
+  onSuccess: (operation) => { operationQueries[operation.operation_id] = operation; },
+  onError: () => { operationError.value = "取消请求未确认。请重新读取任务状态，勿重复提交探针。"; },
+});
+function retryStatus(): void { pollUntil = Date.now() + 10 * 60_000; void queryClient.invalidateQueries({ queryKey: ["route-probe-operation"] }); }
+function operationReason(code: string | undefined): string {
+  return ({probe_auth_rejected:"供应商拒绝认证，请核对密钥及模型权限。",probe_rate_limited:"供应商限流，请稍后重试。",probe_timeout:"本次探测超时，之前的有效能力结论仍保留。",probe_request_rejected:"供应商拒绝请求形态，请核对协议与媒体编码配置。",probe_server_error:"供应商服务异常，之前的有效验证仍保留。",probe_network_error:"网络连接失败，请检查服务端连接。"} as Record<string,string>)[code || ""] || "";
+}
+
 function probeMapKey(fingerprint: string, capability: CapabilityName): string {
   return `${fingerprint}:${capability}`;
+}
+function operationFor(fingerprint: string, capability: CapabilityName): RouteProbeOperation | undefined {
+  const operationId = operationIds[probeMapKey(fingerprint, capability)];
+  return operationId ? operationQueries[operationId] : undefined;
+}
+async function loadOperation(operationId: string): Promise<void> {
+  try { operationQueries[operationId] = await resources.routeProbeOperation(operationId); } catch { /* the queued operation remains visible via its next bounded poll */ }
+}
+function canCancel(status: string | undefined): boolean { return status === "queued" || status === "running" || status === "cancel_requested"; }
+function cancelOperation(operationId: string): void { if (!cancelOperationMutation.isPending.value) cancelOperationMutation.mutate(operationId); }
+function operationTone(status: string | undefined): "ok" | "error" | "running" | "unknown" {
+  if (status === "succeeded") return "ok";
+  if (status === "failed" || status === "cancelled" || status === "interrupted") return "error";
+  if (canCancel(status)) return "running";
+  return "unknown";
+}
+function operationStatusLabel(status: string | undefined): string {
+  return ({ queued: "已排队", running: "运行中", cancel_requested: "正在取消", succeeded: "已完成", failed: "执行失败", cancelled: "已取消", interrupted: "已中断", inconclusive: "结果不确定", skipped: "已跳过" } as Record<string, string>)[status || ""] || "状态未知";
+}
+function operationPhaseLabel(code: string | undefined): string {
+  const normalized = String(code || "");
+  if (normalized.includes("auth")) return "鉴权";
+  if (normalized.includes("timeout")) return "超时";
+  if (normalized.includes("network")) return "网络";
+  if (normalized.includes("parse")) return "内容核验";
+  if (normalized.includes("queued")) return "排队";
+  if (normalized.includes("running")) return "执行";
+  return normalized ? "执行结果" : "未知";
 }
 
 function probeFor(routeItem: RouteCapabilityItem, capability: CapabilityName): RouteCapabilityProbe | undefined {
@@ -350,6 +426,8 @@ function isProbing(fingerprint: string, capability: CapabilityName): boolean {
 }
 
 function triggerProbe(fingerprint: string, capability: CapabilityName) {
+  operationError.value = "";
+  pollUntil = Date.now() + 10 * 60_000;
   const routeItem = data.value?.items.find((item) => item.route_fingerprint === fingerprint);
   const probe = routeItem ? probeFor(routeItem, capability) : undefined;
   if (!probe?.available) return;

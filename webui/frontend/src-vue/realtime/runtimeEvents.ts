@@ -29,6 +29,7 @@ export const TOPIC_QUERY_MAP: Record<string, readonly string[]> = {
   "turn.stage": ["overview", "traces"],
   "turn.finished": ["overview", "traces"],
   "provider.status_changed": ["overview", "route-capabilities"],
+  "route_probe.updated": ["route-capabilities", "route-probe-history"],
   "recovery.updated": ["overview", "recovery"],
   "log.appended": ["overview"],
   "qzone.capability_changed": ["overview"],

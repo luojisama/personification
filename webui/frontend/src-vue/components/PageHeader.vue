@@ -1,7 +1,6 @@
 <template>
   <header class="page-heading">
     <div class="page-title-block">
-      <span class="page-kicker">ADMIN / {{ index }}</span>
       <h1>{{ title }}</h1>
       <p v-if="description">{{ description }}</p>
     </div>

@@ -105,11 +105,7 @@
       </Panel>
     </QueryBoundary>
 
-    <div v-if="query.data.value && query.data.value.total_pages > 1" class="pagination">
-      <button type="button" :disabled="page <= 1" @click="setPage(page - 1)">上一页</button>
-      <span>第 {{ query.data.value.page }} / {{ query.data.value.total_pages }} 页（共 {{ query.data.value.total }} 条）</span>
-      <button type="button" :disabled="page >= query.data.value.total_pages" @click="setPage(page + 1)">下一页</button>
-    </div>
+    <Pagination v-if="query.data.value" :page="page" :total-pages="query.data.value.total_pages" :total="query.data.value.total" :disabled="query.isFetching.value" @update:page="setPage" />
 
     <Panel v-if="lastDiagnostic" eyebrow="DIAGNOSTIC / RESULT" :title="lastDiagnostic.title || '操作结果'">
       <div class="diagnostic-summary">
@@ -129,6 +125,7 @@ import { resources } from "@/api/resources";
 import { diagnosticFromError } from "@/api/diagnostics";
 import type { GroupSwitchItem, OperationDiagnostic } from "@/api/types";
 import PageHeader from "@vue-app/components/PageHeader.vue";
+import Pagination from "@vue-app/components/Pagination.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";

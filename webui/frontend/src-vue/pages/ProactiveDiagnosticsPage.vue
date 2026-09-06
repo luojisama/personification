@@ -119,19 +119,7 @@
           当前筛选条件下没有主动触发记录。
         </div>
 
-        <div class="pagination">
-          <button type="button" :disabled="!cursor" @click="setFilter('cursor', '')">
-            回到最新
-          </button>
-          <span>{{ cursor ? `游标 ${cursor}` : "最新记录" }}</span>
-          <button
-            type="button"
-            :disabled="!recentQuery.data.value.has_more || !recentQuery.data.value.next_cursor"
-            @click="setFilter('cursor', String(recentQuery.data.value.next_cursor))"
-          >
-            较早记录
-          </button>
-        </div>
+        <Pagination :page="page" :total-pages="recentQuery.data.value.total_pages" :total="recentQuery.data.value.total" :disabled="recentQuery.isFetching.value" @update:page="setPage" />
       </template>
 
       <template v-if="section === 'next' && nextEligibleQuery.data.value">
@@ -180,6 +168,7 @@ import PageHeader from "@vue-app/components/PageHeader.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
+import Pagination from "@vue-app/components/Pagination.vue";
 import SelectField from "@vue-app/components/forms/SelectField.vue";
 import TextField from "@vue-app/components/forms/TextField.vue";
 import { formatDateTime } from "@/lib/format";
@@ -240,7 +229,7 @@ const section = computed(() => {
 const scope = computed(() => String(route.query.scope ?? ""));
 const outcome = computed(() => String(route.query.outcome ?? ""));
 const target = computed(() => String(route.query.target ?? ""));
-const cursor = computed(() => Number(route.query.cursor ?? 0) || 0);
+const page = computed(() => Math.max(1, Number(route.query.page ?? 1) || 1));
 
 function setFilter(key: string, value: string) {
   const nextQuery = { ...route.query };
@@ -249,11 +238,15 @@ function setFilter(key: string, value: string) {
   } else {
     delete nextQuery[key];
   }
-  if (key !== "cursor") {
+  if (key !== "page") {
+    delete nextQuery.page;
+    // A legacy deep link may still carry a cursor.  Never combine that
+    // continuation token with a fresh page-filter request.
     delete nextQuery.cursor;
   }
   router.push({ query: nextQuery });
 }
+function setPage(nextPage: number) { setFilter("page", String(nextPage)); }
 
 const statsQuery = useQuery({
   queryKey: computed(() => ["proactive", "stats", scope.value]),
@@ -262,10 +255,10 @@ const statsQuery = useQuery({
 });
 
 const recentQuery = useQuery({
-  queryKey: computed(() => ["proactive", "recent", scope.value, outcome.value, target.value, cursor.value]),
+  queryKey: computed(() => ["proactive", "recent", scope.value, outcome.value, target.value, page.value]),
   queryFn: ({ signal }) =>
     resources.proactiveRecent(
-      { scope: scope.value, outcome: outcome.value, target: target.value, cursor: cursor.value, limit: 50 },
+      { scope: scope.value, outcome: outcome.value, target: target.value, page: page.value, limit: 50 },
       signal,
     ),
   enabled: computed(() => section.value === "recent"),

@@ -131,3 +131,11 @@
   .panel-heading { padding: var(--space-3) var(--space-4); }
   .panel-body { padding: var(--space-4); }
 }
+.shared-pagination { flex-wrap: wrap; }
+.pagination-current { display: inline-flex; gap: .35rem; align-items: center; }
+.pagination-current input { width: 4.4rem; min-width: 0; text-align: center; }
+.pagination-total { color: var(--color-ink-muted); font-size: var(--text-xs); }
+.collapsible-text { min-width: 0; }
+.collapsible-text-content, .collapsible-text-preview { max-width: 100%; margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; word-break: break-word; }
+.collapsible-text-actions { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
+.collapsible-copy-status { color: var(--color-ink-muted); font-size: var(--text-xs); }

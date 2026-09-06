@@ -18,6 +18,8 @@
       </template>
     </PageHeader>
 
+    <details class="memory-navigation-details">
+    <summary>更多记忆视图</summary>
     <nav class="segmented-control memory-nav" aria-label="记忆功能模块切换">
       <router-link
         v-for="item in navSections"
@@ -29,6 +31,7 @@
         {{ item.label }}
       </router-link>
     </nav>
+    </details>
 
     <!-- 1. 最近记忆 Recent Section -->
     <Panel
@@ -54,15 +57,15 @@
             <tbody>
               <tr v-for="(row, idx) in memoriesList" :key="textAt(row, 'memory_id', 'id') || idx">
                 <td>
-                  <strong>{{ textAt(row, 'summary', 'content_summary', 'text') || '（无摘要）' }}</strong>
+                  <CollapsibleText :text="textAt(row, 'summary', 'content_summary', 'text') || '（无摘要）'" :limit="80" />
                   <br />
                   <code>{{ textAt(row, 'memory_id', 'id') || '—' }}</code>
                 </td>
-                <td>{{ textAt(row, 'scope', 'session_type', 'group_id') || '全局' }}</td>
-                <td>{{ textAt(row, 'source_kind', 'source', 'type') || '对话' }}</td>
+                <td :title="rawMemoryScope(row) || undefined">{{ memoryScopeLabel(rawMemoryScope(row)) }}</td>
+                <td :title="rawMemorySource(row) || undefined">{{ memorySourceLabel(rawMemorySource(row)) }}</td>
                 <td>
-                  <StateBadge :tone="badgeTone(textAt(row, 'status', 'state'))">
-                    {{ textAt(row, 'status', 'state') || '正常' }}
+                  <StateBadge :tone="badgeTone(rawMemoryStatus(row))" :raw="rawMemoryStatus(row)">
+                    {{ memoryStatusLabel(rawMemoryStatus(row)) }}
                   </StateBadge>
                 </td>
                 <td>{{ formatDateTime(row.expires_at as string | number | null) }}</td>
@@ -71,25 +74,7 @@
           </table>
         </div>
 
-        <div v-if="recentQuery.data.value && recentQuery.data.value.total_pages > 1" class="pagination">
-          <button
-            type="button"
-            :disabled="page <= 1"
-            aria-label="上一页"
-            @click="page--"
-          >
-            上一页
-          </button>
-          <span>第 {{ page }} / {{ recentQuery.data.value.total_pages }} 页</span>
-          <button
-            type="button"
-            :disabled="page >= recentQuery.data.value.total_pages"
-            aria-label="下一页"
-            @click="page++"
-          >
-            下一页
-          </button>
-        </div>
+        <Pagination v-if="recentQuery.data.value" :page="page" :total-pages="recentQuery.data.value.total_pages" :total="recentQuery.data.value.total" :disabled="recentQuery.isFetching.value" @update:page="page = $event" />
       </QueryBoundary>
     </Panel>
 
@@ -114,14 +99,14 @@
           >
             <header class="result-header">
               <span class="score-badge">相似度: {{ formatScore(item.score ?? item.similarity) }}</span>
-              <StateBadge :tone="badgeTone(textAt(item, 'status'))">
-                {{ textAt(item, 'status') || '已索引' }}
+              <StateBadge :tone="badgeTone(rawMemoryStatus(item))" :raw="rawMemoryStatus(item)">
+                {{ memoryStatusLabel(rawMemoryStatus(item)) }}
               </StateBadge>
             </header>
-            <p class="result-summary">{{ textAt(item, 'summary', 'content', 'text') || '—' }}</p>
+            <CollapsibleText :text="textAt(item, 'summary', 'content', 'text') || '—'" :limit="240" />
             <footer class="result-meta">
               <code>{{ textAt(item, 'memory_id', 'id') }}</code>
-              <span>作用域: {{ textAt(item, 'scope', 'group_id') || '通用' }}</span>
+              <span :title="rawMemoryScope(item) || undefined">作用域: {{ memoryScopeLabel(rawMemoryScope(item)) }}</span>
               <span>更新: {{ formatDateTime(item.updated_at as string | number | null) }}</span>
             </footer>
           </article>
@@ -139,13 +124,13 @@
         <div class="inner-state-grid">
           <article class="state-metric-card">
             <span class="metric-label">当前情绪状态</span>
-            <strong>{{ textAt(businessRecord, 'mood', 'emotion') || '平静' }}</strong>
-            <small>能级: {{ textAt(businessRecord, 'energy', 'vitality') || '标准' }}</small>
+            <strong>{{ textAt(businessRecord, 'mood', 'emotion') || '未知' }}</strong>
+            <small>能级: {{ textAt(businessRecord, 'energy', 'vitality') || '未配置' }}</small>
           </article>
           <article class="state-metric-card">
             <span class="metric-label">工作记忆负荷</span>
-            <strong>{{ textAt(businessRecord, 'working_memory_count', 'load') || '0' }} 项</strong>
-            <small>待巩固项目: {{ textAt(businessRecord, 'pending_consolidation', 'pending_count') || '0' }}</small>
+            <strong>{{ textAt(businessRecord, 'working_memory_count', 'load') || '未知' }} 项</strong>
+            <small>待巩固项目: {{ textAt(businessRecord, 'pending_consolidation', 'pending_count') || '未知' }}</small>
           </article>
           <article class="state-metric-card">
             <span class="metric-label">长期记忆沉淀</span>
@@ -261,7 +246,8 @@
             <div><dt>更新时间</dt><dd>{{ formatDateTime(zoneUpdatedAt(selectedPalaceZone)) }}</dd></div>
           </dl>
 
-          <div v-if="selectedZoneEntriesProvided && selectedZoneEntries.length" class="table-responsive">
+          <QueryBoundary :pending="zoneEntriesQuery.isPending.value" :error="zoneEntriesQuery.error.value">
+          <div v-if="selectedZoneEntries.length" class="table-responsive">
             <table class="data-table" aria-label="记忆宫殿分区条目">
               <thead>
                 <tr>
@@ -273,18 +259,23 @@
               <tbody>
                 <tr v-for="(entry, index) in selectedZoneEntries" :key="textAt(entry, 'memory_id', 'id') || index">
                   <td>
-                    <strong>{{ textAt(entry, 'summary', 'title', 'label') || '（未提供摘要）' }}</strong>
+                    <CollapsibleText :text="textAt(entry, 'summary', 'title', 'label') || '（未提供摘要）'" :limit="180" />
                     <br />
                     <code>{{ textAt(entry, 'memory_id', 'id') || '—' }}</code>
                   </td>
-                  <td>{{ textAt(entry, 'status', 'state') || '—' }}</td>
+                  <td>
+                    <StateBadge :tone="badgeTone(rawMemoryStatus(entry))" :raw="rawMemoryStatus(entry)">
+                      {{ memoryStatusLabel(rawMemoryStatus(entry)) }}
+                    </StateBadge>
+                  </td>
                   <td>{{ formatDateTime(entry.updated_at as string | number | null) }}</td>
                 </tr>
               </tbody>
             </table>
           </div>
-          <p v-else-if="selectedZoneEntriesProvided" class="empty-notice">当前分区暂无可展示条目。</p>
-          <p v-else class="empty-notice">后端暂未提供该分区的条目明细；页面不会根据汇总数量生成虚拟条目。</p>
+          <p v-else class="empty-notice">当前分区暂无可展示条目。</p>
+          <Pagination v-if="zoneEntriesQuery.data.value" :page="zonePage" :total-pages="zoneEntriesQuery.data.value.total_pages" :total="zoneEntriesQuery.data.value.total" :disabled="zoneEntriesQuery.isFetching.value" @update:page="zonePage = $event" />
+          </QueryBoundary>
         </Panel>
       </QueryBoundary>
     </Panel>
@@ -312,7 +303,7 @@
             <dt>索引状态</dt>
             <dd>
               <StateBadge :tone="badgeTone(textAt(businessRecord, 'status', 'state'))">
-                {{ textAt(businessRecord, 'status', 'state') || '就绪' }}
+                {{ textAt(businessRecord, 'status', 'state') || '未知' }}
               </StateBadge>
             </dd>
           </div>
@@ -326,7 +317,7 @@
           </div>
           <div>
             <dt>诊断代码</dt>
-            <dd><code>{{ textAt(businessRecord, 'diagnostic_code', 'code') || 'vector_index_ready' }}</code></dd>
+            <dd><code>{{ textAt(businessRecord, 'diagnostic_code', 'code') || '未提供诊断代码' }}</code></dd>
           </div>
         </dl>
 
@@ -346,6 +337,8 @@ import { useMutation, useQuery } from "@tanstack/vue-query";
 import { resources } from "@/api/resources";
 import type { CatalogItem, Page } from "@/api/types";
 import PageHeader from "@vue-app/components/PageHeader.vue";
+import CollapsibleText from "@vue-app/components/CollapsibleText.vue";
+import Pagination from "@vue-app/components/Pagination.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
@@ -370,6 +363,7 @@ const navSections = [
 ];
 
 const page = ref(1);
+const selectedBotId = computed(() => String(route.query.bot_id ?? ""));
 const searchTerm = ref("");
 const appliedSearch = ref("");
 const searchInputId = "memory-search-input";
@@ -411,6 +405,56 @@ function badgeTone(stateStr: string): "ok" | "warn" | "error" | "running" | "unk
   return "unknown";
 }
 
+const MEMORY_SCOPE_LABELS: Readonly<Record<string, string>> = {
+  group: "群聊",
+  private: "私聊",
+  user: "当前用户",
+  global: "全局",
+  cross_group: "已授权跨群",
+};
+const MEMORY_SOURCE_LABELS: Readonly<Record<string, string>> = {
+  message: "聊天消息",
+  dialogue: "聊天对话",
+  curator: "记忆整理",
+  manual: "管理员录入",
+  imported: "导入记录",
+};
+const MEMORY_STATUS_LABELS: Readonly<Record<string, string>> = {
+  active: "有效",
+  expired: "已过期",
+  archived: "已归档",
+  pending: "待处理",
+  inactive: "未启用",
+};
+
+function rawMemoryScope(record: RecordObj): string {
+  return textAt(record, "scope", "session_type", "group_id");
+}
+
+function rawMemorySource(record: RecordObj): string {
+  return textAt(record, "source_kind", "source", "type");
+}
+
+function rawMemoryStatus(record: RecordObj): string {
+  return textAt(record, "status", "state");
+}
+
+function knownMemoryLabel(raw: string, labels: Readonly<Record<string, string>>): string {
+  return labels[raw.trim().toLowerCase()] || "未知";
+}
+
+function memoryScopeLabel(raw: string): string {
+  return knownMemoryLabel(raw, MEMORY_SCOPE_LABELS);
+}
+
+function memorySourceLabel(raw: string): string {
+  return knownMemoryLabel(raw, MEMORY_SOURCE_LABELS);
+}
+
+function memoryStatusLabel(raw: string): string {
+  return knownMemoryLabel(raw, MEMORY_STATUS_LABELS);
+}
+
 function formatScore(score: unknown): string {
   const n = Number(score);
   return Number.isFinite(n) ? n.toFixed(3) : "—";
@@ -418,8 +462,8 @@ function formatScore(score: unknown): string {
 
 // Recent query
 const recentQuery = useQuery<Page<CatalogItem>>({
-  queryKey: computed(() => ["memories-catalog", page.value, appliedSearch.value]),
-  queryFn: ({ signal }) => resources.catalog("memories", page.value, 20, appliedSearch.value, signal),
+  queryKey: computed(() => ["memories-page", page.value, appliedSearch.value]),
+  queryFn: ({ signal }) => resources.memoryPage(page.value, 20, { search: appliedSearch.value }, signal),
   enabled: computed(() => currentSection.value === "recent"),
 });
 
@@ -439,14 +483,20 @@ const palaceZones = computed(() => (Array.isArray(businessRecord.value.zones) ? 
 const palaceZoneDetails = computed(() => recordsFromUnknown(businessRecord.value.zone_details));
 const palaceZoneCards = computed(() => palaceZoneDetails.value.length ? palaceZoneDetails.value : palaceZones.value);
 const selectedPalaceZoneId = ref("");
+const zonePage = ref(1);
 const selectedPalaceZone = computed(() => palaceZoneCards.value.find((zone) => palaceZoneId(zone) === selectedPalaceZoneId.value) ?? null);
-const selectedZoneEntriesProvided = computed(() => Boolean(selectedPalaceZone.value && Array.isArray(selectedPalaceZone.value.entries)));
-const selectedZoneEntries = computed(() => selectedPalaceZone.value ? recordsFromUnknown(selectedPalaceZone.value.entries) : []);
+const zoneEntriesQuery = useQuery<Page<CatalogItem>>({
+  queryKey: computed(() => ["memory-zone-page", selectedPalaceZoneId.value, zonePage.value]),
+  queryFn: ({ signal }) => resources.memoryZonePage(selectedPalaceZoneId.value, zonePage.value, 20, {}, signal),
+  enabled: computed(() => currentSection.value === "palace-zones" && Boolean(selectedPalaceZoneId.value)),
+});
+const selectedZoneEntries = computed(() => zoneEntriesQuery.data.value?.items ?? []);
 
 watch(palaceZoneCards, (zones) => {
   if (selectedPalaceZoneId.value && zones.some((zone) => palaceZoneId(zone) === selectedPalaceZoneId.value)) return;
   selectedPalaceZoneId.value = "";
 }, { immediate: true });
+watch(selectedPalaceZoneId, () => { zonePage.value = 1; });
 
 function recordsFromUnknown(value: unknown): RecordObj[] {
   return Array.isArray(value)
@@ -472,8 +522,8 @@ function palaceStatusLabel(value: string): string {
 
 // Search query
 const searchQuery = useQuery<RecordObj>({
-  queryKey: computed(() => ["memory-search", appliedSearch.value]),
-  queryFn: ({ signal }) => resources.memorySearch(appliedSearch.value, signal),
+  queryKey: computed(() => ["memory-search", appliedSearch.value, selectedBotId.value]),
+  queryFn: ({ signal }) => resources.memorySearch(appliedSearch.value, { platform: "onebot", bot_id: selectedBotId.value }, signal),
   enabled: computed(() => currentSection.value === "search" && Boolean(appliedSearch.value)),
 });
 

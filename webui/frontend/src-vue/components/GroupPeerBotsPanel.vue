@@ -246,11 +246,7 @@
                 <p v-if="membersQuery.isError.value" class="muted-copy">
                   实时成员目录暂不可用；仍可选择注册表中已有的 Bot。
                 </p>
-                <div v-else class="pagination" aria-label="群成员分页">
-                  <button type="button" :disabled="memberOffset === 0" @click="memberOffset = Math.max(0, memberOffset - 50)">上一页</button>
-                  <span>第 {{ Math.floor(memberOffset / 50) + 1 }} 页 · 共 {{ membersQuery.data.value?.total ?? 0 }} 人</span>
-                  <button type="button" :disabled="membersQuery.data.value?.has_more !== true" @click="memberOffset += 50">下一页</button>
-                </div>
+                <Pagination :page="memberPage" :total-pages="memberTotalPages" :total="membersQuery.data.value?.total ?? 0" :disabled="membersQuery.isFetching.value" @update:page="memberPage = $event" />
               </div>
               <TextField
                 id="peer-bot-command-id"
@@ -437,6 +433,7 @@ import type {
 import { formatDateTime } from "@/lib/format";
 import DiagnosticPanel from "./DiagnosticPanel.vue";
 import Panel from "./Panel.vue";
+import Pagination from "./Pagination.vue";
 import QueryBoundary from "./QueryBoundary.vue";
 import StateBadge from "./StateBadge.vue";
 import NumberField from "./forms/NumberField.vue";
@@ -480,6 +477,11 @@ const data = computed(() => query.data.value);
 const memberSearch = ref("");
 const memberSearchApplied = ref("");
 const memberOffset = ref(0);
+const memberPage = computed({
+  get: () => Math.floor(memberOffset.value / 50) + 1,
+  set: (page: number) => { memberOffset.value = Math.max(0, (Math.max(1, page) - 1) * 50); },
+});
+const memberTotalPages = computed(() => Math.max(1, Math.ceil(Number(membersQuery.data.value?.total ?? 0) / 50)));
 
 const membersQuery = useQuery({
   queryKey: computed(() => ["group-peer-bot-member-options", props.groupId, props.botId, memberOffset.value, memberSearchApplied.value]),

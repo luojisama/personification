@@ -86,11 +86,7 @@
       </div>
     </QueryBoundary>
 
-    <nav v-if="data && data.total_pages > 1" class="pagination" aria-label="分页导航">
-      <button type="button" :disabled="page <= 1" @click="setPage(page - 1)">上一页</button>
-      <span>第 {{ page }} / {{ data.total_pages }} 页 (共 {{ data.total }} 项)</span>
-      <button type="button" :disabled="page >= data.total_pages" @click="setPage(page + 1)">下一页</button>
-    </nav>
+    <Pagination v-if="data" :page="page" :total-pages="data.total_pages" :total="data.total" :disabled="isPending" @update:page="setPage" />
   </div>
 </template>
 
@@ -105,6 +101,7 @@ import type { OperationDiagnostic, RecoveryItem, RecoveryStatus } from "@/api/ty
 import { formatDateTime, shortId } from "@/lib/format";
 import { recoveryStatusLabel, sessionTypeLabel } from "@/lib/labels";
 import PageHeader from "@vue-app/components/PageHeader.vue";
+import Pagination from "@vue-app/components/Pagination.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";

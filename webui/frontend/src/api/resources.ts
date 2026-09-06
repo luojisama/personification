@@ -16,10 +16,11 @@ import type {
   StickerPage,
   CatalogItem,
   CapabilityName,
-  CursorPage,
+  PagedCursorPage,
   MultimodalRouteSnapshot,
   RecoveryItem,
   RouteCapabilityItem,
+  RouteProbeOperation,
   TraceDetail,
   TraceListItem,
   TokenSummary,
@@ -219,6 +220,15 @@ export const resources = {
       ...(sampleId ? { sample_id: sampleId } : {}),
     });
   },
+  routeProbeOperation(operationId: string, signal?: AbortSignal): Promise<RouteProbeOperation> {
+    return api.get(`/route-probe-operations/${encodeURIComponent(operationId)}`, undefined, signal);
+  },
+  routeProbeHistory(page = 1, pageSize = 20, routeFingerprint = "", signal?: AbortSignal): Promise<Page<RouteProbeOperation>> {
+    return api.get("/route-probe-operations", { page, page_size: pageSize, route_fingerprint: routeFingerprint }, signal);
+  },
+  cancelRouteProbeOperation(operationId: string): Promise<RouteProbeOperation> {
+    return api.delete(`/route-probe-operations/${encodeURIComponent(operationId)}`);
+  },
   uploadRouteMediaProbe(
     routeFingerprint: string,
     capability: Extract<CapabilityName, "audio_input" | "video_input">,
@@ -259,6 +269,16 @@ export const resources = {
   retryRecovery(id: number): Promise<OperationDiagnostic> {
     return api.post(`/recovery-queue/${id}/retry`, { confirmed_not_sent: true });
   },
+  moderationStatus(signal?: AbortSignal): Promise<import("./types").ControlledModerationStatus> {
+    return api.get("/moderation/status", undefined, signal);
+  },
+  moderationIncidents(page = 1, pageSize = 20, signal?: AbortSignal): Promise<Page<import("./types").ControlledModerationIncident>> {
+    return api.get("/moderation/incidents", { page, page_size: pageSize }, signal);
+  },
+  releaseModerationOperation(operationId: string): Promise<{ ok: boolean; code: string; operation_id: string }> {
+    // Scope is selected server-side from the durable operation only.
+    return api.post(`/moderation/operations/${encodeURIComponent(operationId)}/release`, {});
+  },
   runtimeSettings(signal?: AbortSignal): Promise<Record<string, unknown>> {
     return api.get("/settings", undefined, signal);
   },
@@ -283,7 +303,7 @@ export const resources = {
   proactiveStats(scope = "", signal?: AbortSignal): Promise<ProactiveStats> {
     return api.get("/proactive/stats", { scope, since_hours: 72 }, signal);
   },
-  proactiveRecent(filters: { scope?: string; outcome?: string; target?: string; cursor?: number; limit?: number }, signal?: AbortSignal): Promise<CursorPage<ProactiveRecord>> {
+  proactiveRecent(filters: { scope?: string; outcome?: string; target?: string; cursor?: number; page?: number; limit?: number }, signal?: AbortSignal): Promise<PagedCursorPage<ProactiveRecord>> {
     return api.get("/proactive/recent", filters, signal);
   },
   proactiveNextEligible(scope = "", signal?: AbortSignal): Promise<{ items: ProactiveNextEligible[]; total: number; diagnostic_code: string }> {
@@ -319,8 +339,8 @@ export const resources = {
   ): Promise<Page<CatalogItem>> {
     return api.get(`/${dataset}`, { page, page_size: pageSize, search }, signal);
   },
-  logs(limit = 100, cursor = 0, search = "", signal?: AbortSignal): Promise<CursorPage<CatalogItem>> {
-    return api.get("/logs", { limit, cursor, search }, signal);
+  logs(page = 1, pageSize = 100, search = "", signal?: AbortSignal): Promise<PagedCursorPage<CatalogItem>> {
+    return api.get("/logs", { limit: pageSize, page, search }, signal);
   },
   multimodalRoutes(signal?: AbortSignal): Promise<MultimodalRouteSnapshot> {
     return api.get("/multimodal/routes", undefined, signal);
@@ -458,8 +478,14 @@ export const resources = {
   memoryBusiness(section: "recent" | "inner-state" | "graph" | "palace-zones" | "vector-index", signal?: AbortSignal): Promise<Record<string, unknown>> {
     return api.get(`/memory/${section}`, undefined, signal);
   },
-  memorySearch(query: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
-    return api.get("/memory/search-test", { query }, signal);
+  memoryPage(page = 1, pageSize = 20, filters: { search?: string; status?: string; group_id?: string; user_id?: string; palace_zone?: string } = {}, signal?: AbortSignal): Promise<Page<CatalogItem>> {
+    return api.get("/memory/page", { page, page_size: pageSize, ...filters }, signal);
+  },
+  memoryZonePage(palaceZone: string, page = 1, pageSize = 20, filters: { search?: string; status?: string } = {}, signal?: AbortSignal): Promise<Page<CatalogItem>> {
+    return api.get(`/memory/palace-zones/${encodeURIComponent(palaceZone)}/memories`, { page, page_size: pageSize, ...filters }, signal);
+  },
+  memorySearch(query: string, scope: { platform?: string; bot_id?: string; group_id?: string; user_id?: string } = {}, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get("/memory/search-test", { query, ...scope }, signal);
   },
   rebuildMemoryIndex(): Promise<Record<string, unknown>> {
     return api.post("/memory/vector-index/rebuild", { confirm: true });

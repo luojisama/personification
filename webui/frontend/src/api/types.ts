@@ -62,6 +62,14 @@ export interface CursorPage<T> {
   filters: Record<string, unknown>;
 }
 
+/** Cursor fields remain for older API clients; page fields power bounded UI navigation. */
+export interface PagedCursorPage<T> extends CursorPage<T> {
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+}
+
 export type CapabilityState = "supported" | "unsupported" | "unknown";
 export type VerificationState = "verified" | "not_run" | "probe_unavailable" | "inconclusive" | "stale";
 export type CapabilitySource =
@@ -129,7 +137,26 @@ export interface RouteCapabilityItem {
     finished_at: string | null;
   }>>;
   probe_status?: "idle" | "queued" | "running" | "finished" | "failed";
+  probe_facts?: Partial<Record<CapabilityName, { last_verified?: RouteProbeOperation | null; latest_attempt?: RouteProbeOperation | null }>>;
   updated_at?: string | null;
+}
+
+export interface RouteProbeOperation {
+  operation_id: string;
+  route_fingerprint: string;
+  capability: CapabilityName;
+  source: string;
+  status: "queued" | "running" | "cancel_requested" | "succeeded" | "failed" | "cancelled" | "interrupted" | "inconclusive" | "skipped" | string;
+  detail_code: string;
+  capability_state: CapabilityState;
+  verification_state: VerificationState;
+  transport_verified: boolean;
+  content_verified: boolean;
+  queued_at: number | string;
+  started_at: number | string | null;
+  finished_at: number | string | null;
+  duration_ms: number;
+  facts?: { last_verified?: RouteProbeOperation | null; latest_attempt?: RouteProbeOperation | null };
 }
 
 export type TraceOutcome = "ok" | "silent" | "no_reply" | "finished" | "failed" | "unknown" | "partial";
@@ -267,6 +294,27 @@ export interface OperationDiagnostic {
   warnings: string[];
   suggestion?: string;
   steps: OperationStep[];
+}
+
+export interface ControlledModerationStatus {
+  enabled: boolean;
+  authorized_groups: string[];
+}
+
+export interface ControlledModerationIncident {
+  platform: string;
+  bot_id: string;
+  group_id: string;
+  target_id: string;
+  incident: string;
+  updated_at: number | string | null;
+  expires_at?: number | string | null;
+  warning_count: number;
+  warning_message_ids: string[];
+  evidence_message_ids: string[];
+  operation_id: string;
+  status: "warning_only" | "running" | "sent" | "failed" | "unknown" | "released" | string;
+  minutes: number;
 }
 
 export interface PersonaListItem {

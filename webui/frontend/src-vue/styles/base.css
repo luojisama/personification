@@ -1,5 +1,5 @@
 *, *::before, *::after { box-sizing: border-box; }
-html { min-width: 20rem; min-height: 100%; color-scheme: light dark; font-family: var(--font-sans); line-height: 1.5; -webkit-text-size-adjust: 100%; }
+html { min-width: 0; min-height: 100%; color-scheme: light dark; font-family: var(--font-sans); line-height: 1.5; -webkit-text-size-adjust: 100%; }
 :root[data-theme="schale"] { color-scheme: light; }
 :root[data-theme="prts"] { color-scheme: dark; }
 body { min-height: 100vh; margin: 0; color: var(--color-ink); background-color: var(--color-canvas); background-image: linear-gradient(to right, var(--color-canvas-grid) 1px, transparent 1px), linear-gradient(to bottom, var(--color-canvas-grid) 1px, transparent 1px); background-size: 24px 24px; text-rendering: optimizeLegibility; }

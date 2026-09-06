@@ -92,6 +92,21 @@ describe("PersonaFeaturePages.vue", () => {
     expect(resources.stickers).toHaveBeenCalled();
   });
 
+  it("does not render a green-normal index when the server returned no index state", async () => {
+    mockRoute.path = "/persona/stickers/catalog";
+    mockRoute.name = "persona-stickers";
+    mockRoute.params.section = "catalog";
+    vi.mocked(resources.stickers).mockResolvedValue({
+      items: [], page: 1, page_size: 20, total: 0, total_pages: 1,
+      index_status: "", index_detail_code: "", index_updated_at: 0, index_stale: false,
+    });
+
+    const wrapper = createWrapper();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await wrapper.vm.$nextTick();
+    expect(wrapper.text()).toContain("未知／未配置");
+  });
+
   it("renders persona preview prompt when navigating to persona-preview route", async () => {
     mockRoute.path = "/persona/persona-preview/prompt";
     mockRoute.name = "persona-preview";

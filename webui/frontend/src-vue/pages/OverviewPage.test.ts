@@ -91,4 +91,12 @@ describe("OverviewPage", () => {
     wrapper.unmount();
     queryClient.clear();
   });
+
+  it("将运行指标保留为紧凑的双列卡片组，而不把技术编号写入内容", async () => {
+    const { wrapper, queryClient } = await renderPage();
+    await vi.waitFor(() => expect(wrapper.findAll(".overview-metric-rack article")).toHaveLength(4));
+    expect(wrapper.find(".overview-metric-rack").classes()).toContain("metric-rack");
+    expect(wrapper.text()).not.toContain("ADMIN /");
+    queryClient.clear();
+  });
 });
