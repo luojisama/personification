@@ -69,6 +69,7 @@ from ...core.sticker_library import (
     load_sticker_metadata,
     resolve_sticker_dir,
 )
+from ...core.expression_preparation import prepare_local_expression
 from ...core.message_parts import build_user_message_content, clone_messages_with_text_suffix
 from ...core.history_projection import build_confirmed_outbound_history, build_group_batch_history, is_confirmed_send_result, lookup_sticker_history_metadata
 from ...core.context_policy import (
@@ -130,6 +131,7 @@ from ...core.qq_expression_library import (
     render_qq_expression_message,
 )
 from ...core.qq_expression_tools import register_send_qq_expression_tools
+from ...core.moderation_tools import register_moderation_for_turn
 from ...core.sticker_feedback import (
     build_sticker_feedback_scene_key,
     load_sticker_feedback,
@@ -158,6 +160,7 @@ from ...core.turn_media import (
     serialize_turn_media,
     summarize_media_resolution,
 )
+from ...core.forward_context import merge_forward_media
 from ...core.visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_YAML
 from ...core.user_avatar_insight import (
     add_current_user_avatar_planner_metadata,
@@ -722,10 +725,24 @@ async def process_yaml_response_logic(
             max_candidates=getattr(plugin_config, "personification_group_followup_referent_max_candidates", 3),
             confidence_threshold=getattr(plugin_config, "personification_group_followup_referent_confidence", 0.80),
         )
-        turn_media_refs = list(resolved_referent.active_media)
+        turn_media_refs = merge_forward_media(
+            resolved_referent.active_media,
+            turn_media_refs,
+        )
         followup_referent = resolved_referent.context_fields()
         reply_commit_state["group_followup_referent"] = followup_referent
-        reply_commit_state["turn_media_manifest"] = serialize_turn_media(resolved_referent.media_manifest)
+        reply_commit_state["turn_media_manifest"] = serialize_turn_media(
+            merge_forward_media(resolved_referent.media_manifest, turn_media_refs)
+        )
+
+    # A private handoff, or a normal pipeline that already resolved the group
+    # referent, still needs forward occurrences in the review manifest.
+    reply_commit_state["turn_media_manifest"] = serialize_turn_media(
+        merge_forward_media(
+            reply_commit_state.get("turn_media_manifest") or (),
+            turn_media_refs,
+        )
+    )
 
     def _has_newer_batch_now() -> bool:
         return bool(has_newer_batch or _batch_ref_has_newer_messages(batch_runtime_ref))
@@ -1937,6 +1954,17 @@ async def process_yaml_response_logic(
             for item in turn_media_refs
             if item.kind == "audio" and str(item.ref or "").strip()
         ][:1]
+        # YAML has no RuntimeDeps object.  Build the narrow live proxy before
+        # Agent actions; the final delivery path constructs its own proxy even
+        # when this optional Agent block was never entered.
+        agent_runtime = _build_yaml_runtime_proxy(
+            plugin_config=plugin_config,
+            agent_tool_caller=agent_tool_caller,
+            get_configured_api_providers=get_configured_api_providers,
+            vision_caller=vision_caller,
+            logger=logger,
+        )
+        agent_runtime.response_review_call_ai_api = review_call_ai_api or lite_call_ai_api or call_ai_api
         executor = ActionExecutor(
             bot,
             event,
@@ -1952,6 +1980,9 @@ async def process_yaml_response_logic(
             recall_cutoff=float(
                 reply_commit_state.get("received_wall_at", 0.0) or time.time()
             ),
+            core_persona=(prompt_config.get("system", "") if isinstance(prompt_config, dict) else str(prompt_config or "")),
+            expression_review_caller=review_call_ai_api or lite_call_ai_api or call_ai_api,
+            runtime=agent_runtime,
         )
         agent_tool_registry = _clone_tool_registry(tool_registry)
         register_qq_recall_tool(
@@ -2044,6 +2075,8 @@ async def process_yaml_response_logic(
             bot=bot,
             plugin_config=plugin_config,
         )
+        register_moderation_for_turn(agent_tool_registry, executor=executor, state=reply_commit_state,
+                                     ordered_context=recent_context_hint, semantic_frame=semantic_frame)
         try:
             skill_runtime_for_images = SkillRuntime(
                 plugin_config=plugin_config,
@@ -2763,7 +2796,7 @@ async def process_yaml_response_logic(
     final_gate_enabled = bool(
         getattr(plugin_config, "personification_final_dialogue_gate_enabled", True)
     )
-    if final_gate_enabled or dialogue_context.requires_attribution_review:
+    if final_gate_enabled or dialogue_context.requires_attribution_review or bool(prompt_config):
         review_decision = await final_dialogue_gate(
             review_call_ai_api,
             candidate_text=assistant_text,
@@ -2793,6 +2826,8 @@ async def process_yaml_response_logic(
             followup_referent=followup_referent if isinstance(followup_referent, dict) else None,
             followup_media_manifest=reply_commit_state.get("turn_media_manifest"),
             dialogue_context=dialogue_context,
+            core_persona=(prompt_config.get("system", "") if isinstance(prompt_config, dict) else str(prompt_config or "")),
+            response_deadline=response_deadline,
         )
     elif used_agent and not should_review_agent_reply and not care_review_required and not protected_review_required:
         review_decision = make_passthrough_review_decision(
@@ -3308,6 +3343,17 @@ async def process_yaml_response_logic(
                 logger.warning(f"[tts] YAML 自动语音发送失败，回退文字: {e}")
 
     if not sent_as_tts:
+        # YAML has no RuntimeDeps instance.  Recreate the same narrow media /
+        # review runtime shape from the live dependencies instead of referring
+        # to a nonexistent ``runtime`` local in final marker rendering.
+        expression_runtime = _build_yaml_runtime_proxy(
+            plugin_config=plugin_config,
+            agent_tool_caller=agent_tool_caller,
+            get_configured_api_providers=get_configured_api_providers,
+            vision_caller=vision_caller,
+            logger=logger,
+        )
+        expression_runtime.response_review_call_ai_api = review_call_ai_api or lite_call_ai_api or call_ai_api
         clean_reply = ""
         if parsed["messages"]:
             for message_index, msg in enumerate(parsed["messages"]):
@@ -3424,6 +3470,10 @@ async def process_yaml_response_logic(
                                     bot=bot,
                                     plugin_config=plugin_config,
                                     logger=logger,
+                                    core_persona=(prompt_config.get("system", "") if isinstance(prompt_config, dict) else str(prompt_config or "")),
+                                    runtime=expression_runtime,
+                                    context=candidate,
+                                    group_id=group_id,
                                 )
                                 if not rendered_candidate.message:
                                     return SimpleNamespace(status="failed", message_id=None)
@@ -3578,8 +3628,23 @@ async def process_yaml_response_logic(
                             logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
                             _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="表情发送前出现更新批次")
                             return
+                        image_ref = await prepare_local_expression(
+                            path=chosen_sticker_path,
+                            config=plugin_config,
+                            core_persona=(
+                                prompt_config.get("system", "")
+                                if isinstance(prompt_config, dict)
+                                else str(prompt_config or "")
+                            ),
+                            runtime=expression_runtime,
+                            context=str(msg.get("text", "") or assistant_text),
+                            group_id=group_id,
+                        )
+                        if not image_ref:
+                            chosen_sticker_path = None
+                            continue
                         send_result = await _send_reply(
-                            message_segment_cls.image(f"file:///{chosen_sticker_path.absolute()}")
+                            message_segment_cls.image("base64://" + image_ref.split(",", 1)[1])
                         )
                         result_status = str(
                             getattr(send_result, "status", "") or ""
@@ -3645,6 +3710,10 @@ async def process_yaml_response_logic(
                         bot=bot,
                         plugin_config=plugin_config,
                         logger=logger,
+                        core_persona=(prompt_config.get("system", "") if isinstance(prompt_config, dict) else str(prompt_config or "")),
+                        runtime=expression_runtime,
+                        context=candidate,
+                        group_id=group_id,
                     )
                     if not rendered_reply.message:
                         return SimpleNamespace(status="failed", message_id=None)
@@ -3666,6 +3735,10 @@ async def process_yaml_response_logic(
                     bot=bot,
                     plugin_config=plugin_config,
                     logger=logger,
+                    core_persona=(prompt_config.get("system", "") if isinstance(prompt_config, dict) else str(prompt_config or "")),
+                    runtime=expression_runtime,
+                    context=clean_reply,
+                    group_id=group_id,
                 )
                 if rendered_reply.message:
                     if self_continuity_enabled:

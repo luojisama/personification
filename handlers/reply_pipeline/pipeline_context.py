@@ -26,6 +26,7 @@ from ...core.prompt_loader import pick_ack_phrase
 from ...core.qq_outbound import QQOutboundLedger, SendReceipt, build_outbound_context
 from ...core.qq_recall import register_qq_recall_tool
 from ...core.qq_expression_tools import register_send_qq_expression_tools
+from ...core.moderation_tools import register_moderation_for_turn
 from ...core.qzone_agent_interaction import register_groupmate_qzone_agent_tools
 from ...core.gemini_profile import build_gemini_route_policy_prompt
 from ...core.group_member_avatar_insight import register_group_member_avatar_insight_tool
@@ -802,6 +803,9 @@ async def run_agent_if_enabled(
     reply_commit_state: dict[str, Any] | None = None,
     turn_media_context: list[Any] | None = None,
     avatar_pair_candidates: list[dict[str, str]] | None = None,
+    core_persona: str = "",
+    ordered_context: str = "",
+    semantic_frame: Any = None,
 ) -> tuple[str | None, bool, bool, Any | None, list[dict[str, Any]], str, bool, bool, str]:
     if not (
         getattr(runtime.plugin_config, "personification_agent_enabled", True)
@@ -824,8 +828,13 @@ async def run_agent_if_enabled(
         ),
         user_target=str(getattr(event, "user_id", "") or ""),
         recall_cutoff=float(commit_state.get("received_wall_at", 0.0) or time.time()),
+        core_persona=str(core_persona or ""),
+        expression_review_caller=getattr(runtime, "review_call_ai_api", None) or getattr(runtime, "lite_call_ai_api", None),
+        runtime=runtime,
     )
     runtime_registry = clone_tool_registry(runtime.tool_registry)
+    register_moderation_for_turn(runtime_registry, executor=executor, state=commit_state,
+                                 ordered_context=ordered_context, semantic_frame=semantic_frame)
     register_qq_recall_tool(
         runtime_registry,
         executor=executor,

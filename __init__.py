@@ -98,6 +98,7 @@ __plugin_meta__ = build_plugin_metadata(Config)
 
 _sticker_labeler_observer = None
 _knowledge_build_task: asyncio.Task | None = None
+_route_probe_startup_task: asyncio.Task | None = None
 runtime_bundle = None
 flow_handles: dict[str, object] = {}
 job_handles: dict[str, object] = {}
@@ -342,6 +343,32 @@ async def _init_personification_runtime() -> None:
             set_knowledge_build_task=_set_knowledge_build_task,
         )
     )
+    # Satori is optional: importing its adapter only inside this narrow bridge
+    # keeps existing OneBot-only installations loadable unchanged.
+    try:
+        from .handlers.satori_reply_bridge import register_satori_reply_bridge
+        from .handlers.reply_pipeline.processor import process_response_logic as _process_response_logic
+        from .handlers.reply_buffer import run_buffer_timer as _satori_run_buffer_timer
+
+        matcher_handles.update(
+            register_satori_reply_bridge(
+                personification_rule=runtime_bundle.personification_rule,
+                process_response_logic=_process_response_logic,
+                reply_processor_deps=runtime_bundle.reply_processor_deps,
+                msg_buffer=runtime_bundle.msg_buffer,
+                message_cls=Message,
+                message_segment_cls=MessageSegment,
+                message_event_cls=MessageEvent,
+                group_message_event_cls=GroupMessageEvent,
+                private_message_event_cls=PrivateMessageEvent,
+                poke_event_cls=PokeNotifyEvent,
+                logger=logger,
+                plugin_config=plugin_config,
+                run_buffer_timer=_satori_run_buffer_timer,
+            )
+        )
+    except Exception as exc:
+        logger.debug(f"[satori] optional reply bridge unavailable: {exc}")
     globals().update(matcher_handles)
 
     if runtime_bundle.persona_store is not None:
@@ -571,6 +598,54 @@ async def _restore_user_tasks() -> None:
 
     restore_tasks_on_startup(scheduler, data_dir, _bot_caller)
     logger.info("[user_tasks] 持久化定时任务已恢复")
+
+
+@get_driver().on_startup
+async def _schedule_route_capability_probes() -> None:
+    """Register the isolated daily capability check; it has no QQ surface."""
+    try:
+        from .core.route_probe_runtime import configured_route_targets
+        from .core.route_probe_service import get_route_probe_service
+        from .jobs.route_probe_schedule import schedule_daily_route_probes
+
+        bundle = _require_runtime_bundle()
+        runtime = types.SimpleNamespace(
+            plugin_config=plugin_config, runtime_bundle=bundle, logger=logger
+        )
+        service = get_route_probe_service(runtime)
+        route_probe_run = schedule_daily_route_probes(
+            scheduler=scheduler,
+            service=service,
+            targets=lambda: configured_route_targets(runtime),
+            enabled=lambda: bool(getattr(plugin_config, "personification_route_probe_daily_enabled", False)),
+            timezone_name=str(getattr(plugin_config, "personification_timezone", "Asia/Shanghai") or "Asia/Shanghai"),
+            hour=int(getattr(plugin_config, "personification_route_probe_daily_hour", 3)),
+            minute=int(getattr(plugin_config, "personification_route_probe_daily_minute", 30)),
+            route_budget_seconds=float(getattr(plugin_config, "personification_route_probe_route_budget_seconds", 480.0)),
+        )
+        if route_probe_run is not None:
+            global _route_probe_startup_task
+            if _route_probe_startup_task is None or _route_probe_startup_task.done():
+                _route_probe_startup_task = asyncio.create_task(route_probe_run())
+        logger.info("[route_probe] 每日能力探针调度已注册（是否启用由当前配置决定）。")
+    except Exception as exc:
+        logger.warning(f"[route_probe] 每日能力探针调度失败：{type(exc).__name__}")
+
+
+@get_driver().on_shutdown
+async def _shutdown_route_capability_probes() -> None:
+    try:
+        from .core.route_probe_service import get_route_probe_service
+        runtime = types.SimpleNamespace(plugin_config=plugin_config, logger=logger)
+        global _route_probe_startup_task
+        task = _route_probe_startup_task
+        _route_probe_startup_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await get_route_probe_service(runtime).shutdown()
+    except Exception as exc:
+        logger.warning(f"[route_probe] 停止能力探针失败：{type(exc).__name__}")
 
 
 @get_driver().on_startup

@@ -12,6 +12,10 @@ from ._loader import load_personification_module
 config_module = load_personification_module("plugin.personification.config")
 reply_turn_trace = load_personification_module("plugin.personification.core.reply_turn_trace")
 yaml_processor = load_personification_module("plugin.personification.handlers.yaml_pipeline.processor")
+tool_registry_module = load_personification_module("plugin.personification.agent.tool_registry")
+agent_synthesis_module = load_personification_module(
+    "plugin.personification.agent.runtime.final_synthesis"
+)
 
 
 class _Bot:
@@ -42,8 +46,48 @@ def _event(*, text: str, message_id: str, reply_to_msg_id: str = "") -> SimpleNa
         user_id="human-1",
         message_id=message_id,
         reply_to_message_id=reply_to_msg_id,
+        reply=None,
         get_plaintext=lambda: text,
     )
+
+
+def test_yaml_user_comment_on_persona_bot_quote_reviews_attribution_and_sends(monkeypatch) -> None:
+    """A human quote of Bot content must pass review as a human-triggered reply."""
+    async def _review(messages, **_kwargs):  # noqa: ANN001
+        return (
+            '{"action":"accept","persona_verdict":"consistent",'
+            '"attribution_verdict":"safe_quote_or_rebuttal","text":"",'
+            '"reason":"current human asks about the quoted Bot sticker",'
+            '"flags":[],"segments":["这是我刚才用来表达无奈的表情。"],"self_claims":[]}'
+        )
+
+    event = _event(text="这个表情什么意思？", message_id="human-comment", reply_to_msg_id="bot-quoted")
+    event.reply = SimpleNamespace(
+        message_id="bot-quoted", user_id="persona-bot", sender=SimpleNamespace(user_id="persona-bot"),
+        message=[SimpleNamespace(type="text", data={"text":"我刚发的说明"}), SimpleNamespace(type="image", data={"file":"opaque"})],
+    )
+    candidate = "这是我刚才用来表达无奈的表情。"
+    bot, primary, reviews, stages = _run_yaml_turn(
+        monkeypatch,
+        history=[{"message_id":"bot-quoted","user_id":"persona-bot","source_kind":"bot_reply","confirmed":True,"text":"我刚发的说明"}],
+        event=event, candidate=candidate, review_call=_review, final_gate_enabled=False,
+    )
+    # The trigger stays the actual human; quote provenance remains the Bot.
+    primary_text = "\n".join(str(message.get("content", "")) for message in primary[0])
+    review_text = "\n".join(str(message.get("content", "")) for message in reviews[0])
+    assert event.user_id == "human-1"
+    assert '"speaker_kind":"persona_bot"' in primary_text
+    assert '"source_kind":"bot_reply"' in primary_text
+    assert '"speaker_kind":"human"' in review_text
+    assert '"current":true' in review_text
+    assert event.get_plaintext() in review_text
+    assert '"reply_ref":"message_1"' in review_text
+    assert '"speaker_kind":"persona_bot"' in review_text
+    assert candidate in review_text
+    assert any(stage.get("key") == "yaml_dialogue_provenance" for stage in stages)
+    # This is the actual dispatch boundary: a valid attribution + persona
+    # verdict must reach outbound, while the quoted Bot is never its author.
+    assert bot.sent == [candidate.rstrip("。")]
 
 
 def _run_yaml_turn(
@@ -56,6 +100,9 @@ def _run_yaml_turn(
     final_gate_enabled: bool,
     parse_yaml_response=None,
     tts_service=None,
+    configure=None,
+    agent_tool_caller=None,
+    tool_registry=None,
 ) -> tuple[_Bot, list[list[dict[str, object]]], list[list[dict[str, object]]], list[dict[str, object]]]:  # noqa: ANN001
     primary_prompts: list[list[dict[str, object]]] = []
     review_prompts: list[list[dict[str, object]]] = []
@@ -89,6 +136,8 @@ def _run_yaml_turn(
         personification_group_followup_referent_enabled=False,
         personification_final_dialogue_gate_enabled=final_gate_enabled,
     )
+    if configure is not None:
+        configure(plugin_config)
     logger = SimpleNamespace(
         debug=lambda *_args, **_kwargs: None,
         info=lambda *_args, **_kwargs: None,
@@ -140,6 +189,8 @@ def _run_yaml_turn(
             recent_context_hint="",
             reply_required=True,
             tts_service=tts_service,
+            agent_tool_caller=agent_tool_caller,
+            tool_registry=tool_registry,
         )
     )
     return bot, primary_prompts, review_prompts, stages
@@ -195,8 +246,10 @@ def test_yaml_bot_history_attribution_review_fails_closed_without_sending(
 
 def test_yaml_rewrite_uses_reviewed_text_not_mismatched_segments(monkeypatch) -> None:  # noqa: ANN001
     async def _review(_messages, **_kwargs):  # noqa: ANN001
+        if "独立复核改写是否符合受信任核心人格" in str(_messages):
+            return '{"action":"accept","persona_verdict":"consistent","flags":[]}'
         return (
-            '{"action":"rewrite","text":"那就两组，洞里拐弯容易漏。",'
+            '{"action":"rewrite","persona_verdict":"rewrite","text":"那就两组，洞里拐弯容易漏。",'
             '"reason":"answer current human",'
             '"flags":[],"segments":["你刚才让大家带火把。"]}'
         )
@@ -227,7 +280,7 @@ def test_yaml_rewrite_uses_reviewed_text_not_mismatched_segments(monkeypatch) ->
 def test_yaml_real_user_quote_can_pass_attribution_review_and_send(monkeypatch) -> None:  # noqa: ANN001
     async def _review(_messages, **_kwargs):  # noqa: ANN001
         return (
-            '{"action":"accept","text":"","reason":"real user quote",'
+            '{"action":"accept","persona_verdict":"consistent","text":"","reason":"real user quote",'
             '"flags":[],"segments":["那就两组，洞里拐弯容易漏。"],'
             '"attribution_verdict":"safe_quote_or_rebuttal","self_claims":[]}'
         )
@@ -264,7 +317,7 @@ def test_yaml_accept_projects_multi_messages_to_reviewed_text_once(monkeypatch) 
 
     async def _review(_messages, **_kwargs):  # noqa: ANN001
         return (
-            '{"action":"accept","text":"","reason":"safe",'
+            '{"action":"accept","persona_verdict":"consistent","text":"","reason":"safe",'
             '"flags":[],"segments":["第一句","第二句"]}'
         )
 
@@ -298,6 +351,99 @@ def test_yaml_accept_projects_multi_messages_to_reviewed_text_once(monkeypatch) 
     # sticker authorization, but it cannot carry stale text.
     assert bot.sent == ["第一句", "第二句"]
     assert " ".join(bot.sent) == "第一句 第二句"
+
+
+def test_yaml_final_local_sticker_uses_narrow_runtime(monkeypatch, tmp_path) -> None:
+    from PIL import Image
+    image = tmp_path / "ok.png"; Image.new("RGB", (4, 4), "pink").save(image, "PNG")
+    seen = []
+    async def allow(**kwargs):
+        seen.append(kwargs["runtime"])
+        return "data:image/png;base64,QUJD"
+    async def choose(*_a, **_k): return image
+    monkeypatch.setattr(yaml_processor, "choose_sticker_for_context", choose)
+    monkeypatch.setattr(yaml_processor, "prepare_local_expression", allow)
+    async def review(*_a, **_k): return '{"action":"accept","persona_verdict":"consistent","flags":[]}'
+    bot, _primary, reviews, _stages = _run_yaml_turn(
+        monkeypatch, history=[], event=_event(text="hi", message_id="m"), candidate="reply", review_call=review,
+        final_gate_enabled=False,
+        parse_yaml_response=lambda _text: {"status":"","think":"","action":"","messages":[{"text":"reply","sticker":"ok"}]},
+        configure=lambda cfg: (setattr(cfg, "personification_sticker_path", str(tmp_path)), setattr(cfg, "personification_sticker_probability", 1.0)),
+    )
+    assert seen and seen[0].plugin_config.personification_sticker_path == str(tmp_path)
+    assert reviews and bot.sent
+
+
+def test_yaml_final_local_sticker_visual_rejection_sends_no_image(monkeypatch, tmp_path) -> None:
+    from PIL import Image
+
+    image = tmp_path / "rejected.png"
+    Image.new("RGB", (4, 4), "pink").save(image, "PNG")
+
+    async def reject(**_kwargs):
+        # A visual/persona review rejection is fail-closed for the image only;
+        # the independently reviewed text reply may still be delivered.
+        return None
+
+    async def choose(*_args, **_kwargs):
+        return image
+
+    monkeypatch.setattr(yaml_processor, "choose_sticker_for_context", choose)
+    monkeypatch.setattr(yaml_processor, "prepare_local_expression", reject)
+
+    async def review(*_args, **_kwargs):
+        return '{"action":"accept","persona_verdict":"consistent","flags":[]}'
+
+    bot, _primary, reviews, _stages = _run_yaml_turn(
+        monkeypatch,
+        history=[],
+        event=_event(text="hi", message_id="rejected-local-expression"),
+        candidate="text reply",
+        review_call=review,
+        final_gate_enabled=False,
+        parse_yaml_response=lambda _text: {
+            "status": "",
+            "think": "",
+            "action": "",
+            "messages": [{"text": "text reply", "sticker": "rejected"}],
+        },
+        configure=lambda cfg: (
+            setattr(cfg, "personification_sticker_path", str(tmp_path)),
+            setattr(cfg, "personification_sticker_probability", 1.0),
+        ),
+    )
+
+    assert reviews
+    assert bot.sent == ["text reply"]
+    assert all("base64://" not in str(payload) for payload in bot.sent)
+
+
+def test_yaml_agent_executor_receives_narrow_runtime(monkeypatch) -> None:
+    captured = []
+    tool_caller = object()
+
+    async def fake_agent(**kwargs):
+        captured.append(kwargs["executor"])
+        return agent_synthesis_module.AgentResult(
+            text="agent reply",
+            pending_actions=[],
+        )
+
+    monkeypatch.setattr(yaml_processor, "run_agent", fake_agent)
+    monkeypatch.setattr(yaml_processor, "register_groupmate_qzone_agent_tools", lambda *_a, **_k: None)
+    async def review(*_a, **_k): return '{"action":"accept","persona_verdict":"consistent","flags":[]}'
+    bot, _primary, reviews, _stages = _run_yaml_turn(
+        monkeypatch, history=[], event=_event(text="hi", message_id="agent"), candidate="fallback", review_call=review,
+        final_gate_enabled=False, agent_tool_caller=tool_caller, tool_registry=tool_registry_module.ToolRegistry(),
+        configure=lambda cfg: setattr(cfg, "personification_agent_enabled", True),
+    )
+    assert captured
+    runtime = captured[0].runtime
+    assert runtime.plugin_config.personification_agent_enabled is True
+    assert runtime.agent_tool_caller is tool_caller
+    assert runtime.response_review_call_ai_api is not None
+    assert reviews and "agent reply" in str(reviews[0])
+    assert bot.sent == ["agent reply"]
 
 
 def test_yaml_canonical_projection_keeps_authorized_structured_records() -> None:
@@ -337,7 +483,7 @@ def test_yaml_tts_uses_the_same_reviewed_canonical_text(monkeypatch) -> None:  #
 
     async def _review(_messages, **_kwargs):  # noqa: ANN001
         return (
-            '{"action":"accept","text":"","reason":"safe",'
+            '{"action":"accept","persona_verdict":"consistent","text":"","reason":"safe",'
             '"flags":[],"segments":["第一句","第二句"]}'
         )
 

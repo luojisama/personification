@@ -39,6 +39,7 @@ from ...core.meme_reply_policy import format_meme_turn_prompt, prepare_meme_turn
 from ...core.message_parts import build_user_message_content, clone_messages_with_text_suffix
 from ...core.history_projection import build_confirmed_outbound_history, build_group_batch_history, is_confirmed_send_result, lookup_sticker_history_metadata
 from ...core.sticker_library import load_sticker_metadata, resolve_sticker_dir
+from ...core.expression_preparation import prepare_local_expression
 from ...core.message_relations import extract_send_message_id
 from ...core.dialogue_context import build_dialogue_context_for_turn
 from ...core.message_provenance import is_bot_self_message_event
@@ -217,7 +218,7 @@ from ...core.sticker_feedback import (
     record_sticker_sent,
     review_pending_sticker_reaction,
 )
-from ...core.web_grounding import extract_forward_message_content
+from ...core.forward_context import build_forward_context, merge_forward_media
 from ...utils import build_group_context_window, get_recent_group_msgs
 from ..event_rules import (
     _extract_recordable_group_message,
@@ -605,12 +606,27 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
     try:
         from ...core.llm_context import reset_llm_context, set_llm_context
 
+        from ...core.interaction_adapter import InteractionEnvelope
+
+        interaction_envelope = state.get("interaction_envelope")
+        # Only the adapter bridge may establish an alternate platform scope;
+        # state dictionaries and model output are never trusted identities.
+        envelope_platform = ""
+        envelope_bot_id = ""
+        if isinstance(interaction_envelope, InteractionEnvelope):
+            envelope_platform = str(interaction_envelope.platform or "").strip()
+            envelope_bot_id = str(interaction_envelope.bot_id or "").strip()
         token = set_llm_context(
             group_id=str(getattr(event, "group_id", "") or ""),
             user_id=str(getattr(event, "user_id", "") or ""),
-            platform="onebot",
-            bot_id=str(getattr(event, "self_id", "") or ""),
+            platform=envelope_platform or "onebot",
+            bot_id=envelope_bot_id or str(getattr(event, "self_id", "") or ""),
             purpose="reply",
+            deadline_monotonic=(
+                float(state["response_deadline"])
+                if isinstance(state.get("response_deadline"), (int, float))
+                else None
+            ),
         )
     except Exception:
         token = None
@@ -1170,19 +1186,38 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             runtime.logger.info("拟人插件：引用消息中的 GIF 信号命中，整条消息跳过本轮回复。")
             return
 
+        forward_media: list[Any] = []
         try:
-            forward_content = await extract_forward_message_content(
+            forward_context = await build_forward_context(
                 bot,
                 event,
                 logger=runtime.logger,
+                forwarder_user_id=user_id,
+                outer_message_id=str(getattr(event, "message_id", "") or ""),
+                group_id=str(group_id),
+                response_deadline=response_deadline if isinstance(response_deadline, (int, float)) else None,
+                http_client=http_client,
             )
+            forward_content = forward_context.text
+            forward_media = list(forward_context.media)
         except Exception as e:
             runtime.logger.warning(f"处理聊天记录失败: {e}")
             forward_content = ""
+            forward_media = []
         if forward_content:
             clipped_forward = forward_content[:2000]
             message_text_parts.append("\n[聊天记录]:\n")
             message_text_parts.append(clipped_forward)
+            if len(forward_content) > len(clipped_forward):
+                message_text_parts.append("\n[不可信转发记录：内容已按输入上限截断]")
+        if forward_media:
+            # Forwarded bytes have been safely materialized by forward_context.
+            # They are visual evidence only: never create sticker candidates
+            # and never use nested-node identities as owner provenance.
+            turn_media_context.extend(forward_media)
+            for item in forward_media:
+                if item.ref and item.ref not in image_urls:
+                    image_urls.append(item.ref)
 
         message_text = "".join(message_text_parts)
         # 多人/连续刷表情时，把一连串表情占位符折叠成单个中性标记，
@@ -1593,6 +1628,12 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             if not direct_image_input:
                 image_urls_for_text_model = []
 
+    # This value is consumed by hook construction as well as by the eventual
+    # YAML/plain split below.  Some private/Satori paths do not visit the
+    # earlier group-only prompt preparation block, so it must be initialized
+    # at the common boundary.
+    base_prompt = persona.load_prompt(str(group_id))
+
     hook_ctx = HookContext(
         user_id=user_id,
         user_name=user_name,
@@ -1665,9 +1706,20 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             max_candidates=getattr(runtime.plugin_config, "personification_group_followup_referent_max_candidates", 3),
             confidence_threshold=getattr(runtime.plugin_config, "personification_group_followup_referent_confidence", 0.80),
         )
-        turn_media_context = list(followup_referent.active_media)
+        # Follow-up selection only governs historical/quoted activation.  A
+        # safely materialized forward occurrence belongs to this current turn
+        # and must not disappear merely because it is not an antecedent.
+        # The resolver owns historical/quoted activation.  Forward evidence
+        # is a separately materialized occurrence of this triggering turn,
+        # so preserve it without allowing a resolver to duplicate it.
+        turn_media_context = merge_forward_media(
+            followup_referent.active_media,
+            turn_media_context,
+        )
         state["turn_media_context"] = serialize_turn_media(turn_media_context)
-        state["turn_media_manifest"] = serialize_turn_media(followup_referent.media_manifest)
+        state["turn_media_manifest"] = serialize_turn_media(
+            merge_forward_media(followup_referent.media_manifest, turn_media_context)
+        )
         state["group_followup_referent"] = followup_referent.context_fields()
         try:
             from ...core import reply_turn_trace
@@ -1738,6 +1790,12 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 )
         except Exception:
             pass
+    # Private turns do not have a group referent resolver.  Preserve any
+    # existing historical manifest while still recording current forward
+    # occurrences for the downstream YAML/review handoff.
+    state["turn_media_manifest"] = serialize_turn_media(
+        merge_forward_media(state.get("turn_media_manifest") or (), turn_media_context)
+    )
     if failed_image_refs:
         turn_media_context = [
             replace(item, resolution_code="onebot_image_download_failed")
@@ -2930,6 +2988,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         reply_commit_state=state,
                         turn_media_context=turn_media_context,
                         avatar_pair_candidates=avatar_pair_candidates,
+                        core_persona=(base_prompt.get("system", "") if isinstance(base_prompt, dict) else str(base_prompt or "")),
+                        ordered_context=recent_context_hint,
+                        semantic_frame=semantic_frame,
                     )
                     try:
                         from ...core import reply_turn_trace
@@ -3321,7 +3382,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         final_gate_enabled = bool(
             getattr(runtime.plugin_config, "personification_final_dialogue_gate_enabled", True)
         )
-        if final_gate_enabled or dialogue_context.requires_attribution_review:
+        if final_gate_enabled or dialogue_context.requires_attribution_review or bool(base_prompt):
             review_decision = await final_dialogue_gate(
                 runtime.review_call_ai_api or runtime.lite_call_ai_api or runtime.call_ai_api,
                 candidate_text=reply_content,
@@ -3351,13 +3412,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 followup_referent=state.get("group_followup_referent"),
                 followup_media_manifest=state.get("turn_media_manifest"),
                 dialogue_context=dialogue_context,
+                core_persona=(base_prompt.get("system", "") if isinstance(base_prompt, dict) else str(base_prompt or "")),
+                response_deadline=response_deadline,
             )
-        elif agent_direct_output and not protected_review_required:
-            review_decision = make_passthrough_review_decision(
-                reply_content,
-                reason="safe_direct_output",
-            )
-        elif used_agent and not should_review_agent_reply and not care_review_required and not protected_review_required:
+        elif used_agent and not should_review_agent_reply and not care_review_required and not protected_review_required and not agent_direct_output:
             review_decision = make_passthrough_review_decision(
                 reply_content,
                 reason="agent_passthrough",
@@ -3992,6 +4050,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                             bot=bot,
                             plugin_config=runtime.plugin_config,
                             logger=runtime.logger,
+                            core_persona=(base_prompt.get("system", "") if isinstance(base_prompt, dict) else str(base_prompt or "")),
+                            runtime=runtime,
+                            context=candidate,
+                            group_id=group_id,
                         )
                         outgoing: Any = rendered_candidate.message
                         if not outgoing:
@@ -4203,26 +4265,55 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             if stale_reason:
                 runtime.logger.info(f"拟人插件：{stale_reason}")
                 return
-            send_result = await _send_reply(sticker_segment)
-            result_status = str(getattr(send_result, "status", "") or "").strip().lower()
-            if result_status == "unknown":
-                delivery_unknown = True
-                state["delivery_unknown"] = True
-            sticker_confirmed = is_confirmed_send_result(send_result)
-            confirmed_sticker_parts += int(sticker_confirmed)
-            if not sticker_confirmed and result_status != "unknown":
-                delivery_partial = bool(state.get("reply_delivery_confirmed", False))
-            if not sent_message_id:
-                sent_message_id = _message_id_from_send_result(send_result)
-            if sticker_name and is_confirmed_send_result(send_result):
-                mark_pending_sticker_reaction(
-                    build_sticker_feedback_scene_key(
-                        group_id=str(group_id),
-                        user_id=user_id,
-                        is_private=is_private_session,
-                    ),
-                    sticker_name,
+            # Selection occurred before text delivery.  Re-read all expression
+            # switches and review the actual bytes immediately before sending.
+            image_ref = await prepare_local_expression(
+                path=resolve_sticker_dir(
+                    getattr(runtime.plugin_config, "personification_sticker_path", None)
+                ) / str(sticker_name or ""),
+                config=runtime.plugin_config,
+                core_persona=(
+                    base_prompt.get("system", "")
+                    if isinstance(base_prompt, dict)
+                    else str(base_prompt or "")
+                ),
+                runtime=runtime,
+                context=reply_content,
+                group_id=group_id,
+            )
+            if not image_ref:
+                sticker_segment = None
+                sticker_name = None
+            else:
+                send_result = await _send_reply(
+                    runtime.message_segment_cls.image("base64://" + image_ref.split(",", 1)[1])
                 )
+            if not image_ref:
+                send_result = None
+            if send_result is None:
+                # A rejected final gate is not a partial/unknown delivery and
+                # must never be retried by this completed reply transaction.
+                pass
+            else:
+                result_status = str(getattr(send_result, "status", "") or "").strip().lower()
+                if result_status == "unknown":
+                    delivery_unknown = True
+                    state["delivery_unknown"] = True
+                sticker_confirmed = is_confirmed_send_result(send_result)
+                confirmed_sticker_parts += int(sticker_confirmed)
+                if not sticker_confirmed and result_status != "unknown":
+                    delivery_partial = bool(state.get("reply_delivery_confirmed", False))
+                if not sent_message_id:
+                    sent_message_id = _message_id_from_send_result(send_result)
+                if sticker_name and is_confirmed_send_result(send_result):
+                    mark_pending_sticker_reaction(
+                        build_sticker_feedback_scene_key(
+                            group_id=str(group_id),
+                            user_id=user_id,
+                            is_private=is_private_session,
+                        ),
+                        sticker_name,
+                    )
 
         if not delivery_partial and not delivery_unknown:
             mark_reply_delivery_complete(state)

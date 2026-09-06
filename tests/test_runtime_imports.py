@@ -18,12 +18,18 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
         "import importlib; importlib.import_module('plugin.personification.core.ai_routes')",
         "import importlib; importlib.import_module('plugin.personification.agent.runtime.planner')",
         (
+            "import importlib; "
+            "[importlib.import_module('plugin.personification.' + name) for name in "
+            "('core.forward_context', 'core.interaction_adapter', 'handlers.satori_reply_bridge', "
+            "'core.moderation_tools', 'core.route_probe_service', 'jobs.route_probe_schedule')]"
+        ),
+        (
             "from plugin.personification.agent.runtime import AgentResult, run_agent; "
             "from plugin.personification.agent.runtime import runner; "
             "assert AgentResult is runner.AgentResult; assert run_agent is runner.run_agent"
         ),
     ],
-    ids=["response-review", "ai-routes", "planner", "runtime-public-api"],
+    ids=["response-review", "ai-routes", "planner", "platform-modules", "runtime-public-api"],
 )
 def test_runtime_modules_import_in_fresh_initialized_subprocess(script: str, tmp_path) -> None:
     """Exercise production imports without the in-process test namespace loader."""
