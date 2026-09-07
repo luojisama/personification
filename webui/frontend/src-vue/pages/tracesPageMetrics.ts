@@ -12,6 +12,110 @@ export interface TraceDerivedMetrics {
 }
 
 const SAFE_DIAGNOSTIC_ATOM = /^[A-Za-z0-9_-]{1,64}$/;
+const SAFE_COUNT = /^\d{1,6}$/;
+
+const FINAL_REVIEW_REASON_LABELS: Record<string, string> = {
+  review_budget_exhausted: "终审前预算已耗尽",
+  review_call_succeeded: "终审调用已返回",
+  review_cancelled: "终审调用已取消",
+  review_timeout: "终审请求超时",
+  review_call_failed: "终审调用失败",
+  review_unparseable: "终审结果无法解析",
+  review_rewrite_empty: "终审改写为空",
+  review_verification_rejected: "终审必要核验未通过",
+  review_model_no_reply: "终审模型选择不回复",
+  review_accepted: "终审已通过",
+  review_rewritten: "终审改写后通过",
+  review_media_grounding_failed: "终审媒体依据核验未通过",
+};
+
+const FINAL_REVIEW_STAGE_LABELS: Record<string, string> = {
+  final_review_start: "最终审阅开始",
+  final_review_call: "最终审阅调用",
+  final_review_decision: "最终审阅结论",
+};
+
+const FINAL_REVIEW_ACTION_LABELS: Record<string, string> = {
+  no_reply: "不发送可见回复",
+  accept: "通过原候选",
+  accepted: "通过原候选",
+  rewrite: "要求改写",
+  rewritten: "改写后通过",
+};
+
+const FINAL_REVIEW_SOURCE_LABELS: Record<string, string> = {
+  initial: "初审",
+  rewrite: "改写复核",
+  verification: "独立复核",
+};
+
+// These are pre-existing quality stages emitted by the runtime.  A tool name
+// or an arbitrary trace stage must not be able to claim that media evidence
+// was delivered merely by putting `media_delivery=complete` in its summary.
+const MEDIA_DELIVERY_STAGE_KEYS = new Set([
+  "agent_reply_quality",
+  "agent_reply_quality_start",
+  "agent_reply_quality_media_recovery_start",
+]);
+
+export interface FinalReviewDisplay {
+  reasonCode: string;
+  reasonLabel: string;
+  action: string;
+  actionLabel: string;
+  source: string;
+  sourceLabel: string;
+  availableEvidenceFields: number | null;
+}
+
+function safeSummaryFields(summary: string): Record<string, string> {
+  const fields: Record<string, string> = {};
+  for (const match of summary.matchAll(/(?:^|\s)(reason|action|source|available_evidence_fields|media_delivery)=([^\s|]+)/g)) {
+    const key = match[1];
+    const value = match[2];
+    if (key && value && SAFE_DIAGNOSTIC_ATOM.test(value)) fields[key] = value;
+  }
+  return fields;
+}
+
+function hasCompleteMediaDelivery(stage: TraceStage): boolean {
+  return MEDIA_DELIVERY_STAGE_KEYS.has(stage.key) && safeSummaryFields(stage.summary).media_delivery === "complete";
+}
+
+/**
+ * Review trace summaries are deliberately a small key=value protocol.  Do not
+ * render arbitrary model/provider text as a review decision: only known codes
+ * and bounded counts become the administrator-facing diagnostic.
+ */
+export function finalReviewDisplay(stage: TraceStage): FinalReviewDisplay | null {
+  if (!Object.hasOwn(FINAL_REVIEW_STAGE_LABELS, stage.key)) return null;
+  const fields = safeSummaryFields(stage.summary);
+  const reasonCode = fields.reason ?? (Object.hasOwn(FINAL_REVIEW_REASON_LABELS, stage.detail_code) ? stage.detail_code : "");
+  const action = fields.action ?? "";
+  const source = fields.source ?? "";
+  const evidenceText = fields.available_evidence_fields;
+  return {
+    reasonCode,
+    reasonLabel: FINAL_REVIEW_REASON_LABELS[reasonCode] ?? "终审状态待核对",
+    action,
+    actionLabel: FINAL_REVIEW_ACTION_LABELS[action] ?? (action ? `未知动作（${action}）` : "未记录"),
+    source,
+    sourceLabel: FINAL_REVIEW_SOURCE_LABELS[source] ?? (source ? `未知来源（${source}）` : "未记录"),
+    availableEvidenceFields: evidenceText && SAFE_COUNT.test(evidenceText) ? Number(evidenceText) : null,
+  };
+}
+
+export function stageDisplayLabel(stage: TraceStage): string {
+  if (hasCompleteMediaDelivery(stage)) return "Agent 媒体证据检查通过";
+  return FINAL_REVIEW_STAGE_LABELS[stage.key] ?? stage.label;
+}
+
+export function stageDisplaySummary(stage: TraceStage): string {
+  if (hasCompleteMediaDelivery(stage)) {
+    return "Agent 媒体证据检查通过；这不表示 QQ 已送达，实际外发结果请以“最终可见回复”中的发送结果为准。";
+  }
+  return stage.summary;
+}
 
 export function outcomeTone(outcome: TraceDetail["outcome"]): "ok" | "warn" | "error" | "unknown" {
   if (outcome === "ok") return "ok";

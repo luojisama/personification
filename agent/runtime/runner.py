@@ -15,6 +15,8 @@ from ..query_rewriter import (
 )
 from ...core.chat_intent import metadata_fallback_turn_semantic_frame_for_session
 from ...core.metrics import record_counter, record_timing
+from ...core.media_evidence import capture_executed_vision_evidence, merge_media_evidence
+from ...core.turn_media import coerce_turn_media
 from ...core.time_ctx import get_configured_now
 from ..tool_registry import ToolRegistry
 from ...core.message_parts import extract_text_from_parts
@@ -338,8 +340,36 @@ async def run_agent(
     )
     phase_deadlines = _derive_agent_phase_deadlines(budget_deadline)
 
+    def _bound_vision_media_ids(tool_args: dict[str, Any]) -> list[str]:
+        from ...core.media_evidence import bind_vision_input_media_ids
+        from ...skills.skillpacks.sticker_tool.scripts.impl import (
+            get_current_audio_urls, get_current_image_urls, get_current_video_urls,
+        )
+
+        return bind_vision_input_media_ids(
+            tool_args, turn_media_context=turn_media_context,
+            current_images=get_current_image_urls(), current_videos=get_current_video_urls(),
+            current_audios=get_current_audio_urls(),
+        )
+
+    executed_media_evidence = []
+
+    def _record_vision_execution(tool_name: str, tool_args: dict[str, Any], raw_result: Any) -> None:
+        if tool_name != "vision_analyze":
+            return
+        # Project before the general-purpose tool record truncates its result.
+        projection = capture_executed_vision_evidence(
+            {"tool_name": tool_name, "_personification_executed": True,
+             "_personification_media_ids": _bound_vision_media_ids(tool_args),
+             "result": raw_result},
+            turn_media_context=turn_media_context,
+        )
+        if projection.available_field_count:
+            executed_media_evidence.append(projection)
+
     async def _finalize_result(result: AgentResult, *, reason: str) -> AgentResult:
         result.tool_calls_made = bool(stop_state.has_tool_call)
+        result.media_evidence = merge_media_evidence(executed_media_evidence)
         social = social_evidence_from_records(stop_state.tool_result_records)
         result.social_evidence = list(social.get("sources") or [])
         result.social_coverage = {
@@ -1094,6 +1124,7 @@ async def run_agent(
                         select_semantic_fallback_tool=_select_semantic_fallback_tool,
                         disclosed_tool_names=set(selected_names) if disclosure_mode != "off" else None,
                         evidence_required=evidence_required,
+                        record_vision_evidence=_record_vision_execution,
                         structured_output=structured_output,
                         semantic_research_target_deadline=semantic_research_target_deadline,
                     ),
@@ -1358,13 +1389,13 @@ async def run_agent(
             )
             if stop_state.social_evidence_satisfied:
                 _mark_social_evidence_satisfied()
-            stop_state.tool_result_records.append(
-                _build_tool_result_record(
-                    tool_name=stop_state.last_tool_name,
-                    tool_args=tool_args,
-                    result=result,
-                )
+            tool_record = _build_tool_result_record(
+                tool_name=stop_state.last_tool_name,
+                tool_args=tool_args,
+                result=result,
             )
+            _record_vision_execution(str(stop_state.last_tool_name or "").strip(), tool_args, result)
+            stop_state.tool_result_records.append(tool_record)
             media_resolver = getattr(tool, "result_media_resolver", None) if tool is not None else None
             if callable(media_resolver) and len(turn_tool_media_urls) < 4:
                 try:
@@ -1477,6 +1508,7 @@ async def run_agent(
                         record_trace=_record_reply_trace_stage,
                         append_evidence_guidance=_append_evidence_guidance_if_needed,
                         semantic_research_target_deadline=semantic_research_target_deadline,
+                        record_vision_evidence=_record_vision_execution,
                     )
                     if ran_fallback:
                         budget_deadline = (

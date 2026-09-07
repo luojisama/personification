@@ -7,7 +7,7 @@ from typing import Any
 
 from plugin.personification.agent.tool_registry import AgentTool
 from plugin.personification.core.ai_routes import build_fallback_vision_caller
-from plugin.personification.core.media_refs import normalize_media_refs
+from plugin.personification.core.media_refs import normalize_media_refs, resolve_vision_input_refs
 from plugin.personification.core.media_understanding import (
     analyze_audios_with_route_or_fallback,
     analyze_images_with_route_or_fallback,
@@ -160,26 +160,13 @@ async def analyze_images(
     audios: list[str] | None = None,
 ) -> str:
     prompt = f"{VISION_ANALYZE_PROMPT}\n\n用户问题：{str(query or '').strip() or '请分析这段媒体'}"
-    raw_refs = list(images or []) + list(image_urls or [])
-    if not raw_refs:
-        raw_refs = get_current_image_urls()
-    raw_videos = _merge_explicit_and_current_refs(videos, get_current_video_urls())
-    raw_audios = _merge_explicit_and_current_refs(audios, get_current_audio_urls())
-    normalized_media = normalize_media_refs(
-        images=raw_refs,
-        videos=raw_videos,
-        audios=raw_audios,
-        image_limit=3,
-        video_limit=1,
-        audio_limit=1,
+    normalized_media = resolve_vision_input_refs(
+        images=images, image_urls=image_urls, videos=videos, audios=audios,
+        current_images=get_current_image_urls(), current_videos=get_current_video_urls(),
+        current_audios=get_current_audio_urls(),
     )
     refs = list(normalized_media.get("images") or [])
     invalid_refs = list(normalized_media.get("image_problems") or [])
-    if not refs:
-        current_images = get_current_image_urls()
-        if current_images:
-            fallback_norm = normalize_media_refs(images=current_images, image_limit=3)
-            refs = list(fallback_norm.get("images") or [])
     video_refs = list(normalized_media.get("videos") or [])
     invalid_video_refs = list(normalized_media.get("video_problems") or [])
     audio_refs = list(normalized_media.get("audios") or [])

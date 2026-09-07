@@ -265,6 +265,7 @@ async def _try_inject_vision_fallback(
     success_message: str,
     tool_deadline: float | None = None,
     required_media_evidence: bool = False,
+    record_vision_evidence: Callable[[str, dict[str, Any], Any], None] | None = None,
     record_trace: Callable[..., None] | None = None,
 ) -> bool:
     if not (user_images or has_media):
@@ -383,6 +384,8 @@ async def _try_inject_vision_fallback(
         tool_args=bg_args,
         result=bg_result,
     )
+    if record_vision_evidence is not None:
+        record_vision_evidence(bg_name, bg_args, bg_result)
     state.tool_result_records.append(
         build_tool_result_record(
             tool_name=bg_name,
@@ -723,6 +726,7 @@ async def _run_stop_fallback_tool(
     record_trace: Callable[..., None],
     append_evidence_guidance: Callable[..., Awaitable[Any]],
     semantic_research_target_deadline: float | None = None,
+    record_vision_evidence: Callable[[str, dict[str, Any], Any], None] | None = None,
 ) -> bool:
     fallback_tool = registry.get(fallback_name)
     if fallback_tool is None:
@@ -795,11 +799,11 @@ async def _run_stop_fallback_tool(
     )
     state.has_tool_call = True
     state.pending_evidence_followup_query = ""
+    if record_vision_evidence is not None:
+        record_vision_evidence(fallback_name, fallback_args, fallback_result)
     state.tool_result_records.append(
         build_tool_result_record(
-            tool_name=fallback_name,
-            tool_args=fallback_args,
-            result=fallback_result,
+            tool_name=fallback_name, tool_args=fallback_args, result=fallback_result,
         )
     )
     state.semantic_fallback_attempted = False
@@ -842,6 +846,7 @@ async def handle_model_stop(
     tool_deadline: float | None = None,
     disclosed_tool_names: set[str] | None = None,
     evidence_required: bool = False,
+    record_vision_evidence: Callable[[str, dict[str, Any], Any], None] | None = None,
 ) -> StopFlowDecision:
     effective_tool_deadline = tool_deadline if tool_deadline is not None else budget_deadline
     if structured_output and not response.tool_calls:
@@ -898,6 +903,7 @@ async def handle_model_stop(
                 tool_deadline=effective_tool_deadline,
                 required_media_evidence=True,
                 record_trace=record_trace,
+                record_vision_evidence=record_vision_evidence,
             )
             if injected:
                 await append_evidence_guidance()
@@ -978,6 +984,7 @@ async def handle_model_stop(
             success_message="[agent] injected background vision fallback result",
             tool_deadline=effective_tool_deadline,
             record_trace=record_trace,
+            record_vision_evidence=record_vision_evidence,
         )
         if injected:
             return StopFlowDecision.continue_loop()
@@ -1024,6 +1031,7 @@ async def handle_model_stop(
             record_trace=record_trace,
             append_evidence_guidance=append_evidence_guidance,
             semantic_research_target_deadline=semantic_research_target_deadline,
+            record_vision_evidence=record_vision_evidence,
         )
         if ran_tool:
             return StopFlowDecision.continue_loop()
@@ -1077,6 +1085,7 @@ async def handle_model_stop(
             success_message="[agent] awaited background vision fallback result",
             tool_deadline=effective_tool_deadline,
             record_trace=record_trace,
+            record_vision_evidence=record_vision_evidence,
         )
         if injected:
             return StopFlowDecision.continue_loop()

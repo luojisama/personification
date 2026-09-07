@@ -4,7 +4,7 @@ import { createMemoryHistory, createRouter } from "vue-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resources } from "@/api/resources";
 import type { TraceDetail, TraceListItem } from "@/api/types";
-import { deriveTraceMetrics, traceTriageText } from "./tracesPageMetrics";
+import { deriveTraceMetrics, finalReviewDisplay, stageDisplayLabel, stageDisplaySummary, traceTriageText } from "./tracesPageMetrics";
 import TracesPage from "./TracesPage.vue";
 
 vi.mock("@/api/resources", () => ({ resources: { traces: vi.fn(), trace: vi.fn() } }));
@@ -86,6 +86,41 @@ describe("Vue Traces metrics & triage logic", () => {
     expect(traceTriageText(noReply, deriveTraceMetrics(noReply))).toContain("没有发送可见回复");
     expect(traceTriageText(unknown, deriveTraceMetrics(unknown))).toContain("最终结果无法确认");
   });
+
+  it("maps the controlled final-review protocol without exposing its raw summary", () => {
+    const reviewStage = {
+      key: "final_review_decision",
+      label: "旧版终审结论",
+      status: "warn" as const,
+      started_at: null,
+      finished_at: null,
+      duration_ms: 123,
+      summary: "reason=review_timeout action=no_reply source=initial available_evidence_fields=3 provider_text=ignore-me",
+      detail_code: "review_timeout",
+      remaining_ms: 42,
+    };
+    expect(stageDisplayLabel(reviewStage)).toBe("最终审阅结论");
+    expect(finalReviewDisplay(reviewStage)).toMatchObject({
+      reasonLabel: "终审请求超时",
+      actionLabel: "不发送可见回复",
+      sourceLabel: "初审",
+      availableEvidenceFields: 3,
+    });
+  });
+
+  it("keeps old Trace stage labels and gives completed media evidence its delivery boundary", () => {
+    const oldStage = { ...trace.stages[0]!, key: "agent_tool_result", label: "旧版工具阶段", detail_code: "result" };
+    const mediaComplete = {
+      ...trace.stages[0]!, key: "agent_reply_quality", label: "Agent 回复质量", detail_code: "agent_reply_quality",
+      summary: "action=accepted source=- available_evidence_fields=3 media_delivery=complete elapsed_ms=12",
+    };
+    const untrustedToolStage = { ...trace.stages[0]!, key: "agent_tool_result", label: "工具结果", summary: "media_delivery=complete" };
+    expect(stageDisplayLabel(oldStage)).toBe("旧版工具阶段");
+    expect(stageDisplaySummary(oldStage)).toBe("result_len=100");
+    expect(stageDisplayLabel(mediaComplete)).toBe("Agent 媒体证据检查通过");
+    expect(stageDisplaySummary(mediaComplete)).toContain("不表示 QQ 已送达");
+    expect(stageDisplayLabel(untrustedToolStage)).toBe("工具结果");
+  });
 });
 
 const listItem: TraceListItem = {
@@ -137,6 +172,30 @@ describe("Trace index route behavior", () => {
     await vi.waitFor(() => expect(vi.mocked(resources.traces)).toHaveBeenLastCalledWith(2, 20, "", expect.anything()));
     await wrapper.get("input[type='search']").setValue("trace-first");
     await vi.waitFor(() => expect(vi.mocked(resources.traces)).toHaveBeenLastCalledWith(1, 20, "", expect.anything()));
+    wrapper.unmount(); queryClient.clear();
+  });
+
+  it("renders a Chinese final-review diagnostic and keeps QQ delivery separate", async () => {
+    vi.mocked(resources.trace).mockResolvedValue({
+      ...trace,
+      stages: [
+        {
+          key: "agent_reply_quality", label: "Agent 回复质量", status: "ok", started_at: null, finished_at: null,
+          duration_ms: 12, summary: "action=accepted source=- available_evidence_fields=3 media_delivery=complete elapsed_ms=12", detail_code: "agent_reply_quality", remaining_ms: null,
+        },
+        {
+          key: "final_review_decision", label: "旧终审", status: "warn", started_at: null, finished_at: null,
+          duration_ms: 321, summary: "reason=review_model_no_reply action=no_reply source=verification available_evidence_fields=5", detail_code: "review_model_no_reply", remaining_ms: null,
+        },
+      ],
+    });
+    const { wrapper, queryClient } = await renderTracePage("/runtime/traces/timeline/trace-safe");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("Agent 媒体证据检查通过"));
+    expect(wrapper.text()).toContain("这不表示 QQ 已送达");
+    expect(wrapper.text()).toContain("终审模型选择不回复");
+    expect(wrapper.text()).toContain("独立复核");
+    expect(wrapper.text()).toContain("可用媒体证据字段");
+    expect(wrapper.text()).not.toContain("reason=review_model_no_reply");
     wrapper.unmount(); queryClient.clear();
   });
 });

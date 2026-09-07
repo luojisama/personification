@@ -2794,7 +2794,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 surface="normal_reply",
                 reply_trace_id=str(state.get("reply_trace_id", "") or ""),
             )
-            if not isinstance(result, SendReceipt) or result.status == "sent":
+            if is_confirmed_send_result(result):
                 _confirm_reply_delivery()
             return result
 
@@ -3382,6 +3382,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         final_gate_enabled = bool(
             getattr(runtime.plugin_config, "personification_final_dialogue_gate_enabled", True)
         )
+        final_media_evidence = state.get("_agent_media_evidence") if used_agent else None
+        final_media_grounding_required = bool(
+            used_agent and state.get("agent_media_delivery") == "complete"
+        )
         if final_gate_enabled or dialogue_context.requires_attribution_review or bool(base_prompt):
             review_decision = await final_dialogue_gate(
                 runtime.review_call_ai_api or runtime.lite_call_ai_api or runtime.call_ai_api,
@@ -3400,6 +3404,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 turn_media_context=turn_media_context,
                 plugin_episode=plugin_episode,
                 batched_events=batched_events,
+                media_evidence=final_media_evidence,
+                media_grounding_required=final_media_grounding_required,
                 peer_bot_episodes=(
                     conversation_context.peer_bot_episodes
                     if conversation_context is not None
@@ -3448,9 +3454,25 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 turn_media_context=turn_media_context,
                 plugin_episode=plugin_episode,
                 dialogue_context=dialogue_context,
+                media_evidence=final_media_evidence,
+                media_grounding_required=final_media_grounding_required,
+                response_deadline=response_deadline,
             )
         if review_decision.action == "no_reply":
-            runtime.logger.info(f"拟人插件：回复审阅后选择沉默，group={group_id} user={user_id}")
+            review_code = getattr(review_decision, "diagnosis_code", "") or "review_verification_rejected"
+            runtime.logger.info(f"拟人插件：最终回复审阅未放行，code={review_code} group={group_id} user={user_id}")
+            try:
+                from ...core import reply_turn_trace
+
+                reply_turn_trace.record_stage(
+                    key="reply_no_reply", label="最终审阅未发送", status="warn",
+                    detail=f"action=no_reply reason={review_code}", elapsed_ms=0,
+                )
+                reply_turn_trace.finish_trace(
+                    outcome="no_reply", diagnosis_code=review_code, detail={"reason": review_code},
+                )
+            except Exception:
+                pass
             return
         if review_decision.action == "rewrite" and review_decision.text:
             reply_content = review_decision.text.strip()

@@ -7,6 +7,34 @@ from urllib.parse import unquote, urlsplit
 from .image_refs import normalize_image_refs
 
 
+def resolve_vision_input_refs(
+    *, images=None, image_urls=None, videos=None, audios=None,
+    current_images=(), current_videos=(), current_audios=(),
+) -> dict[str, Any]:
+    """Share the vision tool's exact selection/caps with execution provenance.
+
+    An opaque explicit QQ token may fail normalization while the current
+    materialized reference remains usable. This function does no downloads.
+    """
+    def merged(explicit, current):
+        return list(dict.fromkeys(
+            str(value or "").strip()
+            for value in [*list(explicit or []), *list(current or [])]
+            if str(value or "").strip()
+        ))
+
+    raw_images = list(images or []) + list(image_urls or [])
+    normalized = normalize_media_refs(
+        images=raw_images or list(current_images),
+        videos=merged(videos, current_videos),
+        audios=merged(audios, current_audios),
+        image_limit=3, video_limit=1, audio_limit=1,
+    )
+    if not normalized.get("images") and current_images:
+        normalized["images"] = normalize_media_refs(images=current_images, image_limit=3).get("images", [])
+    return normalized
+
+
 _VIDEO_EXTENSIONS = {
     ".mp4",
     ".mov",
@@ -139,6 +167,7 @@ def normalize_media_refs(
 
 
 __all__ = [
+    "resolve_vision_input_refs",
     "is_supported_video_filename",
     "normalize_media_refs",
     "normalize_audio_ref",

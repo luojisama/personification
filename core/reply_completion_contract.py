@@ -30,6 +30,7 @@ def reset_agent_result_completion_state(
             "agent_grounded_anchor_count": 0,
             "agent_media_recovery_method": "not_needed",
             "agent_media_delivery": "not_required",
+            "_agent_media_evidence": None,
             "agent_citation_mode": str(default_citation_mode or "none"),
             "agent_social_coverage_status": "",
             "agent_social_tool_execution": "not_used",
@@ -90,6 +91,8 @@ def apply_agent_result_completion_state(
     state["agent_media_delivery"] = str(
         getattr(agent_result, "media_delivery", "not_required") or "not_required"
     )
+    # Process-local handoff only; completion DTOs intentionally do not export it.
+    state["_agent_media_evidence"] = getattr(agent_result, "media_evidence", None)
     state["agent_citation_mode"] = str(
         getattr(agent_result, "citation_mode", default_citation_mode)
         or default_citation_mode

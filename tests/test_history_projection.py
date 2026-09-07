@@ -44,6 +44,10 @@ def test_part_receipt_confirmation_distinguishes_sent_unknown_failed_and_legacy(
     assert not projection.is_confirmed_send_result(Receipt("failed", "x"))
     assert projection.is_confirmed_send_result({"message_id": "legacy-ok"})
     assert not projection.is_confirmed_send_result(None)
+    assert projection.is_confirmed_send_result({"status": "ok", "data": {"message_id": "legacy-ok"}})
+    assert not projection.is_confirmed_send_result({"status": "ok", "data": {}})
+    assert not projection.is_confirmed_send_result({"status": "ok", "retcode": 1, "data": {"message_id": "x"}})
+    assert not projection.is_confirmed_send_result({"status": "failed", "retcode": 0, "data": {"message_id": "x"}})
 
 
 def test_sticker_metadata_uses_semantics_but_not_name_or_url() -> None:

@@ -13,6 +13,7 @@ from ...agent.query_rewriter import QueryRewriteContext
 from ...agent.tool_registry import ToolRegistry
 
 from ...core.context_policy import ensure_prompt_injection_guard
+from ...core.history_projection import is_confirmed_send_result
 from ...core.current_group_context_tool import register_current_group_context_tool
 from ...core.error_utils import log_exception
 from ...core.image_input import provider_supports_vision
@@ -71,6 +72,12 @@ def build_reply_operation_id(*, bot: Any, event: Any, reply_trace_id: str = "") 
     return f"qq-reply:{bot_id}:{event_identity}"
 
 
+@dataclass(frozen=True)
+class _UnconfirmedLegacySend:
+    status: str = "unknown"
+    error_code: str = "legacy_send_receipt_missing"
+
+
 async def dispatch_reply_part(
     *,
     bot: Any,
@@ -81,7 +88,17 @@ async def dispatch_reply_part(
     reply_trace_id: str = "",
 ) -> Any:
     if ledger is None:
-        return await bot.send(event, payload)
+        result = await bot.send(event, payload)
+        status = result.get("status") if isinstance(result, dict) else getattr(result, "status", None)
+        if (
+            not is_confirmed_send_result(result)
+            and result is not False
+            and str(status or "").strip().lower() not in {"failed", "blocked", "rejected"}
+        ):
+            # A completed call without a usable receipt may already have sent.
+            # Preserve the unknown outcome across both reply pipelines.
+            return _UnconfirmedLegacySend()
+        return result
     context = build_outbound_context(
         bot=bot,
         event=event,
@@ -1012,7 +1029,7 @@ async def run_agent_if_enabled(
                     surface="reply_ack",
                     reply_trace_id=str(commit_state.get("reply_trace_id", "") or ""),
                 )
-                if not isinstance(send_result, SendReceipt) or send_result.status == "sent":
+                if is_confirmed_send_result(send_result):
                     mark_reply_delivery_confirmed(commit_state)
             finally:
                 release_reply_commit(commit_state)

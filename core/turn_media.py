@@ -1399,6 +1399,7 @@ def render_turn_media_grounding(
     values: Iterable[TurnMediaRef | dict[str, Any]] | None,
     *,
     summary: Any = "",
+    tool_evidence_available: bool = False,
 ) -> str:
     refs = coerce_turn_media(values)
     safe_summary = normalize_safe_visual_summary(summary)
@@ -1428,6 +1429,8 @@ def render_turn_media_grounding(
         lines.append(
             f"- 安全视觉摘要（scope={scope}，confidence={summary_confidence:.2f}）：{safe_summary}"
         )
+    elif tool_evidence_available:
+        lines.append("- 本轮另附已关联媒体的受限工具观察；仅在其媒体范围内核验画面事实，不得扩大归属。")
     else:
         lines.append("- 安全视觉摘要不可用：只能使用 provenance 和聊天文字，不得补猜画面内容。")
     return "\n".join(lines)

@@ -34,6 +34,35 @@ def _event() -> SimpleNamespace:
     return SimpleNamespace(group_id=100, user_id=200, message_id=300)
 
 
+@pytest.mark.parametrize("result", [None, {}, {"status": "unknown"}, SimpleNamespace()])
+def test_legacy_dispatch_without_receipt_is_unknown(result):
+    calls = []
+
+    async def send(event, payload):
+        calls.append(payload)
+        return result
+
+    receipt = asyncio.run(pipeline_context.dispatch_reply_part(
+        bot=SimpleNamespace(send=send), event=_event(), payload="reviewed text",
+        ledger=None, surface="normal_reply",
+    ))
+    assert receipt.status == "unknown"
+    assert not pipeline_context.is_confirmed_send_result(receipt)
+    assert calls == ["reviewed text"]
+
+
+@pytest.mark.parametrize("result", [False, {"status": "failed"}, {"message_id": "confirmed"}, {"status": "ok", "data": {"message_id": "confirmed"}}])
+def test_legacy_dispatch_preserves_known_results(result):
+    async def send(event, payload):
+        return result
+
+    receipt = asyncio.run(pipeline_context.dispatch_reply_part(
+        bot=SimpleNamespace(send=send), event=_event(), payload="reviewed text",
+        ledger=None, surface="normal_reply",
+    ))
+    assert receipt is result
+
+
 def _ledger(tmp_path):  # noqa: ANN001, ANN202
     db_path = db.init_db_sync(tmp_path)
     return qq_outbound.QQOutboundLedger(db_path), db_path
@@ -191,6 +220,7 @@ def test_normal_agent_ack_uses_reply_ack_ledger_surface(
 
     monkeypatch.setattr(pipeline_context, "clone_tool_registry", lambda _registry: _Registry())
     monkeypatch.setattr(pipeline_context, "register_current_user_avatar_tool", lambda *_a, **_k: None)
+    monkeypatch.setattr(pipeline_context, "register_groupmate_qzone_agent_tools", lambda *_a, **_k: None)
     monkeypatch.setattr(
         pipeline_context,
         "register_group_user_avatar_pair_insight_tool",

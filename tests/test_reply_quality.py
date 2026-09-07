@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from ._loader import load_personification_module
+from plugin.personification.core.media_evidence import MediaEvidenceProjection, project_vision_evidence
 
 
 reply_quality = load_personification_module("plugin.personification.agent.runtime.reply_quality")
@@ -49,6 +51,7 @@ def _agent_result(
     *,
     direct_output: bool = False,
     quality_context: str = "",
+    media_evidence: object | None = None,
 ) -> object:
     return final_synthesis.AgentResult(
         text=text,
@@ -56,6 +59,7 @@ def _agent_result(
         direct_output=direct_output,
         bypass_length_limits=False,
         quality_context=quality_context,
+        media_evidence=(media_evidence if media_evidence is not None else MediaEvidenceProjection()),
     )
 
 
@@ -170,7 +174,7 @@ def test_finalize_agent_reply_quality_recovers_video_evidence_after_control_bloc
 
     result = asyncio.run(
         reply_quality.finalize_agent_reply_quality(
-            _agent_result(raw),
+            _agent_result(raw, media_evidence=project_vision_evidence(json.loads(messages[0]["content"]), media_ids=("test-video",), required=True)),
             tool_caller=caller,
             messages=messages,
             current_user_text="简单描述一下上面这个视频",
@@ -222,7 +226,7 @@ def test_finalize_agent_reply_quality_uses_structured_video_fallback_when_recove
 
     result = asyncio.run(
         reply_quality.finalize_agent_reply_quality(
-            _agent_result(raw),
+            _agent_result(raw, media_evidence=project_vision_evidence(json.loads(messages[0]["content"]), media_ids=("test-video",), required=True)),
             tool_caller=_FailingCaller(),
             messages=messages,
             current_user_text="简单描述一下上面这个视频",
@@ -263,7 +267,7 @@ def test_finalize_agent_reply_quality_rejects_generic_video_recovery_candidate()
 
     result = asyncio.run(
         reply_quality.finalize_agent_reply_quality(
-            _agent_result(raw),
+            _agent_result(raw, media_evidence=project_vision_evidence(json.loads(messages[0]["content"]), media_ids=("test-video",), required=True)),
             tool_caller=caller,
             messages=messages,
             current_user_text="简单描述一下上面这个视频",
@@ -299,7 +303,7 @@ def test_video_evidence_completion_rejects_production_style_generic_highlight_qu
 
     result = asyncio.run(
         reply_quality.finalize_agent_reply_quality(
-            _agent_result("这是你录的高光还是刷到的整活？"),
+            _agent_result("这是你录的高光还是刷到的整活？", media_evidence=project_vision_evidence(json.loads(messages[0]["content"]), media_ids=("test-video",), required=True)),
             tool_caller=caller,
             messages=messages,
             turn_plan=_video_turn_plan(),
@@ -407,7 +411,7 @@ def test_video_evidence_completion_catches_generic_visible_draft_without_control
     caller = _RewriteCaller("游戏角色正在检查装备界面，右侧还摆着多件服装。")
     result = asyncio.run(
         reply_quality.finalize_agent_reply_quality(
-            _agent_result("这是你录的高光还是刷到的整活？"),
+            _agent_result("这是你录的高光还是刷到的整活？", media_evidence=project_vision_evidence({'scene_summary': '游戏角色正在检查装备界面', 'visual_evidence': ['右侧摆着多件服装']}, media_ids=("test-video",), required=True)),
             tool_caller=caller,
             messages=[
                 {
@@ -433,7 +437,7 @@ def test_video_evidence_completion_accepts_grounded_initial_draft_without_extra_
     caller = _RewriteCaller("不应该调用")
     result = asyncio.run(
         reply_quality.finalize_agent_reply_quality(
-            _agent_result("游戏角色正在检查装备界面，右侧摆着多件服装。"),
+            _agent_result("游戏角色正在检查装备界面，右侧摆着多件服装。", media_evidence=project_vision_evidence({'scene_summary': '游戏角色正在检查装备界面', 'visual_evidence': ['右侧摆着多件服装']}, media_ids=("test-video",), required=True)),
             tool_caller=caller,
             messages=[
                 {

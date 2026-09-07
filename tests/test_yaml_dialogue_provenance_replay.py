@@ -103,6 +103,7 @@ def _run_yaml_turn(
     configure=None,
     agent_tool_caller=None,
     tool_registry=None,
+    **turn_kwargs,
 ) -> tuple[_Bot, list[list[dict[str, object]]], list[list[dict[str, object]]], list[dict[str, object]]]:  # noqa: ANN001
     primary_prompts: list[list[dict[str, object]]] = []
     review_prompts: list[list[dict[str, object]]] = []
@@ -128,6 +129,9 @@ def _run_yaml_turn(
         return {}
 
     monkeypatch.setattr(yaml_processor, "load_sticker_feedback", _empty_sticker_feedback)
+    # Agent-path replays should not reach the optional QZone settings store.
+    # QZone registration is outside this local video/response-review contract.
+    monkeypatch.setattr(yaml_processor, "register_groupmate_qzone_agent_tools", lambda *_a, **_k: None)
 
     plugin_config = config_module.Config(
         personification_agent_enabled=False,
@@ -191,6 +195,7 @@ def _run_yaml_turn(
             tts_service=tts_service,
             agent_tool_caller=agent_tool_caller,
             tool_registry=tool_registry,
+            **turn_kwargs,
         )
     )
     return bot, primary_prompts, review_prompts, stages

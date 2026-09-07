@@ -1221,8 +1221,9 @@ def test_care_rewrite_is_safety_revalidated() -> None:
     )
 
     assert calls == 2
-    assert decision.action == "rewrite"
-    assert "当地急救或警方" in decision.text
+    assert decision.action == "no_reply"
+    assert decision.text == ""
+    assert decision.diagnosis_code == "review_verification_rejected"
     assert decision.reason == "care_rewrite_unverified"
 
 

@@ -134,13 +134,31 @@
                   <header>
                     <div>
                       <span>{{ String(index + 1).padStart(2, "0") }}</span>
-                      <strong>{{ stage.label }}</strong>
+                      <strong>{{ stageDisplayLabel(stage) }}</strong>
                     </div>
                     <StateBadge :tone="stageTone(stage.status)" :raw="stage.status">
                       {{ stageStatusLabel(stage.status) }}
                     </StateBadge>
                   </header>
-                  <CollapsibleText v-if="stage.summary" :text="stage.summary" :limit="300" />
+                  <dl v-if="finalReviewDisplay(stage)" class="review-diagnostic">
+                    <div>
+                      <dt>审阅结论</dt>
+                      <dd>{{ finalReviewDisplay(stage)?.reasonLabel }} <code v-if="finalReviewDisplay(stage)?.reasonCode">{{ finalReviewDisplay(stage)?.reasonCode }}</code></dd>
+                    </div>
+                    <div>
+                      <dt>处理动作</dt>
+                      <dd>{{ finalReviewDisplay(stage)?.actionLabel }}</dd>
+                    </div>
+                    <div>
+                      <dt>审阅来源</dt>
+                      <dd>{{ finalReviewDisplay(stage)?.sourceLabel }}</dd>
+                    </div>
+                    <div v-if="finalReviewDisplay(stage)?.availableEvidenceFields !== null">
+                      <dt>可用媒体证据字段</dt>
+                      <dd>{{ finalReviewDisplay(stage)?.availableEvidenceFields }}</dd>
+                    </div>
+                  </dl>
+                  <CollapsibleText v-else-if="stageDisplaySummary(stage)" :text="stageDisplaySummary(stage)" :limit="300" />
                   <footer>
                     <code>{{ stage.detail_code }}</code>
                     <span>{{ formatDuration(stage.duration_ms) }}</span>
@@ -235,7 +253,7 @@ import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
 import TextField from "@vue-app/components/forms/TextField.vue";
-import { deriveTraceMetrics, outcomeTone, stageStatusLabel, stageTone, traceTriageText, type StageFilter } from "./tracesPageMetrics";
+import { deriveTraceMetrics, finalReviewDisplay, outcomeTone, stageDisplayLabel, stageDisplaySummary, stageStatusLabel, stageTone, traceTriageText, type StageFilter } from "./tracesPageMetrics";
 
 const route = useRoute();
 const router = useRouter();

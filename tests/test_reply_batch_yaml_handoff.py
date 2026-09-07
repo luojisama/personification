@@ -15,6 +15,8 @@ turn_media = load_personification_module("plugin.personification.core.turn_media
 yaml_processor = load_personification_module("plugin.personification.handlers.yaml_pipeline.processor")
 planner = load_personification_module("plugin.personification.agent.runtime.planner")
 pipeline_sticker = load_personification_module("plugin.personification.handlers.reply_pipeline.pipeline_sticker")
+tool_registry_module = load_personification_module("plugin.personification.agent.tool_registry")
+completion_contract = load_personification_module("plugin.personification.core.reply_completion_contract")
 
 
 class _Text:
@@ -86,6 +88,10 @@ def _run_normal_selected_referent_replay(
     protocol_sticker_urls: list[str] | None = None, batch_text: str = "", sticker_vision_max: int = 1,
     forward_content: str = "",
     forward_media: list[object] | None = None,
+    agent_result=None,
+    review_call=None,
+    yaml_mode: bool = True,
+    send_behavior: str = "confirmed",
 ) -> tuple[list[dict], dict, list[dict]]:  # noqa: ANN001
     """A text-only follow-up can activate exactly its selected historical image.
 
@@ -138,8 +144,14 @@ def _run_normal_selected_referent_replay(
 
     model_messages: list[dict] = []
     stored_messages: list[dict] = []
-    logger = SimpleNamespace(debug=lambda *_a, **_k: None, info=lambda *_a, **_k: None,
-                             warning=lambda *_a, **_k: None, error=lambda *_a, **_k: None)
+    replay_logs = []
+    def record_log(*args, **kwargs):
+        replay_logs.append(str(args))
+        import traceback
+        if args and "API 调用失败" in str(args[0]):
+            replay_logs.append(traceback.format_exc())
+    logger = SimpleNamespace(debug=record_log, info=record_log,
+                             warning=record_log, error=record_log)
 
     async def _call_ai_api(messages):  # noqa: ANN001
         model_messages.extend(messages)
@@ -158,6 +170,9 @@ def _run_normal_selected_referent_replay(
             plugin_config=plugin_config, get_schedule_prompt_injection=lambda _prompt="": "",
             schedule_disabled_override_prompt=lambda: "", build_grounding_context=lambda *_a, **_k: "",
             call_ai_api=_call_ai_api,
+            review_call_ai_api=review_call,
+            agent_tool_caller=(object() if agent_result is not None else None),
+            tool_registry=(tool_registry_module.ToolRegistry() if agent_result is not None else None),
             parse_yaml_response=lambda _text: {"status": "", "think": "", "action": "", "messages": []},
             message_segment_cls=SimpleNamespace, sanitize_history_text=str,
             private_session_prefix="private_", build_private_session_id=lambda value: f"private_{value}",
@@ -176,9 +191,14 @@ def _run_normal_selected_referent_replay(
         intent_decision=intent_decision, message_intent="chat", arbitration="reply", emotion_block="",
     )
     plugin_config = config_module.Config(
-        personification_agent_enabled=False, personification_schedule_global=False,
+        personification_agent_enabled=agent_result is not None, personification_schedule_global=False,
         personification_qq_expression_enabled=False, personification_image_input_mode=image_input_mode,
         personification_sticker_vision_max=sticker_vision_max,
+        personification_sticker_probability=0,
+        personification_poke_probability=0,
+        personification_humanize_typing_enabled=False,
+        personification_humanize_reaction_enabled=False,
+        personification_tts_enabled=False,
     )
     object.__setattr__(plugin_config, "personification_sticker_vision_max", sticker_vision_max)
     monkeypatch.setattr(processor, "refresh_bot_group_mute_state", lambda *_a, **_k: _false())
@@ -201,6 +221,21 @@ def _run_normal_selected_referent_replay(
     monkeypatch.setattr(processor, "format_meme_turn_prompt", lambda _value: "")
     monkeypatch.setattr(yaml_processor, "get_recent_group_msgs", lambda *_a, **_k: [])
     monkeypatch.setattr(yaml_processor, "get_group_topic_summary", lambda *_a, **_k: "")
+    monkeypatch.setattr(yaml_processor, "register_groupmate_qzone_agent_tools", lambda *_a, **_k: None)
+    async def _empty_feedback():
+        return {}
+    monkeypatch.setattr(yaml_processor, "load_sticker_feedback", _empty_feedback)
+    if agent_result is not None:
+        async def _fake_agent(**_kwargs):  # noqa: ANN003
+            return agent_result
+        monkeypatch.setattr(yaml_processor, "run_agent", _fake_agent)
+        monkeypatch.setattr(yaml_processor, "_should_use_agent_for_reply", lambda **_kwargs: True)
+        async def _fake_normal_agent(**kwargs):  # noqa: ANN003
+            completion_contract.apply_agent_result_completion_state(
+                state=kwargs["reply_commit_state"], agent_result=agent_result,
+            )
+            return (agent_result.text, True, False, None, [], "", False, False, "")
+        monkeypatch.setattr(processor, "_run_agent_if_enabled", _fake_normal_agent)
     if simulate_image_download_failure:
         async def _failed_download(**_kwargs):  # noqa: ANN003
             return None, None, False
@@ -219,7 +254,7 @@ def _run_normal_selected_referent_replay(
         sanitize_history_text=str, build_private_anti_loop_hint=lambda _messages: "",
     )
     persona = processor.PersonaDeps(
-        load_prompt=lambda _group_id: {"system": "persona", "input": "{history_last}"}, sign_in_available=False,
+        load_prompt=lambda _group_id: ({"system": "persona", "input": "{history_last}"} if yaml_mode else "persona"), sign_in_available=False,
         get_user_data=lambda _user_id: {}, get_level_name=lambda _score: "friend", update_user_data=lambda *_a, **_k: None,
         get_group_config=lambda _group_id: {}, get_group_style=lambda _group_id: "", favorability_attitudes={},
         get_custom_title=lambda _user_id: "", default_bot_nickname="bot",
@@ -231,7 +266,9 @@ def _run_normal_selected_referent_replay(
         get_current_time=lambda: datetime(2026, 9, 5, 12, 0, 0), format_time_context=lambda _now: "noon",
         schedule_disabled_override_prompt=lambda: "", get_schedule_prompt_injection=lambda: "",
         build_grounding_context=lambda _query: "", update_private_interaction_time=lambda _user_id: None,
-        call_ai_api=_call_ai_api, save_plugin_runtime_config=None, user_blacklist={}, record_group_msg=lambda *_a, **_k: None,
+        call_ai_api=_call_ai_api, review_call_ai_api=review_call, save_plugin_runtime_config=None, user_blacklist={}, record_group_msg=lambda *_a, **_k: None,
+        agent_tool_caller=(object() if agent_result is not None else None),
+        tool_registry=(tool_registry_module.ToolRegistry() if agent_result is not None else None),
         split_text_into_segments=lambda value: [value], message_segment_cls=SimpleNamespace,
         get_sticker_files=lambda: [], get_http_client=lambda: object(), get_whitelisted_groups=lambda: [],
     )
@@ -264,11 +301,33 @@ def _run_normal_selected_referent_replay(
                 {"message_id": "follow-up", "user_id": "asker", "sender_name": "提问者", "text": ""},
             ],
         })
-    asyncio.run(processor._process_response_logic_impl(
-        SimpleNamespace(self_id="bot"), event,
-        state,
-        processor.ReplyProcessorDeps(session=session, persona=persona, runtime=runtime, types=types),
-    ))
+    class _OfflineSendFailure(RuntimeError):
+        pass
+
+    class _ReplayBot:
+        self_id = "bot"
+        def __init__(self) -> None:
+            self.sent: list[object] = []
+        async def send(self, _event, payload):  # noqa: ANN001
+            self.sent.append(payload)
+            if send_behavior == "exception":
+                raise _OfflineSendFailure("offline send failure")
+            if send_behavior == "unknown":
+                return None
+            return {"message_id": len(self.sent)}
+    bot = _ReplayBot()
+    try:
+        asyncio.run(processor._process_response_logic_impl(
+            bot, event,
+            state,
+            processor.ReplyProcessorDeps(session=session, persona=persona, runtime=runtime, types=types),
+        ))
+    except _OfflineSendFailure:
+        # YAML delegates send exceptions to its caller; retain state so the
+        # replay can verify there was no retry or false delivery confirmation.
+        state["_test_replay_send_exception"] = True
+    state["_test_replay_sent"] = list(bot.sent)
+    state["_test_replay_logs"] = replay_logs
     image_parts = [
         part for message in model_messages
         for part in (message.get("content") if isinstance(message.get("content"), list) else [])

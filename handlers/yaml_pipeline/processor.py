@@ -875,7 +875,7 @@ async def process_yaml_response_logic(
             surface=surface,
             reply_trace_id=outbound_reply_trace_id,
         )
-        if not isinstance(result, SendReceipt) or result.status == "sent":
+        if is_confirmed_send_result(result):
             _confirm_reply_delivery()
         return result
 
@@ -2796,6 +2796,10 @@ async def process_yaml_response_logic(
     final_gate_enabled = bool(
         getattr(plugin_config, "personification_final_dialogue_gate_enabled", True)
     )
+    final_media_evidence = reply_commit_state.get("_agent_media_evidence") if used_agent else None
+    final_media_grounding_required = bool(
+        used_agent and reply_commit_state.get("agent_media_delivery") == "complete"
+    )
     if final_gate_enabled or dialogue_context.requires_attribution_review or bool(prompt_config):
         review_decision = await final_dialogue_gate(
             review_call_ai_api,
@@ -2814,6 +2818,8 @@ async def process_yaml_response_logic(
             turn_media_context=turn_media_refs,
             plugin_episode=resolved_plugin_episode,
             batched_events=list(batched_events or []),
+            media_evidence=final_media_evidence,
+            media_grounding_required=final_media_grounding_required,
             peer_bot_episodes=(
                 conversation_context.peer_bot_episodes
                 if conversation_context is not None
@@ -2862,10 +2868,14 @@ async def process_yaml_response_logic(
             turn_media_context=turn_media_refs,
             plugin_episode=resolved_plugin_episode,
             dialogue_context=dialogue_context,
+            media_evidence=final_media_evidence,
+            media_grounding_required=final_media_grounding_required,
+            response_deadline=response_deadline,
         )
     if review_decision.action == "no_reply":
-        logger.info(f"拟人插件 (YAML)：回复审阅后选择沉默，group={group_id} user={user_id}")
-        _trace_no_reply("review_no_reply", detail="回复审阅选择沉默")
+        review_code = getattr(review_decision, "diagnosis_code", "") or "review_verification_rejected"
+        logger.info(f"拟人插件 (YAML)：最终回复审阅未放行，code={review_code} group={group_id} user={user_id}")
+        _trace_no_reply(review_code, diagnosis_code=review_code, detail=f"action=no_reply reason={review_code}")
         return
     if review_decision.action == "rewrite" and review_decision.text:
         assistant_text = sanitize_history_text(review_decision.text.strip())

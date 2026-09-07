@@ -447,7 +447,12 @@ def _trace_detail(trace: dict[str, Any]) -> dict[str, Any]:
                 "duration_ms": item.get("duration_ms") if isinstance(item.get("duration_ms"), int) else None,
                 "summary": str(item.get("detail") or "")[:1000],
                 "detail_code": str(item.get("key") or "stage_unclassified")[:96],
-                "remaining_ms": None,
+                "remaining_ms": (
+                    int(item["signals"]["remaining_ms"])
+                    if item.get("key") in {"final_review_start", "final_review_call"}
+                    and str((item.get("signals") or {}).get("remaining_ms", "")).isdigit()
+                    else None
+                ),
             }
             for item in items[:200]
         ],

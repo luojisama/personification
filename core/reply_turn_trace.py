@@ -19,7 +19,7 @@ _CURRENT_TRACE_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 _ELAPSED_RE = re.compile(r"(?:elapsed_ms=|耗时\s*)(\d{1,9})(?:\s*ms)?", re.I)
 _SIGNAL_KEY_RE = re.compile(
-    r"(?:^|\s)(action|reply_action|speech_act|output|intent|ambiguity|tool|arg_keys|result_len|evidence|media_routes|budget|suggested_steps|actual_steps|suggested_seconds|actual_seconds|topic_thread|topic_speaker|reply_to_bot|bot_in_thread|parallel_threads|participants|reason|source|flags|revision|chars|address_mode|quote|at|target|query|finish|silence|recommend_silence|emotion|bot_emotion|emotion_intensity|reply_shape|relationship_progress|relationship_progress_confidence|conversation_scenario|scenario|media_only|media_grounding|available_evidence_fields|grounded_evidence_fields|grounded_anchor_count|recovery_method|media_delivery)=([^\s]+)"
+    r"(?:^|\s)(action|reply_action|speech_act|output|intent|ambiguity|tool|arg_keys|result_len|evidence|media_routes|budget|suggested_steps|actual_steps|suggested_seconds|actual_seconds|topic_thread|topic_speaker|reply_to_bot|bot_in_thread|parallel_threads|participants|reason|source|flags|revision|chars|address_mode|quote|at|target|query|finish|silence|recommend_silence|emotion|bot_emotion|emotion_intensity|reply_shape|relationship_progress|relationship_progress_confidence|conversation_scenario|scenario|media_only|media_grounding|available_evidence_fields|grounded_evidence_fields|grounded_anchor_count|recovery_method|media_delivery|remaining_ms|review_call_count|media_count)=([^\s]+)"
 )
 _TRACE_TRUNCATION_KEY = "trace_truncated"
 _CRITICAL_STAGE_KEYS = frozenset({"incoming_message", "outgoing_message"})

@@ -32,6 +32,13 @@ def is_confirmed_send_result(result: Any) -> bool:
     if status is None and isinstance(result, dict):
         status = result.get("status")
     if status is not None:
+        if isinstance(result, dict) and str(status).strip().lower() == "ok":
+            data = result.get("data")
+            return (
+                result.get("retcode", 0) in (0, "0")
+                and isinstance(data, dict)
+                and bool(data.get("message_id"))
+            )
         return str(status).strip().lower() == "sent"
     if result is None or result is False:
         return False

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, List
 
+from ...core.media_evidence import MediaEvidenceProjection, empty_media_evidence
 from ..tool_registry import ToolRegistry
 from .fallbacks import (
     TOOL_RESULT_EMPTY_EVIDENCE,
@@ -40,6 +41,9 @@ class AgentResult:
     grounded_anchor_count: int = 0
     media_recovery_method: str = "not_needed"
     media_delivery: str = "not_required"
+    # Process-local output of locally executed vision_analyze calls.  It must
+    # never be serialized into a trace, memory record, or outbound payload.
+    media_evidence: MediaEvidenceProjection = field(default_factory=empty_media_evidence)
 
 
 def direct_tool_result_agent_result(

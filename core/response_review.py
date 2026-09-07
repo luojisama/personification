@@ -5,7 +5,8 @@ import json
 import math
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from functools import wraps
 from typing import Any, Awaitable, Callable, Iterable
 
 from ..agent.runtime.planner import render_output_mode_length_guidance
@@ -26,6 +27,11 @@ from .reply_text_policy import (
 from .message_provenance import is_personification_reply_record
 from .role_integrity import detect_persona_identity_leak
 from .turn_media import render_turn_media_grounding
+from .media_evidence import (
+    MediaEvidenceProjection,
+    media_evidence_grounding_sufficient,
+    render_media_evidence_for_review,
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +44,7 @@ class ResponseReviewDecision:
     self_claims: tuple[BotSelfClaimDraft, ...] = field(default_factory=tuple)
     attribution_verdict: str = ""
     persona_verdict: str = ""
+    diagnosis_code: str = ""
 
 
 @dataclass(frozen=True)
@@ -995,7 +1002,7 @@ async def recover_direct_mention_reply(
     return _extract_recovered_message(str(raw or ""))
 
 
-async def review_response_text(
+async def _review_response_text_impl(
     call_ai_api: Callable[[list[dict[str, Any]]], Awaitable[Any]],
     *,
     candidate_text: str,
@@ -1011,6 +1018,8 @@ async def review_response_text(
     reply_required: bool = False,
     semantic_frame: Any = None,
     turn_media_context: list[Any] | None = None,
+    media_evidence: MediaEvidenceProjection | None = None,
+    media_grounding_required: bool = False,
     plugin_episode: Any = None,
     batched_events: list[dict[str, Any]] | None = None,
     peer_bot_episodes: Iterable[Any] | None = None,
@@ -1023,18 +1032,6 @@ async def review_response_text(
     response_deadline: float | None = None,
     timeout_seconds: float | None = None,
 ) -> ResponseReviewDecision:
-    review_deadline = (
-        float(response_deadline) if response_deadline is not None
-        else time.monotonic() + 8.0
-    )
-    if timeout_seconds is not None:
-        review_deadline = min(review_deadline, time.monotonic() + max(0.0, float(timeout_seconds)))
-    original_caller=call_ai_api
-    async def bounded_call(messages):
-        remaining=review_deadline-time.monotonic()
-        if remaining<=0: raise asyncio.TimeoutError
-        return await asyncio.wait_for(original_caller(messages),timeout=remaining)
-    call_ai_api=bounded_call
     must_reply = bool(reply_required or is_direct_mention)
     candidate = str(candidate_text or "").strip()
     plugin_episode_hint = _render_plugin_episode_hint(plugin_episode)
@@ -1089,7 +1086,12 @@ async def review_response_text(
         or getattr(getattr(semantic_frame, "emotional_support", None), "needed", False)
     )
     care_risk = str(getattr(getattr(semantic_frame, "emotional_support", None), "risk_level", "none") or "none")
-    visual_evidence = render_turn_media_grounding(turn_media_context)
+    visual_evidence = render_turn_media_grounding(
+        turn_media_context,
+        tool_evidence_available=bool(render_media_evidence_for_review(
+            media_evidence, turn_media_context=turn_media_context,
+        )),
+    )
     manifest_roles: list[dict[str, str]] = []
     owner_aliases: dict[str, str] = {}
     message_aliases: dict[str, str] = {}
@@ -1331,6 +1333,7 @@ async def review_response_text(
             text="",
             reason="review_rewrite_empty",
             flags=parsed.flags or ("review_unverified",),
+            diagnosis_code="review_rewrite_empty",
         )
     if core_persona and parsed.persona_verdict not in {"consistent", "rewrite", "invalid"}:
         return ResponseReviewDecision(action="no_reply", text="", reason="persona_review_unverified")
@@ -1396,12 +1399,11 @@ async def review_response_text(
             )
             unsafe_flags = tuple(flag for flag in (safety.flags if safety else ()) if flag in _CARE_REJECT_FLAGS)
             if safety is None or safety.action != "accept" or unsafe_flags:
-                return _care_fail_closed_decision(
-                    is_private=is_private,
-                    is_direct_mention=is_direct_mention,
-                    risk_level=care_risk,
+                return ResponseReviewDecision(
+                    action="no_reply", text="",
                     reason="care_rewrite_unverified",
                     flags=unsafe_flags,
+                    diagnosis_code="review_verification_rejected",
                 )
         if plugin_episode_hint:
             plugin_safety = await _validate_plugin_episode_rewrite(
@@ -1511,7 +1513,10 @@ async def review_response_text(
             flags=provenance_reject_flags,
         )
     if parsed.action == "no_reply":
-        return ResponseReviewDecision(action="no_reply", text="", reason=parsed.reason, flags=parsed.flags)
+        return ResponseReviewDecision(
+            action="no_reply", text="", reason=parsed.reason, flags=parsed.flags,
+            diagnosis_code="review_model_no_reply",
+        )
     reviewed_segments = _segments_match_reviewed_text(parsed.segments, candidate)
     segments_mismatched = bool(parsed.segments) and not reviewed_segments
     return ResponseReviewDecision(
@@ -1524,6 +1529,135 @@ async def review_response_text(
         attribution_verdict=parsed.attribution_verdict,
         persona_verdict=parsed.persona_verdict,
     )
+
+
+def _record_final_review_stage(key: str, *, detail: str, elapsed_ms: int, status: str = "info") -> None:
+    # Only callers constructing enum/count-only detail strings may use this.
+    from . import reply_turn_trace
+
+    try:
+        reply_turn_trace.record_stage(
+            key=key,
+            label={
+                "final_review_start": "最终回复审阅开始",
+                "final_review_call": "最终回复审阅调用",
+                "final_review_decision": "最终回复审阅结果",
+            }[key],
+            status=status, detail=detail, elapsed_ms=elapsed_ms,
+        )
+    except Exception:
+        pass
+
+
+@wraps(_review_response_text_impl)
+async def review_response_text(
+    call_ai_api: Callable[[list[dict[str, Any]]], Awaitable[Any]],
+    **kwargs: Any,
+) -> ResponseReviewDecision:
+    """Audit every final review, including its independent verification calls.
+
+    Free-form model reasons stay internal. Public diagnostics describe the
+    actual boundary that stopped delivery, not a guessed semantic reason.
+    """
+    started = time.monotonic()
+    deadline = kwargs.get("response_deadline")
+    deadline = float(deadline) if deadline is not None else started + 8.0
+    if kwargs.get("timeout_seconds") is not None:
+        deadline = min(deadline, started + max(0.0, float(kwargs["timeout_seconds"])))
+    remaining_ms = max(0, int((deadline - started) * 1000))
+    call_count = 0
+    failure_code = ""
+    media_evidence = kwargs.get("media_evidence")
+    media_context = kwargs.get("turn_media_context")
+    evidence_text = render_media_evidence_for_review(media_evidence, turn_media_context=media_context)
+    evidence_count = media_evidence.available_field_count if evidence_text else 0
+    # Validation against the current selected manifest is also mandatory for
+    # every independent rewrite check. Never manufacture a safe_summary from
+    # the candidate itself or elevate the tool observations to system content.
+    evidence_message = {
+        "role": "user",
+        "content": render_turn_media_grounding(media_context, tool_evidence_available=True) + "\n" + evidence_text,
+    } if evidence_text else None
+    _record_final_review_stage(
+        "final_review_start", elapsed_ms=0,
+        detail=(f"source=initial remaining_ms={remaining_ms} available_evidence_fields={evidence_count} "
+                f"media_count={len(media_context or [])}"),
+    )
+
+    async def bounded_call(messages: list[dict[str, Any]]) -> Any:
+        nonlocal call_count, failure_code
+        call_started = time.monotonic()
+        source = "initial" if call_count == 0 else "verification"
+        remaining = deadline - call_started
+        call_count += 1
+        outcome = "review_call_failed"
+        parsed_action = "unknown"
+        try:
+            if remaining <= 0:
+                outcome = "review_budget_exhausted"
+                raise asyncio.TimeoutError
+            if evidence_message is not None:
+                messages = [*messages[:-1], dict(evidence_message), *messages[-1:]]
+            raw = await asyncio.wait_for(call_ai_api(messages), timeout=remaining)
+            parsed = _parse_review_payload(str(raw or ""))
+            if parsed is not None:
+                parsed_action = parsed.action
+            outcome = "review_call_succeeded" if parsed is not None else "review_unparseable"
+            return raw
+        except asyncio.TimeoutError:
+            if outcome != "review_budget_exhausted":
+                outcome = "review_timeout"
+            raise
+        except asyncio.CancelledError:
+            outcome = "review_cancelled"
+            raise
+        finally:
+            if outcome != "review_call_succeeded":
+                failure_code = outcome
+            _record_final_review_stage(
+                "final_review_call", status="info" if outcome == "review_call_succeeded" else "warn",
+                elapsed_ms=max(0, int((time.monotonic() - call_started) * 1000)),
+                detail=(f"source={source} reason={outcome} review_call_count={call_count} "
+                        f"remaining_ms={max(0, int(remaining * 1000))} action={parsed_action}"),
+            )
+
+    try:
+        decision = await _review_response_text_impl(bounded_call, **kwargs)
+    except asyncio.CancelledError:
+        _record_final_review_stage(
+            "final_review_decision", status="warn",
+            elapsed_ms=max(0, int((time.monotonic() - started) * 1000)),
+            detail=(f"action=no_reply reason=review_cancelled review_call_count={call_count} "
+                    f"source={'verification' if call_count > 1 else 'initial'}"),
+        )
+        raise
+    if failure_code:
+        # A failed mandatory review never authorises any legacy care fallback.
+        decision = replace(decision, action="no_reply", text="", segments=(), self_claims=())
+        code = failure_code
+    elif decision.diagnosis_code:
+        code = decision.diagnosis_code
+    elif decision.action == "accept":
+        code = "review_accepted"
+    elif decision.action == "rewrite":
+        code = "review_rewritten"
+    else:
+        code = "review_verification_rejected"
+    if (
+        decision.action in {"accept", "rewrite"}
+        and (kwargs.get("media_grounding_required", False) or bool(getattr(media_evidence, "required", False)))
+        and (not evidence_text or not media_evidence_grounding_sufficient(decision.text, media_evidence))
+    ):
+        decision = replace(decision, action="no_reply", text="", segments=(), self_claims=())
+        code = "review_media_grounding_failed"
+    decision = replace(decision, diagnosis_code=code)
+    _record_final_review_stage(
+        "final_review_decision", status="warn" if decision.action == "no_reply" else "info",
+        elapsed_ms=max(0, int((time.monotonic() - started) * 1000)),
+        detail=(f"action={decision.action} reason={code} review_call_count={call_count} "
+                f"available_evidence_fields={evidence_count} source={'verification' if call_count > 1 else 'initial'}"),
+    )
+    return decision
 
 
 async def final_dialogue_gate(
