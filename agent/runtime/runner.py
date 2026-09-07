@@ -319,7 +319,7 @@ async def run_agent(
         and bool(allow_builtin_search)
     )
     disclosure_mode = resolve_tool_disclosure_mode(
-        getattr(plugin_config, "personification_tool_disclosure_mode", "off"),
+        getattr(plugin_config, "personification_tool_disclosure_mode", "auto"),
         tool_caller,
     )
     tool_disclosure = ToolDisclosureSession(registry, mode=disclosure_mode)
@@ -639,9 +639,18 @@ async def run_agent(
     turn_tool_intents = {
         str(item or "").strip()
         for item in list(getattr(turn_plan, "tool_intent", []) or [])
-        if str(item or "").strip()
+        if str(item or "").strip() and str(item or "").strip() != "none"
     }
+    tool_disclosure.configure_turn(
+        tool_intents=turn_tool_intents,
+        speech_act=str(getattr(turn_plan, "speech_act", "") or ""),
+        caller=tool_caller,
+    )
     research_need = str(getattr(turn_plan, "research_need", "") or "").strip()
+    evidence_required = bool(
+        research_need in {"medium", "high"}
+        or turn_tool_intents & {"lookup_web", "lookup_plugin", "runtime_capability"}
+    )
     direct_native_image_answer = bool(
         direct_image_input
         and user_images
@@ -656,6 +665,12 @@ async def run_agent(
         skip_rewrite_reason = "intent_runtime_capability"
     elif direct_native_image_answer:
         skip_rewrite_reason = "direct_native_image"
+    elif (
+        runtime_chat_intent == "explanation"
+        and research_need in {"", "none"}
+        and not turn_tool_intents
+    ):
+        skip_rewrite_reason = "explanation_no_research_or_tools"
     if skip_rewrite_reason:
         rewritten_query = ContextualQueryRewrite(
             primary_query=preliminary_query_text,
@@ -724,6 +739,17 @@ async def run_agent(
             ),
             hint="查询改写失败后使用结构化 fallback，继续进入 Agent 主模型" if rewrite_fallback else "",
         )
+    # Model-produced recommendations are advisory metadata, never synthetic
+    # tool names.  Keep only schemas that the current TurnPlan may disclose.
+    rewritten_query.recommended_tools = tool_disclosure.filter_recommended_tools(
+        getattr(rewritten_query, "recommended_tools", [])
+    )
+    tool_disclosure.configure_turn(
+        tool_intents=turn_tool_intents,
+        recommended_tools=rewritten_query.recommended_tools,
+        speech_act=str(getattr(turn_plan, "speech_act", "") or ""),
+        caller=tool_caller,
+    )
     effective_query_text = (
         rewritten_query.primary_query
         or contextual_query_text
@@ -949,6 +975,18 @@ async def run_agent(
                 _mark_social_evidence_satisfied()
         _append_research_closure_guidance()
         selected_names = selected_tool_names(active_schemas, _schema_tool_name)
+        schema_chars = sum(len(json.dumps(schema, ensure_ascii=False, sort_keys=True)) for schema in active_schemas)
+        _record_reply_trace_stage(
+            key="agent_tool_disclosure",
+            label="工具披露",
+            status="info",
+            detail=(
+                f"mode={disclosure_mode} step={_step + 1} intents={len(turn_tool_intents)} "
+                f"candidates={len(tool_disclosure._candidate_names)} preloaded={len(tool_disclosure.loaded_names)} "
+                f"real_schemas={len([name for name in selected_names if name != TOOL_SEARCH_NAME])} "
+                f"schema_chars={schema_chars} discoveries={getattr(tool_disclosure, 'discovery_count', 0)}"
+            ),
+        )
         tool_remaining = _remaining_time_budget_seconds(phase_deadlines.tool_deadline)
         if tool_remaining is not None and tool_remaining < _AGENT_TOOL_MIN_START_SECONDS:
             if active_schemas:
@@ -1054,6 +1092,8 @@ async def run_agent(
                         append_evidence_guidance=_append_evidence_guidance_if_needed,
                         classify_deferred_lookup_reply=_classify_deferred_lookup_reply,
                         select_semantic_fallback_tool=_select_semantic_fallback_tool,
+                        disclosed_tool_names=set(selected_names) if disclosure_mode != "off" else None,
+                        evidence_required=evidence_required,
                         structured_output=structured_output,
                         semantic_research_target_deadline=semantic_research_target_deadline,
                     ),
@@ -1116,7 +1156,6 @@ async def run_agent(
         turn_tool_results: list[tuple[Any, str]] = []
         turn_tool_media_urls: list[str] = []
         for tool_call in response.tool_calls:
-            stop_state.has_tool_call = True
             logger.info(f"[agent] tool_call name={tool_call.name}")
             tool = registry.get(tool_call.name)
             tool_args = trace_tool_call(
@@ -1152,6 +1191,7 @@ async def run_agent(
                 turn_tool_results.append((tool_call, result))
                 continue
             tool_started_at = time.monotonic()
+            did_execute = False
             if str(tool_call.name or "").strip() == TOOL_SEARCH_NAME and disclosure_mode != "native":
                 result = tool_disclosure.search(**tool_args)
                 _record_reply_trace_stage(
@@ -1160,7 +1200,7 @@ async def run_agent(
                     status="info",
                     detail=(
                         f"mode=client candidates={len(tool_disclosure.loaded_names)} "
-                        "executed=false"
+                        f"discoveries={getattr(tool_disclosure, 'discovery_count', 0)} executed=false"
                     ),
                 )
             elif not tool_disclosure.is_call_allowed(tool_call.name):
@@ -1171,6 +1211,11 @@ async def run_agent(
             elif tool is None:
                 result = f"工具 {tool_call.name} 不存在"
             else:
+                # Directory discovery and blocked/unknown calls are model
+                # protocol events, not executed business tools or evidence.
+                stop_state.has_tool_call = True
+                did_execute = True
+                tool_disclosure.mark_executed(tool_call.name)
                 tool_args, result = await _execute_tool_with_retries(
                     registry=registry,
                     tool_name=tool_call.name,
@@ -1301,7 +1346,7 @@ async def run_agent(
                 f"[agent] tool_result name={tool_call.name} "
                 f"result_len={len(str(result or ''))}"
             )
-            if str(tool_call.name or "").strip() == TOOL_SEARCH_NAME:
+            if not did_execute:
                 turn_tool_results.append((tool_call, str(result or "")))
                 continue
             update_stop_flow_tool_result(
@@ -1402,9 +1447,18 @@ async def run_agent(
                     record_trace=_record_reply_trace_stage,
                     logger=logger,
                     select_semantic_fallback_tool=_select_semantic_fallback_tool,
+                    disclosed_tool_names=(
+                        set(selected_tool_names(active_schemas, _schema_tool_name))
+                        if disclosure_mode != "off"
+                        else None
+                    ),
+                    messages=messages,
                     budget_deadline=phase_deadlines.tool_deadline,
                     semantic_research_target_deadline=semantic_research_target_deadline,
                 )
+                if stop_state.disclosure_recovery_requested:
+                    stop_state.disclosure_recovery_requested = False
+                    continue
                 if fallback_lookup is not None:
                     fallback_name, fallback_args = fallback_lookup
                     ran_fallback = await _run_stop_fallback_tool(
@@ -1444,6 +1498,16 @@ async def run_agent(
             text="[NO_REPLY]",
             pending_actions=pending_actions,
             failure_code="agent_structured_max_steps_exhausted",
+        )
+    if disclosure_mode == "client" and evidence_required and not stop_state.has_usable_evidence:
+        return await _finalize_result(
+            AgentResult(
+                text="[SILENCE]",
+                pending_actions=pending_actions,
+                quality_context="evidence_unavailable",
+                suppress_reply_recovery=True,
+            ),
+            reason="max_steps_evidence_unavailable",
         )
     if stop_state.last_usable_tool_result_text or stop_state.last_tool_result_text:
         fallback_tool_name = stop_state.last_usable_tool_name or stop_state.last_tool_name

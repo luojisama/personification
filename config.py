@@ -93,7 +93,7 @@ class Config(BaseModel):
     personification_agent_enabled: bool = True
     personification_agent_max_steps: int = 10
     personification_agent_budget_mode: str = "shadow"
-    personification_tool_disclosure_mode: str = "off"
+    personification_tool_disclosure_mode: str = "auto"
     personification_participation_v2_mode: str = "shadow"
     personification_emotion_v2_mode: str = "shadow"
     personification_attention_microbatch_seconds: float = 1.0

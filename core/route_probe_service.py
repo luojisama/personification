@@ -24,6 +24,10 @@ _SAFE_STATES = _TERMINAL | {"queued", "running", "cancel_requested"}
 _MAX_PAGE_SIZE = 100
 _CODE_PREFIXES = ("probe_", "function_call_", "native_search_", "reasoning_", "image_input_", "audio_input_", "video_input_", "media_", "builtin_")
 _SAFE_CODES = {
+    "gemini_response_no_candidates", "gemini_response_no_text", "gemini_response_safety_blocked",
+    "gemini_response_json_invalid", "media_response_json_invalid",
+    "video_input_builtin_content_mismatch", "audio_input_builtin_content_mismatch",
+    "media_inline_budget_exceeded",
     "probe_auth_rejected", "probe_rate_limited", "probe_server_error", "probe_request_rejected",
     "probe_queued", "probe_running", "probe_cancel_requested", "probe_cancelled",
     "probe_process_interrupted", "probe_internal_failed", "probe_lease_unavailable",
@@ -116,12 +120,16 @@ class RouteProbeStore:
     @staticmethod
     def _dto(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         value = dict(row)
-        return {key: value[key] for key in (
+        result = {key: value[key] for key in (
             "operation_id", "route_fingerprint", "capability", "source", "probe_version", "status",
             "detail_code", "capability_state", "verification_state", "transport_verified", "content_verified",
             "queued_at", "started_at", "finished_at", "updated_at", "duration_ms",
             "stage", "http_status", "input_count",
         ) if key in value}
+        for key in ("transport_verified", "content_verified"):
+            if key in result:
+                result[key] = bool(result[key])
+        return result
 
     def recover_interrupted(self) -> int:
         now = time.time()
@@ -227,13 +235,13 @@ class RouteProbeStore:
             latest = db.execute("SELECT * FROM route_probe_operations WHERE route_fingerprint=? AND capability=? ORDER BY queued_at DESC LIMIT 1", (route_fingerprint, capability)).fetchone()
         # Refresh/restart must show queued/running/interrupted work even before
         # a final result has been written into the durable capability facts.
-        return {"last_verified":json.loads(row[0]) if row and row[0] else None,
-                "latest_attempt":self._dto(latest) if latest else json.loads(row[1]) if row and row[1] else None}
+        return {"last_verified":self._dto(json.loads(row[0])) if row and row[0] else None,
+                "latest_attempt":self._dto(latest) if latest else self._dto(json.loads(row[1])) if row and row[1] else None}
 
     def all_facts(self) -> list[tuple[str, str, dict[str, Any], dict[str, Any]]]:
         with self._lock, self._connect() as db:
             rows = db.execute("SELECT route_fingerprint,capability,last_verified_json,latest_attempt_json FROM route_probe_facts").fetchall()
-        return [(str(row[0]), str(row[1]), json.loads(row[2]) if row[2] else {}, json.loads(row[3]) if row[3] else {}) for row in rows]
+        return [(str(row[0]), str(row[1]), self._dto(json.loads(row[2])) if row[2] else {}, self._dto(json.loads(row[3])) if row[3] else {}) for row in rows]
 
     def prune(self, *, retention_seconds: float = 90 * 24 * 60 * 60) -> int:
         with self._lock, self._connect() as db:

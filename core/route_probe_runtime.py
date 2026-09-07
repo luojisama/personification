@@ -11,6 +11,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
+import httpx
+
 from .diagnostic_media_samples import get_diagnostic_media_sample, validate_diagnostic_media_sample, score_custom_media_transport_response
 from .route_capabilities import (
     CAPABILITY_NAMES, DEFAULT_ROUTE_CAPABILITY_REGISTRY, CapabilityObservation, RouteKey,
@@ -141,7 +143,7 @@ async def _run_route_probe(
             adapter=resolve_media_provider_adapter(provider)
             if not (adapter.supports_audio if capability == "audio_input" else adapter.supports_video):
                 return _record(key,capability,CapabilityObservation.PROBE_UNAVAILABLE,"media_probe_primary_route_unavailable")
-            from .diagnostic_media_samples import diagnostic_media_prompt, score_diagnostic_media_response
+            from .diagnostic_media_samples import diagnostic_media_prompt, score_diagnostic_media_response, diagnostic_media_response_is_json
             from .media_understanding import analyze_audios_with_route_or_fallback, analyze_videos_with_route_or_fallback
             probe_runtime=_MediaProbeRuntime(runtime, provider)
             if capability == "audio_input":
@@ -160,12 +162,25 @@ async def _run_route_probe(
                     return _record(key,capability,CapabilityObservation.PARSE_ERROR,f"{capability}_custom_media_transport_rejected")
                 return _record(key,capability,CapabilityObservation.PARSE_ERROR,f"{capability}_probe_inconclusive")
             verified=score_diagnostic_media_response(sample,response)
-            return _record(key,capability,CapabilityObservation.SUCCESS if verified else CapabilityObservation.PARSE_ERROR,f"{capability}_builtin_content_verified" if verified else f"{capability}_probe_inconclusive",stage=stage,input_count=1,transport_verified=transport_verified or verified,content_verified=verified)
+            code = f"{capability}_builtin_content_verified" if verified else f"{capability}_builtin_content_mismatch"
+            if not diagnostic_media_response_is_json(response):
+                code = "media_response_json_invalid"
+            return _record(key,capability,CapabilityObservation.SUCCESS if verified else CapabilityObservation.PARSE_ERROR,code,stage=stage,input_count=1,transport_verified=transport_verified or verified,content_verified=verified)
         return _record(key,capability,CapabilityObservation.PROBE_UNAVAILABLE,"probe_unavailable")
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, httpx.TimeoutException):
         return _record(key,capability,CapabilityObservation.TIMEOUT,"probe_timeout",stage=stage,input_count=1)
     except Exception as exc:
         # Classify controlled attributes, never copy provider response bodies.
+        from .media_understanding import GeminiMediaResponseError
+        if isinstance(exc, GeminiMediaResponseError):
+            return _record(key, capability, CapabilityObservation.PARSE_ERROR, exc.diagnostic_code,
+                           stage=stage, http_status=200, input_count=1)
+        if isinstance(exc, ValueError) and str(exc) in {
+            "inline_media_request_too_large", "video_file_too_large_for_inline_data",
+            "audio_file_too_large_for_inline_data", "gemini_proxy_inline_media_too_large",
+        }:
+            return _record(key, capability, CapabilityObservation.PROBE_UNAVAILABLE,
+                           "media_inline_budget_exceeded", stage=stage, input_count=1)
         status = getattr(exc, "status_code", None)
         if status is None:
             status = getattr(getattr(exc, "response", None), "status_code", None)
@@ -177,7 +192,9 @@ async def _run_route_probe(
             return _record(key, capability, CapabilityObservation.SERVER_ERROR, "probe_server_error",stage=stage,http_status=status,input_count=1)
         if isinstance(status, int) and 400 <= status <= 499:
             return _record(key, capability, CapabilityObservation.PROVIDER_REJECTED, "probe_request_rejected",stage=stage,http_status=status,input_count=1)
-        return _record(key,capability,CapabilityObservation.NETWORK_ERROR,"probe_network_error",stage=stage,input_count=1)
+        if isinstance(exc, httpx.RequestError):
+            return _record(key,capability,CapabilityObservation.NETWORK_ERROR,"probe_network_error",stage=stage,input_count=1)
+        return _record(key,capability,CapabilityObservation.PARSE_ERROR,"probe_internal_failed",stage=stage,input_count=1)
 
 
 async def run_route_probe(runtime: Any, key: RouteKey, provider: dict[str,Any], capability: str, **kwargs) -> ProbeResult:

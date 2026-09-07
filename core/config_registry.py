@@ -1539,11 +1539,11 @@ def _build_entries() -> list[ConfigEntry]:
             field_name="personification_tool_disclosure_mode",
             display_name="渐进式工具披露",
             value_type="str",
-            default="off",
+            default="auto",
             scope=GLOBAL_SCOPE,
             description=(
-                "off 保留旧工具目录；client 使用本地 tool_search 索引并在下一步加载完整 Schema；"
-                "auto 仅在 caller 显式支持 Responses Tool Search 时使用原生模式，否则回落 client。"
+                "默认 auto：支持 Responses Tool Search 的 caller 使用原生目录，其余使用本地 tool_search；"
+                "client 在下一步加载匹配 TurnPlan 的完整 Schema；off 显式保留旧工具目录。"
             ),
             category="config",
             choices=("off", "client", "auto"),

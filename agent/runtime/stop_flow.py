@@ -82,6 +82,8 @@ class StopFlowState:
     semantic_validation_status: str = ""
     research_closure_guidance_injected: bool = False
     media_evidence_gate_attempted: bool = False
+    disclosure_recovery_requested: bool = False
+    disclosure_recovery_attempted: bool = False
 
 
 @dataclass(frozen=True)
@@ -479,6 +481,9 @@ async def _select_stop_fallback_lookup(
     select_semantic_fallback_tool: Callable[..., Awaitable[tuple[str, dict] | None]],
     budget_deadline: float | None = None,
     semantic_research_target_deadline: float | None = None,
+    disclosed_tool_names: set[str] | None = None,
+    messages: list[dict] | None = None,
+    evidence_required: bool = False,
 ) -> tuple[str, dict] | None:
     if state.social_evidence_satisfied:
         state.pending_evidence_followup_query = ""
@@ -498,6 +503,34 @@ async def _select_stop_fallback_lookup(
         )
         if state.semantic_web_fallback_attempted:
             state.pending_evidence_followup_query = ""
+            return None
+        if disclosed_tool_names is not None and state.disclosure_recovery_attempted:
+            state.semantic_web_fallback_attempted = True
+            state.semantic_web_fallback_needed = False
+            state.pending_evidence_followup_query = ""
+            return None
+        if disclosed_tool_names is not None:
+            state.semantic_web_fallback_attempted = True
+            state.semantic_web_fallback_needed = False
+            state.pending_evidence_followup_query = ""
+            state.disclosure_recovery_requested = True
+            state.disclosure_recovery_attempted = True
+            if messages is not None:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "[本轮证据补全] 当前证据仍有缺口。请只从本步已披露的完整 Schema 中选择一个工具；"
+                            "若尚无合适工具，只能调用 tool_search 发现目录后再继续。不要臆测，也不要声称已查证。"
+                        ),
+                    }
+                )
+            record_trace(
+                key="agent_disclosure_recovery",
+                label="工具披露补证",
+                status="warn",
+                detail="requested=true once_per_turn=true reason=semantic_evidence_gap",
+            )
             return None
         fallback_tool = registry.get("parallel_research")
         try:
@@ -581,21 +614,42 @@ async def _select_stop_fallback_lookup(
         runtime_chat_intent != "banter"
         and not image_grounded_answer_ready
         and (
-            not state.has_tool_call
-            or previous_tool_unavailable
+            previous_tool_unavailable
             or bool(state.pending_evidence_followup_query)
             or content_len == 0
             or response.vision_unavailable
+            or (evidence_required and not state.has_usable_evidence)
         )
     )
     should_run_fallback_lookup = (
         not state.semantic_fallback_attempted
         and bool(user_query_text)
         and (non_banter_fallback_needed or banter_requires_lookup_retry)
+        and (disclosed_tool_names is None or not state.disclosure_recovery_attempted)
     )
     fallback_lookup = None
     if should_run_fallback_lookup:
         state.semantic_fallback_attempted = True
+        if disclosed_tool_names is not None and not state.disclosure_recovery_attempted:
+            state.disclosure_recovery_requested = True
+            state.disclosure_recovery_attempted = True
+            if messages is not None:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "[本轮证据补全] 当前草稿尚缺必要证据。请只使用本步已披露的 Schema，"
+                            "或先调用 tool_search；不得调用未披露工具，不得把不确定内容写成事实。"
+                        ),
+                    }
+                )
+            record_trace(
+                key="agent_disclosure_recovery",
+                label="工具披露补证",
+                status="warn",
+                detail="requested=true once_per_turn=true reason=evidence_gap",
+            )
+            return None
         fallback_query_text = state.pending_evidence_followup_query or user_query_text
         fallback_planner_started_at = time.monotonic()
         fallback_lookup = await select_semantic_fallback_tool(
@@ -612,6 +666,7 @@ async def _select_stop_fallback_lookup(
             previous_tool_name=state.last_tool_name,
             previous_tool_result_text=state.last_tool_result_text,
             unavailable_tool_signatures=state.unavailable_tool_signatures,
+            allowed_tool_names=disclosed_tool_names,
         )
         fallback_planner_elapsed_ms = int((time.monotonic() - fallback_planner_started_at) * 1000)
         record_timing(
@@ -785,6 +840,8 @@ async def handle_model_stop(
     structured_output: bool = False,
     semantic_research_target_deadline: float | None = None,
     tool_deadline: float | None = None,
+    disclosed_tool_names: set[str] | None = None,
+    evidence_required: bool = False,
 ) -> StopFlowDecision:
     effective_tool_deadline = tool_deadline if tool_deadline is not None else budget_deadline
     if structured_output and not response.tool_calls:
@@ -942,7 +999,13 @@ async def handle_model_stop(
         select_semantic_fallback_tool=select_semantic_fallback_tool,
         budget_deadline=effective_tool_deadline,
         semantic_research_target_deadline=semantic_research_target_deadline,
+        disclosed_tool_names=disclosed_tool_names,
+        messages=messages,
+        evidence_required=evidence_required,
     )
+    if state.disclosure_recovery_requested:
+        state.disclosure_recovery_requested = False
+        return StopFlowDecision.continue_loop()
     if fallback_lookup is not None:
         fallback_name, fallback_args = fallback_lookup
         ran_tool = await _run_stop_fallback_tool(
@@ -964,6 +1027,25 @@ async def handle_model_stop(
         )
         if ran_tool:
             return StopFlowDecision.continue_loop()
+    if (
+        evidence_required
+        and (state.semantic_fallback_attempted or state.disclosure_recovery_attempted)
+        and not state.has_usable_evidence
+    ):
+        record_trace(
+            key="agent_evidence_gate",
+            label="证据收口门",
+            status="warn",
+            detail="required=true evidence=false action=silence",
+        )
+        return StopFlowDecision.return_result(
+            AgentResult(
+                text="[SILENCE]",
+                pending_actions=pending_actions,
+                quality_context="evidence_unavailable",
+                suppress_reply_recovery=True,
+            )
+        )
     if banter_requires_lookup_retry:
         record_trace(
             key="agent_finish",

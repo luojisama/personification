@@ -627,6 +627,41 @@ def test_semantic_web_fallback_is_allowed_only_once() -> None:
     assert state.pending_evidence_followup_query == ""
 
 
+def test_client_disclosure_recovery_is_once_across_legacy_fallback_flag_reset() -> None:
+    state = stop_flow.StopFlowState(semantic_fallback_attempted=False)
+    messages: list[dict] = []
+
+    async def _unexpected(**_kwargs):  # noqa: ANN001
+        raise AssertionError("client recovery must not use the independent planner")
+
+    first = asyncio.run(
+        stop_flow._select_stop_fallback_lookup(
+            state=state, response=_stop_response("draft"), content_len=5,
+            runtime_chat_intent="lookup", banter_requires_lookup_retry=False,
+            user_query_text="问题", rewritten_query=None, context_hint="", user_images=[],
+            plugin_query_intent="", tool_caller=SimpleNamespace(), registry=_Registry(_LookupTool("")),
+            record_trace=lambda **_kwargs: None, logger=SimpleNamespace(info=lambda _msg: None),
+            select_semantic_fallback_tool=_unexpected, disclosed_tool_names={"tool_search"},
+            messages=messages, evidence_required=True,
+        )
+    )
+    state.semantic_fallback_attempted = False
+    second = asyncio.run(
+        stop_flow._select_stop_fallback_lookup(
+            state=state, response=_stop_response("draft"), content_len=5,
+            runtime_chat_intent="lookup", banter_requires_lookup_retry=False,
+            user_query_text="问题", rewritten_query=None, context_hint="", user_images=[],
+            plugin_query_intent="", tool_caller=SimpleNamespace(), registry=_Registry(_LookupTool("")),
+            record_trace=lambda **_kwargs: None, logger=SimpleNamespace(info=lambda _msg: None),
+            select_semantic_fallback_tool=_unexpected, disclosed_tool_names={"tool_search"},
+            messages=messages, evidence_required=True,
+        )
+    )
+    assert first is None and second is None
+    assert state.disclosure_recovery_attempted is True
+    assert len(messages) == 1
+
+
 def test_direct_image_answer_does_not_force_an_unrelated_capability_tool() -> None:
     state = stop_flow.StopFlowState()
 
@@ -778,12 +813,14 @@ def test_empty_evidence_skips_exact_signature_only_for_current_turn() -> None:
         selection=("lookup_tool", args),
     ) is None
 
+    # A direct, nonempty draft is not sent through an independent semantic
+    # fallback planner merely because it has not called a tool yet.
     next_turn = stop_flow.StopFlowState()
     assert _select_fallback(
         state=next_turn,
         registry=registry,
         selection=("lookup_tool", args),
-    ) == ("lookup_tool", args)
+    ) is None
 
 
 def test_failed_evidence_draft_is_marked_for_persona_review() -> None:

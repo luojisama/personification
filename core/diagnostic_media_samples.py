@@ -189,6 +189,11 @@ def score_custom_media_transport_response(raw: Any) -> bool | None:
     return accepted if type(accepted) is bool else None
 
 
+def diagnostic_media_response_is_json(raw: Any) -> bool:
+    """Validate the bounded observation envelope separately from its answers."""
+    return _json_object(raw) is not None
+
+
 def diagnostic_media_catalog_metadata(capability: str) -> dict[str, Any]:
     sample = get_diagnostic_media_sample(capability)
     return sample.public_metadata() if sample is not None else {}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -10,26 +11,28 @@ from .tool_catalog import schema_tool_name, tool_runtime_metadata
 
 
 TOOL_SEARCH_NAME = "tool_search"
-DEFAULT_CORE_TOOL_LIMIT = 6
-DEFAULT_SEARCH_RESULT_LIMIT = 8
+DEFAULT_CORE_TOOL_LIMIT = 2
+DEFAULT_SEARCH_RESULT_LIMIT = 4
+MAX_CLIENT_REAL_SCHEMAS = 8
 MAX_NAMESPACE_TOOLS = 10
 _NATIVE_NAME_RE = re.compile(r"[^A-Za-z0-9_-]+")
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_\-]+|[\u3400-\u9fff]{1,8}")
-_CORE_TOOL_NAMES = (
-    "datetime",
-    "vision_analyze",
-    "generate_image",
-    "recall_user_memory",
-    "recall_group_memory",
-    "inspect_current_user_avatar",
-    "web_search",
-    "search_web",
-)
+_INTENT_TAG_ALIASES = {
+    "lookup_web": {"lookup"},
+    "lookup_plugin": {"plugin_question", "plugin_local", "plugin_latest"},
+    "runtime_capability": {"runtime_capability", "plugin_question", "plugin_local"},
+    "image_generation": {"image_generation", "image_gen"},
+    "expression": {"expression"},
+    "vision": {"vision"},
+    "memory": {"memory"},
+}
 
 
 def normalize_tool_disclosure_mode(value: Any) -> str:
-    mode = str(value or "off").strip().lower()
-    return mode if mode in {"off", "client", "auto", "native"} else "off"
+    # Missing settings opt into progressive disclosure, while an explicitly
+    # configured off remains an escape hatch for old provider integrations.
+    mode = str(value or "auto").strip().lower()
+    return mode if mode in {"off", "client", "auto", "native"} else "auto"
 
 
 def _namespace(tool: AgentTool) -> str:
@@ -67,6 +70,9 @@ def _tool_index_item(registry: ToolRegistry, tool: AgentTool) -> dict[str, Any]:
         "side_effect": side_effect,
         "has_side_effect": side_effect not in {"", "none"},
         "permission": permission[:64],
+        "intent_tags": [str(item)[:48] for item in metadata.get("intent_tags", []) if str(item).strip()][:8],
+        "evidence_kind": str(metadata.get("evidence_kind", "generic") or "generic")[:32],
+        "latency_class": str(metadata.get("latency_class", "normal") or "normal")[:24],
     }
 
 
@@ -140,14 +146,54 @@ class ToolDisclosureSession:
     mode: str = "client"
     core_limit: int = DEFAULT_CORE_TOOL_LIMIT
     search_limit: int = DEFAULT_SEARCH_RESULT_LIMIT
-    loaded_names: set[str] = field(default_factory=set)
+    loaded_names: OrderedDict[str, None] = field(default_factory=OrderedDict)
+    executed_names: set[str] = field(default_factory=set)
+    turn_intents: set[str] = field(default_factory=set)
+    recommended_names: list[str] = field(default_factory=list)
+    allow_side_effects: bool = False
+    initialized: bool = False
+    discovery_count: int = 0
     _last_exposed_names: set[str] = field(default_factory=set, init=False)
     _candidate_names: set[str] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
         self.mode = normalize_tool_disclosure_mode(self.mode)
         self.core_limit = max(1, min(10, int(self.core_limit)))
-        self.search_limit = max(1, min(8, int(self.search_limit)))
+        self.search_limit = max(1, min(4, int(self.search_limit)))
+
+    def configure_turn(
+        self,
+        *,
+        tool_intents: Iterable[Any] = (),
+        recommended_tools: Iterable[Any] = (),
+        speech_act: Any = "",
+        caller: Any = None,
+    ) -> None:
+        """Bind this disclosure session to the model's existing TurnPlan.
+
+        This is deliberately metadata-only: it narrows schemas, but never
+        infers a conversational intent from the user's wording.
+        """
+        self.turn_intents = {str(item or "").strip() for item in tool_intents if str(item or "").strip() and str(item or "").strip() != "none"}
+        self.recommended_names = self.filter_recommended_tools(recommended_tools)
+        self.allow_side_effects = bool(
+            str(speech_act or "").strip().lower() == "execute_action"
+            or self.turn_intents & {"expression", "image_generation"}
+        )
+    def _eligible_names(self, schemas: list[dict[str, Any]]) -> set[str]:
+        by_name = _schema_by_name(schemas)
+        if not self.turn_intents:
+            return set()
+        eligible: set[str] = set()
+        wanted = set(self.turn_intents)
+        for intent in list(wanted):
+            wanted.update(_INTENT_TAG_ALIASES.get(intent, set()))
+        for name in by_name:
+            metadata = tool_runtime_metadata(self.registry, name)
+            tags = {str(item or "").strip() for item in (metadata.get("intent_tags") or [])}
+            if tags & wanted:
+                eligible.add(name)
+        return eligible
 
     @property
     def search_schema(self) -> dict[str, Any]:
@@ -179,40 +225,56 @@ class ToolDisclosureSession:
             },
         }
 
-    def _core_names(self, schemas: list[dict[str, Any]]) -> set[str]:
-        by_name = _schema_by_name(schemas)
-        ordered: list[str] = []
-        for name in _CORE_TOOL_NAMES:
-            if name in by_name and name not in ordered:
-                ordered.append(name)
-        for schema in schemas:
-            name = schema_tool_name(schema)
-            if not name or name in ordered:
-                continue
-            metadata = tool_runtime_metadata(self.registry, name)
-            if (
-                str(metadata.get("risk_level", "low")) == "low"
-                and str(metadata.get("side_effect", "none")) == "none"
-            ):
-                ordered.append(name)
-        for schema in schemas:
-            name = schema_tool_name(schema)
-            if name and name not in ordered:
-                ordered.append(name)
-        return set(ordered[: self.core_limit])
+    def _core_names(self, schemas: list[dict[str, Any]]) -> list[str]:
+        eligible = self._eligible_names(schemas)
+        # Client-side first disclosure is deliberately tiny for every caller;
+        # provider wrapper class names are not a reliable Gemini capability.
+        limit = min(2, self.core_limit)
+        eligible_ordered = list(
+            dict.fromkeys(
+                name
+                for schema in schemas
+                for name in (schema_tool_name(schema),)
+                if name in eligible
+            )
+        )
+        ordered = [name for name in self.recommended_names if name in eligible]
+        ordered.extend(name for name in eligible_ordered if name not in ordered)
+        return ordered[:limit]
 
     def client_schemas(self, schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if self.mode == "off":
             self._last_exposed_names = set(_schema_by_name(schemas))
             return list(schemas)
+        schemas = [
+            schema
+            for schema in schemas
+            if self.allow_side_effects
+            or str(tool_runtime_metadata(self.registry, schema_tool_name(schema)).get("side_effect", "none") or "none")
+            in {"", "none"}
+        ]
         by_name = _schema_by_name(schemas)
         self._candidate_names = set(by_name)
-        exposed = self._core_names(schemas) | (self.loaded_names & self._candidate_names)
+        # TurnPlan only preloads matching real schemas.  The directory remains
+        # a safe index over all schemas so the model can discover a capability
+        # that the planner did not anticipate.
+        if not self.initialized:
+            for name in self._core_names(schemas):
+                self.loaded_names[name] = None
+            self.initialized = True
+        retained = set(self.loaded_names) & self._candidate_names
+        exposed = retained
+        while len(exposed) > MAX_CLIENT_REAL_SCHEMAS:
+            evicted = next((name for name in self.loaded_names if name in exposed and name not in self.executed_names), None)
+            if evicted is None:
+                break
+            self.loaded_names.pop(evicted, None)
+            exposed.discard(evicted)
         self._last_exposed_names = set(exposed) | {TOOL_SEARCH_NAME}
         return [schema for schema in schemas if schema_tool_name(schema) in exposed] + [self.search_schema]
 
     def native_payload(self, schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        core = self._core_names(schemas)
+        core = set(self._core_names(schemas))
         self._candidate_names = set(_schema_by_name(schemas))
         self._last_exposed_names = set(self._candidate_names) | {TOOL_SEARCH_NAME}
         return build_native_tool_search_payload(self.registry, schemas, core_names=core)
@@ -221,7 +283,23 @@ class ToolDisclosureSession:
         name = str(tool_name or "").strip()
         return self.mode == "off" or name in self._last_exposed_names
 
+    def mark_executed(self, tool_name: Any) -> None:
+        name = str(tool_name or "").strip()
+        if name and name != TOOL_SEARCH_NAME:
+            self.executed_names.add(name)
+
+    def filter_recommended_tools(self, names: Iterable[Any]) -> list[str]:
+        """Keep only real, TurnPlan-eligible tool names from model advice."""
+        eligible = self._eligible_names(self.registry.openai_schemas())
+        result: list[str] = []
+        for raw in names:
+            name = str(raw or "").strip()
+            if name and name not in result and self.registry.get(name) is not None and name in eligible:
+                result.append(name)
+        return result
+
     def search(self, *, query: Any = "", namespace: Any = "", **_extra: Any) -> str:
+        self.discovery_count += 1
         needle = str(query or "").strip()[:200]
         namespace_filter = _NATIVE_NAME_RE.sub("_", str(namespace or "")).strip("_")[:64]
         query_tokens = _tokens(needle)
@@ -243,13 +321,46 @@ class ToolDisclosureSession:
                 candidates.append((-score, item["name"], item))
         candidates.sort(key=lambda row: (row[0], row[1]))
         items = [row[2] for row in candidates[: self.search_limit]]
-        self.loaded_names.update(item["name"] for item in items)
+        loaded_next_step: list[str] = []
+        protected_names: set[str] = set()
+        for item in items:
+            name = item["name"]
+            if name not in self.loaded_names:
+                while len(self.loaded_names) >= MAX_CLIENT_REAL_SCHEMAS:
+                    evicted = next(
+                        (
+                            old
+                            for old in self.loaded_names
+                            if old not in self.executed_names and old not in protected_names
+                        ),
+                        None,
+                    )
+                    if evicted is None:
+                        break
+                    self.loaded_names.pop(evicted, None)
+                if len(self.loaded_names) >= MAX_CLIENT_REAL_SCHEMAS:
+                    continue
+            self.loaded_names.pop(name, None)
+            self.loaded_names[name] = None
+            loaded_next_step.append(name)
+            protected_names.add(name)
+        # Preserve schemas that have executed in this turn.  Only the oldest
+        # unexecuted discovery candidate may be displaced when capacity fills.
+        while len(self.loaded_names) > MAX_CLIENT_REAL_SCHEMAS:
+            evicted = next(
+                (name for name in self.loaded_names if name not in self.executed_names and name not in protected_names),
+                None,
+            )
+            if evicted is None:
+                break
+            self.loaded_names.pop(evicted, None)
+        exhausted = bool(items) and not loaded_next_step
         return json.dumps(
             {
-                "status": "ok",
+                "status": "tool_disclosure_budget_exhausted" if exhausted else "ok",
                 "query": needle,
                 "candidates": items,
-                "loaded_next_step": [item["name"] for item in items],
+                "loaded_next_step": loaded_next_step,
                 "executed": False,
             },
             ensure_ascii=False,
@@ -276,6 +387,7 @@ def resolve_tool_disclosure_mode(configured_mode: Any, caller: Any) -> str:
 __all__ = [
     "DEFAULT_CORE_TOOL_LIMIT",
     "DEFAULT_SEARCH_RESULT_LIMIT",
+    "MAX_CLIENT_REAL_SCHEMAS",
     "MAX_NAMESPACE_TOOLS",
     "TOOL_SEARCH_NAME",
     "ToolDisclosureSession",

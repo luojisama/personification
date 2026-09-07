@@ -4,9 +4,17 @@ import asyncio
 import json
 import time
 from datetime import datetime
-from types import SimpleNamespace
+from types import SimpleNamespace as _StdSimpleNamespace
 
 import pytest
+
+
+class SimpleNamespace(_StdSimpleNamespace):
+    """Legacy runner fixtures opt into their historical all-schema contract."""
+
+    def __init__(self, /, **kwargs):  # noqa: ANN204
+        kwargs.setdefault("personification_tool_disclosure_mode", "off")
+        super().__init__(**kwargs)
 
 from ._loader import load_personification_module
 
@@ -356,7 +364,7 @@ def test_run_agent_max_steps_uses_earlier_usable_result_after_empty_result() -> 
     assert "真实检索结果" in str(caller.calls[1]["messages"])
 
 
-def test_run_agent_client_tool_disclosure_loads_full_schema_on_next_step() -> None:
+def test_run_agent_missing_disclosure_config_defaults_to_client_and_loads_schema_on_next_step() -> None:
     registry = tool_registry.ToolRegistry()
     executed = {"calls": 0}
 
@@ -419,9 +427,8 @@ def test_run_agent_client_tool_disclosure_loads_full_schema_on_next_step() -> No
             registry=registry,
             tool_caller=caller,
             executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
-            plugin_config=SimpleNamespace(
+            plugin_config=_StdSimpleNamespace(
                 personification_agent_max_steps=3,
-                personification_tool_disclosure_mode="client",
                 personification_model_builtin_search_enabled=False,
                 personification_builtin_search=False,
                 personification_fallback_enabled=False,
@@ -443,7 +450,83 @@ def test_run_agent_client_tool_disclosure_loads_full_schema_on_next_step() -> No
     assert "catalog_tool_7" not in first_names
     assert "catalog_tool_7" in second_names
     assert executed["calls"] == 1
+    assert result.tool_calls_made is True
     assert result.text == "已使用发现后的工具完成。"
+
+
+def test_client_blocked_call_does_not_enter_stop_flow_evidence(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(
+        runner,
+        "update_stop_flow_tool_result",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("blocked call entered stop flow")),
+    )
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls", content="",
+                tool_calls=[tool_impl.ToolCall(id="blocked", name="hidden_tool", arguments={})], raw={},
+            ),
+            tool_impl.ToolCallerResponse(finish_reason="stop", content="正常收口", tool_calls=[], raw={}),
+        ]
+    )
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "测试"}], registry=tool_registry.ToolRegistry(),
+            tool_caller=caller, executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=_StdSimpleNamespace(personification_agent_max_steps=2, personification_model_builtin_search_enabled=False),
+            logger=_FakeLogger(), precomputed_intent=SimpleNamespace(chat_intent="banter", plugin_question_intent="", ambiguity_level="low"),
+            finalize_quality=False,
+        )
+    )
+    assert result.text == "正常收口"
+    assert result.tool_calls_made is False
+
+
+def test_client_explanation_without_research_skips_rewrite(monkeypatch) -> None:  # noqa: ANN001
+    async def unexpected_rewrite(**_kwargs):
+        raise AssertionError("explanation without research must not invoke rewrite")
+
+    monkeypatch.setattr(runner, "contextual_query_rewriter", unexpected_rewrite)
+    caller = _FakeToolCaller([
+        tool_impl.ToolCallerResponse(finish_reason="stop", content="直接解释", tool_calls=[], raw={}),
+    ])
+    result = asyncio.run(runner.run_agent(
+        messages=[{"role": "user", "content": "解释概念"}], registry=tool_registry.ToolRegistry(),
+        tool_caller=caller, executor=SimpleNamespace(execute=lambda *_a, **_k: None),
+        plugin_config=_StdSimpleNamespace(personification_agent_max_steps=2), logger=_FakeLogger(),
+        precomputed_intent=SimpleNamespace(chat_intent="explanation", plugin_question_intent="", ambiguity_level="low"),
+        turn_plan=_StdSimpleNamespace(research_need="none", tool_intent=["none"]), finalize_quality=False,
+    ))
+    assert result.text == "直接解释"
+    assert len(caller.calls) == 1
+
+
+def test_client_max_steps_without_required_evidence_silences(monkeypatch) -> None:  # noqa: ANN001
+    async def _rewrite(**_kwargs):  # noqa: ANN001
+        return runner.ContextualQueryRewrite("查一下", ["查一下"], [], False, [])
+
+    monkeypatch.setattr(runner, "contextual_query_rewriter", _rewrite)
+    caller = _FakeToolCaller(
+        [
+            tool_impl.ToolCallerResponse(
+                finish_reason="tool_calls", content="",
+                tool_calls=[tool_impl.ToolCall(id="discover", name="tool_search", arguments={"query": "lookup"})], raw={},
+            ),
+            tool_impl.ToolCallerResponse(finish_reason="stop", content="无证据草稿", tool_calls=[], raw={}),
+            tool_impl.ToolCallerResponse(finish_reason="stop", content="无证据草稿", tool_calls=[], raw={}),
+        ]
+    )
+    result = asyncio.run(
+        runner.run_agent(
+            messages=[{"role": "user", "content": "查一下"}], registry=tool_registry.ToolRegistry(),
+            tool_caller=caller, executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+            plugin_config=_StdSimpleNamespace(personification_agent_max_steps=1, personification_model_builtin_search_enabled=False),
+            logger=_FakeLogger(), precomputed_intent=SimpleNamespace(chat_intent="lookup", plugin_question_intent="", ambiguity_level="low"),
+            turn_plan=_StdSimpleNamespace(research_need="medium", tool_intent=["lookup_web"]), finalize_quality=False,
+        )
+    )
+    assert result.text == "[SILENCE]"
+    assert result.suppress_reply_recovery is True
 
 
 def test_execute_tool_with_retries_records_failure_metrics() -> None:
@@ -1434,16 +1517,16 @@ def test_run_agent_query_rewrite_timeout_falls_back_and_continues(monkeypatch) -
             turn_plan=SimpleNamespace(
                 reply_action="reply",
                 speech_act="answer",
-                research_need="none",
+                research_need="medium",
                 output_mode="chat_answer",
-                tool_intent=["none"],
+                tool_intent=["lookup_web"],
             ),
             time_budget_seconds=30,
         )
     )
 
     rewrite_stage = next(stage for stage in stages if stage["key"] == "agent_query_rewrite")
-    assert result.text == "先按图里原文逐句翻译。"
+    assert result.text == "[SILENCE]"
     assert len(caller.calls) == 2
     assert rewrite_stage["status"] == "warn"
     assert "timeout=true" in str(rewrite_stage["detail"])
@@ -1475,6 +1558,7 @@ def test_run_agent_query_rewrite_consumes_agent_deadline(monkeypatch) -> None:  
                 plugin_question_intent="capability",
                 ambiguity_level="low",
             ),
+            turn_plan=SimpleNamespace(research_need="medium", tool_intent=["lookup_web"]),
             time_budget_seconds=0.01,
         )
     )
@@ -1511,12 +1595,13 @@ def test_run_agent_invalid_query_rewrite_is_traced_as_structural_fallback(monkey
                 plugin_question_intent="capability",
                 ambiguity_level="low",
             ),
+            turn_plan=SimpleNamespace(research_need="medium", tool_intent=["lookup_web"]),
             time_budget_seconds=30,
         )
     )
 
     rewrite_stage = next(stage for stage in stages if stage["key"] == "agent_query_rewrite")
-    assert result.text == "继续回答"
+    assert result.text == "[SILENCE]"
     assert rewrite_stage["status"] == "warn"
     assert "fallback=invalid_payload" in str(rewrite_stage["detail"])
 

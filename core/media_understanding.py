@@ -1542,6 +1542,37 @@ async def _delete_gemini_file(
         raise_for_gemini_status(result.response, auth_mode=result.mode, request_count=result.request_count)
 
 
+class GeminiMediaResponseError(ValueError):
+    """A bounded response diagnostic; never retains the provider payload."""
+
+    def __init__(self, code: str) -> None:
+        self.diagnostic_code = code
+        super().__init__(code)
+
+
+def _gemini_media_response_text(data: Any) -> str:
+    if not isinstance(data, dict):
+        raise GeminiMediaResponseError("gemini_response_json_invalid")
+    feedback = data.get("promptFeedback") or {}
+    if isinstance(feedback, dict) and feedback.get("blockReason"):
+        raise GeminiMediaResponseError("gemini_response_safety_blocked")
+    candidates = data.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        raise GeminiMediaResponseError("gemini_response_no_candidates")
+    candidate = candidates[0] if isinstance(candidates[0], dict) else {}
+    finish_reason = candidate.get("finishReason")
+    if isinstance(finish_reason, str) and finish_reason in {"SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"}:
+        raise GeminiMediaResponseError("gemini_response_safety_blocked")
+    content = candidate.get("content")
+    parts = content.get("parts", []) if isinstance(content, dict) else []
+    texts = [part["text"] for part in parts if isinstance(part, dict)
+             and isinstance(part.get("text"), str) and not part.get("thought")] if isinstance(parts, list) else []
+    text = "".join(texts).strip()
+    if not text:
+        raise GeminiMediaResponseError("gemini_response_no_text")
+    return text
+
+
 async def _call_gemini_media(
     *,
     api_key: str,
@@ -1630,7 +1661,10 @@ async def _call_gemini_media(
                 auth_mode=auth_result.mode,
                 request_count=auth_result.request_count,
             )
-            data = dict(response.json() or {})
+            try:
+                data = response.json()
+            except ValueError:
+                raise GeminiMediaResponseError("gemini_response_json_invalid") from None
         finally:
             for file_name in uploaded_files:
                 try:
@@ -1643,16 +1677,7 @@ async def _call_gemini_media(
                     )
                 except Exception:
                     pass
-    candidates = list((data.get("candidates") or []))
-    if not candidates:
-        return ""
-    content = candidates[0].get("content", {}) if isinstance(candidates[0], dict) else {}
-    parts = list(content.get("parts") or []) if isinstance(content, dict) else []
-    texts: list[str] = []
-    for part in parts:
-        if isinstance(part, dict) and part.get("text"):
-            texts.append(str(part.get("text", "")))
-    return "".join(texts).strip()
+    return _gemini_media_response_text(data)
 
 
 async def analyze_images_with_route_or_fallback(

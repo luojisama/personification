@@ -66,6 +66,7 @@ async def select_semantic_fallback_tool(
     previous_tool_name: str = "",
     previous_tool_result_text: str = "",
     unavailable_tool_signatures: set[str] | None = None,
+    allowed_tool_names: set[str] | None = None,
 ) -> tuple[str, dict] | None:
     query = str(user_query_text or "").strip()
     semantic_schemas = _select_tool_schemas(
@@ -74,6 +75,11 @@ async def select_semantic_fallback_tool(
         chat_intent=chat_intent,
         plugin_question_intent=plugin_question_intent,
     )
+    if allowed_tool_names is not None:
+        semantic_schemas = [
+            schema for schema in semantic_schemas
+            if str((schema.get("function") or {}).get("name") or "").strip() in allowed_tool_names
+        ]
     unavailable_signatures = set(unavailable_tool_signatures or ())
     if unavailable_signatures:
         filtered_schemas: list[dict[str, Any]] = []
@@ -159,7 +165,9 @@ async def select_semantic_fallback_tool(
     response = await tool_caller.chat_with_tools(planner_messages, semantic_schemas, False)
     if response.tool_calls:
         tool_call = response.tool_calls[0]
-        return str(tool_call.name or "").strip(), dict(tool_call.arguments or {})
+        name = str(tool_call.name or "").strip()
+        if allowed_tool_names is None or name in allowed_tool_names:
+            return name, dict(tool_call.arguments or {})
     if str(response.content or "").strip().upper() == "NO_TOOL":
         return None
     return None

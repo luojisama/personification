@@ -129,13 +129,21 @@
                     {{ isProbing(route.route_fingerprint, name as CapabilityName) ? '正在排队' : probeButtonLabel(probeFor(route, name as CapabilityName)) }}
                   </button>
                   <div v-if="operationFor(route.route_fingerprint, name as CapabilityName)" class="probe-operation-feedback" aria-live="polite">
-                    <StateBadge :tone="operationTone(operationFor(route.route_fingerprint, name as CapabilityName)?.status)">
-                      {{ operationStatusLabel(operationFor(route.route_fingerprint, name as CapabilityName)?.status) }}
-                    </StateBadge>
-                    <span>阶段：{{ operationPhaseLabel(operationFor(route.route_fingerprint, name as CapabilityName)?.detail_code) }}</span>
-                    <span>{{ operationReason(operationFor(route.route_fingerprint, name as CapabilityName)?.detail_code) }}</span>
-                    <span>最新尝试：{{ formatDateTime(operationFor(route.route_fingerprint, name as CapabilityName)?.finished_at || operationFor(route.route_fingerprint, name as CapabilityName)?.queued_at) }}</span>
-                    <span>最近有效验证：{{ formatDateTime(operationFor(route.route_fingerprint, name as CapabilityName)?.facts?.last_verified?.finished_at) }}</span>
+                    <div class="probe-operation-heading">
+                      <StateBadge :tone="operationTone(operationFor(route.route_fingerprint, name as CapabilityName)?.status)">
+                        {{ operationStatusLabel(operationFor(route.route_fingerprint, name as CapabilityName)?.status) }}
+                      </StateBadge>
+                      <span>阶段：{{ operationPhaseLabel(operationFor(route.route_fingerprint, name as CapabilityName)?.detail_code) }}</span>
+                    </div>
+                    <p v-if="operationReason(operationFor(route.route_fingerprint, name as CapabilityName)?.detail_code)" class="probe-operation-reason">
+                      {{ operationReason(operationFor(route.route_fingerprint, name as CapabilityName)?.detail_code) }}
+                    </p>
+                    <dl class="probe-operation-evidence">
+                      <div><dt>传输/解码</dt><dd>{{ verificationResultLabel(operationFor(route.route_fingerprint, name as CapabilityName)?.transport_verified) }}</dd></div>
+                      <div><dt>内容理解</dt><dd>{{ verificationResultLabel(operationFor(route.route_fingerprint, name as CapabilityName)?.content_verified) }}</dd></div>
+                      <div><dt>最新尝试</dt><dd>{{ formatDateTime(operationFor(route.route_fingerprint, name as CapabilityName)?.finished_at || operationFor(route.route_fingerprint, name as CapabilityName)?.queued_at) }}</dd></div>
+                      <div><dt>最近有效验证</dt><dd>{{ formatDateTime(operationFor(route.route_fingerprint, name as CapabilityName)?.facts?.last_verified?.finished_at) }}</dd></div>
+                    </dl>
                     <button v-if="canCancel(operationFor(route.route_fingerprint, name as CapabilityName)?.status)" type="button" class="button button-quiet" @click="cancelOperation(operationFor(route.route_fingerprint, name as CapabilityName)!.operation_id)">取消任务</button>
                   </div>
                 </div>
@@ -254,11 +262,12 @@ const { mutate: mutateProbe, isPending: isPendingProbe } = useMutation({
   },
   onSuccess: (result, request) => {
     if (result.operation_id) {
-      operationIds[probeMapKey(request.fingerprint, request.capability)] = result.operation_id;
+      const key = probeMapKey(request.fingerprint, request.capability);
+      operationIds[key] = result.operation_id;
+      locallySubmittedOperationIds[key] = result.operation_id;
       void loadOperation(result.operation_id);
     }
     probingMap[probeMapKey(request.fingerprint, request.capability)] = false;
-    void queryClient.invalidateQueries({ queryKey: ["route-capabilities"] });
   },
   onError: (_, request) => {
     probingMap[probeMapKey(request.fingerprint, request.capability)] = false;
@@ -271,12 +280,13 @@ const { mutate: mutateMediaProbe, isPending: isPendingMediaProbe } = useMutation
     resources.uploadRouteMediaProbe(fingerprint, capability, file),
   onSuccess: (result, request) => {
     if (result.operation_id) {
-      operationIds[probeMapKey(request.fingerprint, request.capability)] = result.operation_id;
+      const key = probeMapKey(request.fingerprint, request.capability);
+      operationIds[key] = result.operation_id;
+      locallySubmittedOperationIds[key] = result.operation_id;
       void loadOperation(result.operation_id);
     }
     probingMap[probeMapKey(request.fingerprint, request.capability)] = false;
     selectedMedia[probeMapKey(request.fingerprint, request.capability)] = undefined;
-    void queryClient.invalidateQueries({ queryKey: ["route-capabilities"] });
   },
   onError: (_, request) => {
     probingMap[probeMapKey(request.fingerprint, request.capability)] = false;
@@ -285,18 +295,33 @@ const { mutate: mutateMediaProbe, isPending: isPendingMediaProbe } = useMutation
 });
 
 const operationQueries = reactive<Record<string, RouteProbeOperation | undefined>>({});
+const refreshedTerminalOperationIds = new Set<string>();
+const locallySubmittedOperationIds = reactive<Record<string, string | undefined>>({});
 const activeOperationIds = computed(() => Object.values(operationIds).filter(id => id && (!operationQueries[id] || canCancel(operationQueries[id]?.status))).slice(0, 32));
 watch(data, (snapshot) => {
   for (const item of snapshot?.items || []) {
     for (const [capability, facts] of Object.entries(item.probe_facts || {})) {
       const operation = facts?.latest_attempt;
-      if (operation?.operation_id && canCancel(operation.status)) {
-        operationIds[probeMapKey(item.route_fingerprint, capability as CapabilityName)] = operation.operation_id;
-        operationQueries[operation.operation_id] = operation;
+      if (operation?.operation_id) {
+        const key = probeMapKey(item.route_fingerprint, capability as CapabilityName);
+        // A delayed capability snapshot must not replace the operation just queued
+        // from this page; its next authoritative snapshot will carry that same ID.
+        if (locallySubmittedOperationIds[key] && locallySubmittedOperationIds[key] !== operation.operation_id) continue;
+        operationIds[key] = operation.operation_id;
+        acceptOperation({
+          ...operation,
+          // The snapshot stores one slot's historical success beside its latest
+          // attempt. Project it once onto the visible operation, never nest the
+          // latest attempt back into that operation's facts.
+          facts: {
+            last_verified: facts?.last_verified ?? operation.facts?.last_verified ?? null,
+            latest_attempt: null,
+          },
+        });
       }
     }
   }
-});
+}, { immediate: true });
 useQuery({
   queryKey: computed(() => ["route-probe-operation", ...activeOperationIds.value]),
   queryFn: async ({ signal }) => {
@@ -304,7 +329,7 @@ useQuery({
       try { return await resources.routeProbeOperation(operationId, signal); }
       catch { operationError.value = "任务状态暂时不可用，正在有界重连；请勿重复提交。"; return undefined; }
     }));
-    for (const operation of operations) if (operation) operationQueries[operation.operation_id] = operation;
+    for (const operation of operations) if (operation) acceptOperation(operation);
     if (operations.every(Boolean)) operationError.value = "";
     return operations;
   },
@@ -313,12 +338,32 @@ useQuery({
 });
 const cancelOperationMutation = useMutation({
   mutationFn: (operationId: string) => resources.cancelRouteProbeOperation(operationId),
-  onSuccess: (operation) => { operationQueries[operation.operation_id] = operation; },
+  onSuccess: (operation) => { acceptOperation(operation); },
   onError: () => { operationError.value = "取消请求未确认。请重新读取任务状态，勿重复提交探针。"; },
 });
 function retryStatus(): void { pollUntil = Date.now() + 10 * 60_000; void queryClient.invalidateQueries({ queryKey: ["route-probe-operation"] }); }
 function operationReason(code: string | undefined): string {
-  return ({probe_auth_rejected:"供应商拒绝认证，请核对密钥及模型权限。",probe_rate_limited:"供应商限流，请稍后重试。",probe_timeout:"本次探测超时，之前的有效能力结论仍保留。",probe_request_rejected:"供应商拒绝请求形态，请核对协议与媒体编码配置。",probe_server_error:"供应商服务异常，之前的有效验证仍保留。",probe_network_error:"网络连接失败，请检查服务端连接。"} as Record<string,string>)[code || ""] || "";
+  return ({
+    probe_auth_rejected: "供应商拒绝认证，请核对密钥及模型权限。",
+    probe_rate_limited: "供应商限流，请稍后重试。",
+    probe_timeout: "本次探测超时，之前的有效能力结论仍保留。",
+    probe_request_rejected: "供应商拒绝请求形态，请核对协议与媒体编码配置。",
+    probe_server_error: "供应商服务异常，之前的有效验证仍保留。",
+    probe_network_error: "网络连接失败，请检查服务端连接。",
+    probe_internal_failed: "探针内部处理失败，请查看对应任务诊断。",
+    media_inline_budget_exceeded: "媒体超出当前接口的内联上传预算；此供应商不支持文件上传接口。",
+    video_input_builtin_content_verified: "视频传输与内容理解均已验证。",
+    audio_input_builtin_content_verified: "音频传输与内容理解均已验证。",
+    gemini_response_no_candidates: "Gemini 未返回可用候选内容，结果保持不确定。",
+    gemini_response_no_text: "Gemini 候选未包含文本内容，结果保持不确定。",
+    gemini_response_safety_blocked: "Gemini 因安全策略未返回内容，结果保持不确定。",
+    gemini_response_json_invalid: "Gemini 返回内容无法通过结构化核验，结果保持不确定。",
+    media_response_json_invalid: "媒体探针响应无法通过结构化核验，结果保持不确定。",
+    safety_blocked: "内容因安全策略未返回，结果保持不确定。",
+    json_invalid: "返回内容无法通过结构化核验，结果保持不确定。",
+    video_input_builtin_content_mismatch: "内置视频样例的内容核验不匹配，结果保持不确定。",
+    audio_input_builtin_content_mismatch: "内置音频样例的内容核验不匹配，结果保持不确定。",
+  } as Record<string, string>)[code || ""] || "";
 }
 
 function probeMapKey(fingerprint: string, capability: CapabilityName): string {
@@ -329,9 +374,37 @@ function operationFor(fingerprint: string, capability: CapabilityName): RoutePro
   return operationId ? operationQueries[operationId] : undefined;
 }
 async function loadOperation(operationId: string): Promise<void> {
-  try { operationQueries[operationId] = await resources.routeProbeOperation(operationId); } catch { /* the queued operation remains visible via its next bounded poll */ }
+  try { acceptOperation(await resources.routeProbeOperation(operationId)); } catch { /* the queued operation remains visible via its next bounded poll */ }
 }
 function canCancel(status: string | undefined): boolean { return status === "queued" || status === "running" || status === "cancel_requested"; }
+function isTerminalOperation(operation: RouteProbeOperation): boolean { return !canCancel(operation.status); }
+function isVerifiedSuccess(operation: RouteProbeOperation): boolean {
+  return operation.status === "succeeded"
+    && operation.verification_state === "verified"
+    && operation.capability_state !== "unknown";
+}
+function acceptOperation(operation: RouteProbeOperation): void {
+  const existing = operationQueries[operation.operation_id];
+  // A terminal operation is immutable: an in-flight response that arrived late
+  // cannot move the same task back to running, whatever its verification result.
+  if (existing && isTerminalOperation(existing) && !isTerminalOperation(operation)) return;
+  // Probe records are immutable after a verified success. Do not let an incomplete
+  // or unknown terminal payload erase the verified result already shown to the admin.
+  if (!existing || !isVerifiedSuccess(existing) || isVerifiedSuccess(operation)) {
+    operationQueries[operation.operation_id] = {
+      ...operation,
+      facts: {
+        last_verified: operation.facts?.last_verified ?? existing?.facts?.last_verified ?? null,
+        latest_attempt: null,
+      },
+    };
+  }
+  if (isTerminalOperation(operation) && !refreshedTerminalOperationIds.has(operation.operation_id)) {
+    refreshedTerminalOperationIds.add(operation.operation_id);
+    void queryClient.invalidateQueries({ queryKey: ["route-capabilities"] });
+    void queryClient.invalidateQueries({ queryKey: ["route-probe-history"] });
+  }
+}
 function cancelOperation(operationId: string): void { if (!cancelOperationMutation.isPending.value) cancelOperationMutation.mutate(operationId); }
 function operationTone(status: string | undefined): "ok" | "error" | "running" | "unknown" {
   if (status === "succeeded") return "ok";
@@ -341,6 +414,11 @@ function operationTone(status: string | undefined): "ok" | "error" | "running" |
 }
 function operationStatusLabel(status: string | undefined): string {
   return ({ queued: "已排队", running: "运行中", cancel_requested: "正在取消", succeeded: "已完成", failed: "执行失败", cancelled: "已取消", interrupted: "已中断", inconclusive: "结果不确定", skipped: "已跳过" } as Record<string, string>)[status || ""] || "状态未知";
+}
+function verificationResultLabel(verified: boolean | undefined): string {
+  if (verified === true) return "已验证";
+  if (verified === false) return "未验证";
+  return "结果不确定";
 }
 function operationPhaseLabel(code: string | undefined): string {
   const normalized = String(code || "");
@@ -534,3 +612,60 @@ function countUnverifiedCapabilities(capabilities: RouteCapabilities): number {
   return Object.values(capabilities).filter((capability) => capability.verification_state !== "verified").length;
 }
 </script>
+
+<style scoped>
+.probe-operation-feedback {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  color: var(--color-ink);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-line);
+  border-left: 3px solid var(--color-signal);
+  border-radius: var(--radius-xs);
+}
+
+.probe-operation-heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+
+.probe-operation-reason {
+  margin: 0;
+  color: var(--color-ink);
+  line-height: 1.55;
+}
+
+.probe-operation-evidence {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.probe-operation-evidence > div {
+  min-width: 0;
+  padding: var(--space-2);
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-xs);
+}
+
+.probe-operation-evidence dt {
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+
+.probe-operation-evidence dd {
+  margin: var(--space-1) 0 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 480px) {
+  .probe-operation-evidence { grid-template-columns: 1fr; }
+}
+</style>

@@ -140,6 +140,9 @@
                   </header>
 
                   <p class="config-description" v-html="highlightText(item.description, debouncedSearch)" />
+                  <p v-if="item.field_name === 'personification_tool_disclosure_mode' && getResolvedValue(item) === 'off'" class="config-description" role="status">
+                    当前保留完整工具目录模式。建议改为 auto，让模型按需发现工具并减少首轮请求体积；此提示不会自动修改配置。
+                  </p>
 
                   <div class="config-editor-control">
                     <ConfigSchemaField
