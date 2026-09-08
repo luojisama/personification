@@ -158,6 +158,19 @@
                       <dd>{{ finalReviewDisplay(stage)?.availableEvidenceFields }}</dd>
                     </div>
                   </dl>
+                  <dl v-else-if="contextDiagnosticDisplay(stage)" class="review-diagnostic">
+                    <div><dt>状态</dt><dd>{{ contextDiagnosticDisplay(stage)?.stateLabel }}</dd></div>
+                    <div v-if="contextDiagnosticDisplay(stage)?.candidateCount !== null"><dt>召回候选</dt><dd>{{ contextDiagnosticDisplay(stage)?.candidateCount }}</dd></div>
+                    <div v-if="contextDiagnosticDisplay(stage)?.injectedCount !== null"><dt>注入记忆</dt><dd>{{ contextDiagnosticDisplay(stage)?.injectedCount }}</dd></div>
+                    <div v-if="contextDiagnosticDisplay(stage)?.stateCount !== null"><dt>当前状态</dt><dd>{{ contextDiagnosticDisplay(stage)?.stateCount }}</dd></div>
+                    <div v-if="contextDiagnosticDisplay(stage)?.inputLimit !== null"><dt>输入 Token 上限</dt><dd>{{ contextDiagnosticDisplay(stage)?.inputLimit }}</dd></div>
+                    <div v-if="contextDiagnosticDisplay(stage)?.windowTokens !== null"><dt>上下文窗口 Token</dt><dd>{{ contextDiagnosticDisplay(stage)?.windowTokens }}</dd></div>
+                    <div v-if="contextDiagnosticDisplay(stage)?.categoryText"><dt>Token 分类</dt><dd>{{ contextDiagnosticDisplay(stage)?.categoryText }}</dd></div>
+                    <div v-if="contextDiagnosticDisplay(stage)?.reserveText"><dt>预留 Token</dt><dd>{{ contextDiagnosticDisplay(stage)?.reserveText }}</dd></div>
+                    <div v-if="contextDiagnosticDisplay(stage)?.messageCountText"><dt>裁剪消息数</dt><dd>{{ contextDiagnosticDisplay(stage)?.messageCountText }}</dd></div>
+                    <div v-if="contextDiagnosticDisplay(stage)?.elapsedMs !== null"><dt>耗时</dt><dd>{{ formatDuration(contextDiagnosticDisplay(stage)?.elapsedMs ?? null) }}</dd></div>
+                    <div><dt>诊断代码</dt><dd><code>{{ contextDiagnosticDisplay(stage)?.diagnosticCode }}</code></dd></div>
+                  </dl>
                   <CollapsibleText v-else-if="stageDisplaySummary(stage)" :text="stageDisplaySummary(stage)" :limit="300" />
                   <footer>
                     <code>{{ stage.detail_code }}</code>
@@ -335,6 +348,22 @@ const visibleStages = computed(() => {
       return true;
     });
 });
+
+function contextDiagnosticDisplay(stage: TraceStage): { stateLabel: string; candidateCount: number | null; injectedCount: number | null; stateCount: number | null; inputLimit: number | null; windowTokens: number | null; elapsedMs: number | null; diagnosticCode: string; categoryText: string; reserveText: string; messageCountText: string } | null {
+  if (stage.key !== "memory_context" && stage.key !== "context_budget") return null;
+  const raw = stage.context_diagnostic;
+  if (!raw || typeof raw !== "object") return null;
+  const integer = (key: string): number | null => typeof raw[key] === "number" && Number.isFinite(raw[key] as number) ? Math.max(0, Math.trunc(raw[key] as number)) : null;
+  const code = typeof raw.diagnostic_code === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(raw.diagnostic_code) ? raw.diagnostic_code : "context_diagnostic_observed";
+  const state = typeof raw.status === "string" ? raw.status : typeof raw.state === "string" ? raw.state : "unknown";
+  const labels: Record<string, string> = { injected: "已注入", no_hit: "未命中", timeout: "超时", api_failed: "调用失败", disabled: "未启用", fitted: "已裁剪", unknown: "状态未知" };
+  const namedCounts = (pairs: Array<[string, string]>) => pairs.flatMap(([key, label]) => { const value = integer(key); return value === null ? [] : [`${label} ${value}`]; }).join("；");
+  return { stateLabel: labels[state] || `未知状态（${state}）`, candidateCount: integer("candidate_count"), injectedCount: integer("injected_count"), stateCount: integer("state_count"), inputLimit: integer("input_token_limit"), windowTokens: integer("context_window_tokens"), elapsedMs: integer("elapsed_ms"), diagnosticCode: code,
+    categoryText: namedCounts([["system_tokens", "系统"], ["history_tokens", "历史"], ["memory_tokens", "记忆"], ["tools_tokens", "工具"], ["media_tokens", "媒体"]]),
+    reserveText: namedCounts([["output_reserve_tokens", "输出"], ["thinking_reserve_tokens", "思考"]]),
+    messageCountText: namedCounts([["pre_trim_message_count", "裁剪前"], ["post_trim_message_count", "裁剪后"]]),
+  };
+}
 
 function jumpToFirstError() {
   if (derivedMetrics.value.firstErrorIndex === null) return;

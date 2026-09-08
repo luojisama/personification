@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import math
+import re
 import shutil
 import subprocess
 import time
@@ -425,6 +427,33 @@ def _trace_detail(trace: dict[str, Any]) -> dict[str, Any]:
         "warning": "warn",
         "failed": "error",
     }
+    def safe_context_diagnostic(item: dict[str, Any]) -> dict[str, Any] | None:
+        """Whitelist counters from the runtime's JSON-only context stages.
+
+        Stage text can originate from model/tool paths; it must never become a
+        structured administrative diagnostic merely because it resembles JSON.
+        """
+        key = str(item.get("key") or "")
+        if key not in {"memory_context", "context_budget"}:
+            return None
+        try:
+            value = json.loads(str(item.get("detail") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {"state": "unknown", "diagnostic_code": "context_diagnostic_unparseable"}
+        if not isinstance(value, dict):
+            return {"state": "unknown", "diagnostic_code": "context_diagnostic_unparseable"}
+        result: dict[str, Any] = {}
+        for name in ("candidate_count", "injected_count", "state_count", "elapsed_ms", "estimated_input_tokens", "original_estimated_input_tokens", "native_input_tokens", "input_token_limit", "context_window_tokens", "system_tokens", "history_tokens", "memory_tokens", "tools_tokens", "media_tokens", "output_reserve_tokens", "thinking_reserve_tokens", "pre_trim_message_count", "post_trim_message_count"):
+            raw = value.get(name)
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(float(raw)):
+                result[name] = max(0, min(int(raw), 10_000_000))
+        for name in ("status", "state", "budget_source", "token_count_source", "error_type"):
+            raw = str(value.get(name) or "")
+            if re.fullmatch(r"[A-Za-z0-9_-]{1,80}", raw):
+                result[name] = raw
+        result["diagnostic_code"] = str(result.get("status") or result.get("state") or "context_diagnostic_observed")
+        return result
+
     return {
         **base,
         "bot_id": str(raw_detail.get("bot_id") or ""),
@@ -453,6 +482,7 @@ def _trace_detail(trace: dict[str, Any]) -> dict[str, Any]:
                     and str((item.get("signals") or {}).get("remaining_ms", "")).isdigit()
                     else None
                 ),
+                "context_diagnostic": safe_context_diagnostic(item),
             }
             for item in items[:200]
         ],
@@ -3264,12 +3294,29 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             counts[category] = counts.get(category, 0) + 1
             if item.get("modified"):
                 modified_counts[category] = modified_counts.get(category, 0) + 1
+        from ...core.history_config import explicit_config_fields
+        explicit = explicit_config_fields(runtime.plugin_config)
+        legacy_fields = {
+            "personification_history_len",
+            "personification_private_history_turns",
+            "personification_message_expire_hours",
+            "personification_group_context_expire_hours",
+        }
+        compatibility_warnings: list[dict[str, str]] = []
+        active_legacy = sorted(legacy_fields & explicit)
+        if active_legacy:
+            compatibility_warnings.append({
+                "code": "legacy_history_limits_compatibility",
+                "title": "旧版历史限制需要核对",
+                "message": "检测到显式旧版限制。未显式设置对应新上限时，兼容解析会采用更严格的消息数；已显式设置新上限时，新配置替代旧限制。不会自动改写任一值。",
+            })
         payload.update(
             {
                 "revision": revision,
                 "groups": sorted(counts),
                 "group_counts": counts,
                 "modified_counts": modified_counts,
+                "compatibility_warnings": compatibility_warnings,
             }
         )
         return payload

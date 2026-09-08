@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import asyncio
 import sqlite3
 import struct
 import threading
@@ -13,6 +14,7 @@ from typing import Any, Callable
 
 from .embedding_index import EMBED_MODEL_VERSION, cosine_similarity, embed_text, normalize_text, tokenize
 from .entity_index import extract_entities
+from .embedding_service import EmbeddingService, EmbeddingServiceError
 from .memory_defaults import MAX_MEMORY_RECALL_TOP_K
 from .search_ranker import (
     build_time_hint,
@@ -191,6 +193,9 @@ class MemoryStore:
             _PROFILE_GENERATIONS.setdefault(self._profile_generation_key, 0)
         self._fts_available = False
         self._last_search_stats_prune_ts = 0.0
+        self.embedding_service = EmbeddingService(plugin_config)
+        self._last_embedding_error = ""
+        self._embedding_worker_lock = asyncio.Lock()
 
     def initialize(self) -> None:
         self._relocate_old_memory_dirs()
@@ -200,6 +205,8 @@ class MemoryStore:
         self.recycle_bin_dir.mkdir(parents=True, exist_ok=True)
         self._init_shared_db()
         self._init_palace_db()
+        if self.embedding_service.enabled:
+            self._queue_unindexed_api_memories()
 
     def _relocate_old_memory_dirs(self) -> None:
         current_root = self.root_dir
@@ -895,19 +902,29 @@ class MemoryStore:
             if conn.total_changes == before_changes:
                 conn.rollback()
                 return memory_id
-            conn.execute("DELETE FROM memory_embeddings WHERE memory_id=?", (memory_id,))
-            conn.execute(
-                """
-                INSERT INTO memory_embeddings(memory_id, model_version, embedding, updated_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (memory_id, EMBED_MODEL_VERSION, json.dumps(payload.get("_embedding", []), ensure_ascii=False), updated_at),
-            )
-            conn.execute(
-                "UPDATE memory_items SET embedding=?, embedding_model=? WHERE memory_id=?",
-                (_pack_float16_vector(payload.get("_embedding", [])), EMBED_MODEL_VERSION, memory_id),
-            )
-            self._write_vector_chunks(conn, payload=payload, updated_at=updated_at)
+            if self.embedding_service.enabled:
+                # Never label a local hash as a real semantic representation.
+                # Existing legacy rows are retained as rollback data until a
+                # successful remote embedding replaces them under a new version.
+                self._enqueue_embedding_unlocked(conn, memory_id=memory_id, updated_at=updated_at)
+            elif bool(getattr(self.embedding_service, "misconfigured", False)):
+                # Keep raw text/indexes, but do not fabricate an API semantic
+                # vector while a real-embedding configuration is invalid.
+                self._enqueue_embedding_unlocked(conn, memory_id=memory_id, updated_at=updated_at)
+            else:
+                conn.execute("DELETE FROM memory_embeddings WHERE memory_id=?", (memory_id,))
+                conn.execute(
+                    """
+                    INSERT INTO memory_embeddings(memory_id, model_version, embedding, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (memory_id, EMBED_MODEL_VERSION, json.dumps(payload.get("_embedding", []), ensure_ascii=False), updated_at),
+                )
+                conn.execute(
+                    "UPDATE memory_items SET embedding=?, embedding_model=? WHERE memory_id=?",
+                    (_pack_float16_vector(payload.get("_embedding", [])), EMBED_MODEL_VERSION, memory_id),
+                )
+                self._write_vector_chunks(conn, payload=payload, updated_at=updated_at)
             conn.execute("DELETE FROM memory_entities WHERE memory_id=?", (memory_id,))
             for entity in payload.get("_entities", []):
                 conn.execute(
@@ -954,7 +971,153 @@ class MemoryStore:
                     ),
                 )
             conn.commit()
+        if self.embedding_service.enabled:
+            self._schedule_pending_embedding_work()
         return memory_id
+
+    def _schedule_pending_embedding_work(self) -> None:
+        """Best effort only; failures stay in the durable queue for later retry."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self.adrain_pending_embeddings())
+
+    def _queue_unindexed_api_memories(self) -> int:
+        """Queue existing recallable records after API embedding is enabled.
+
+        This is idempotent and endpoint-aware.  A provider or endpoint change
+        queues a fresh version while retaining the prior index for rollback.
+        """
+        if not self.embedding_service.enabled:
+            return 0
+        prefix = self.embedding_service.version_prefix + ":d%"
+        with self.maintenance_lock, _connect(self.memory_palace_dir / "memory_palace.db") as conn:
+            before = conn.total_changes
+            conn.execute(
+                """INSERT INTO memory_embedding_queue(memory_id, status, attempts, last_error, updated_at)
+                   SELECT i.memory_id, 'pending', 0, '', ? FROM memory_items i
+                   WHERE i.supports_recall=1
+                     AND NOT EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.memory_id=i.memory_id AND e.model_version LIKE ?)
+                     AND NOT EXISTS (SELECT 1 FROM memory_embedding_queue q WHERE q.memory_id=i.memory_id)
+                   ON CONFLICT(memory_id) DO NOTHING""",
+                (now_ts(), prefix),
+            )
+            queued = conn.total_changes - before
+            conn.commit()
+        self._schedule_pending_embedding_work()
+        return max(0, queued)
+
+    def _enqueue_embedding_unlocked(self, conn: sqlite3.Connection, *, memory_id: str, updated_at: float) -> None:
+        conn.execute(
+            """
+            INSERT INTO memory_embedding_queue(memory_id, status, attempts, last_error, updated_at)
+            VALUES (?, 'pending', 0, '', ?)
+            ON CONFLICT(memory_id) DO UPDATE SET status='pending', last_error='', updated_at=excluded.updated_at
+            """,
+            (memory_id, float(updated_at)),
+        )
+
+    async def aindex_pending_embeddings(self, *, limit: int = 32) -> dict[str, Any]:
+        """Index queued items through the configured remote embedding API.
+
+        Raw memories remain readable on every failure.  A failed API request is
+        durable diagnostic state, not a permission to write a hash vector.
+        """
+        if not self.embedding_service.enabled:
+            return {"status": "disabled", "indexed": 0, "failed": 0}
+        async with self._embedding_worker_lock:
+            return await self._aindex_pending_embeddings_locked(limit=limit)
+
+    async def _aindex_pending_embeddings_locked(self, *, limit: int) -> dict[str, Any]:
+        with _connect(self.memory_palace_dir / "memory_palace.db") as conn:
+            rows = conn.execute(
+                """SELECT q.memory_id, i.payload FROM memory_embedding_queue q
+                   JOIN memory_items i ON i.memory_id=q.memory_id
+                   WHERE q.status IN ('pending', 'failed')
+                   ORDER BY q.updated_at ASC LIMIT ?""",
+                (max(1, min(int(limit or 32), 256)),),
+            ).fetchall()
+        indexed = failed = 0
+        for row in rows:
+            memory_id = str(row["memory_id"] or "")
+            payload = _json_loads(row["payload"], {})
+            if not memory_id or not isinstance(payload, dict):
+                continue
+            chunks = self._build_vector_chunks(payload)
+            texts = [text for _, text in chunks]
+            try:
+                batch = await self.embedding_service.embed_documents(texts or [self._build_searchable_text(payload)])
+                if len(batch.vectors) != len(texts or [self._build_searchable_text(payload)]):
+                    raise EmbeddingServiceError("document vector count mismatch")
+                if self._persist_api_embeddings(memory_id, payload, chunks, batch):
+                    self._last_embedding_error = ""
+                    indexed += 1
+            except Exception as exc:
+                failed += 1
+                self._mark_embedding_failure(memory_id, str(exc))
+        return {"status": "ok" if not failed else "partial", "indexed": indexed, "failed": failed, "pending": max(0, len(rows) - indexed)}
+
+    async def adrain_pending_embeddings(self) -> dict[str, Any]:
+        """Drain successful batches without busy-looping an unavailable API."""
+        batch_size = max(1, min(128, int(getattr(self.plugin_config, "personification_embedding_batch_size", 32) or 32)))
+        total_indexed = total_failed = 0
+        while True:
+            result = await self.aindex_pending_embeddings(limit=batch_size)
+            total_indexed += int(result.get("indexed", 0) or 0)
+            total_failed += int(result.get("failed", 0) or 0)
+            if total_failed or int(result.get("indexed", 0) or 0) < batch_size:
+                break
+        return {"status": "partial" if total_failed else "ok", "indexed": total_indexed, "failed": total_failed}
+
+    def _persist_api_embeddings(self, memory_id: str, payload: dict[str, Any], chunks: list[tuple[str, str]], batch: Any) -> bool:
+        updated_at = now_ts()
+        texts = chunks or [(f"{memory_id}:0", self._build_searchable_text(payload))]
+        with _connect(self.memory_palace_dir / "memory_palace.db") as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._get_memory_payload(memory_id, conn=conn)
+            if not isinstance(current, dict) or int(current.get("revision", 0) or 0) != int(payload.get("revision", 0) or 0) or self._build_searchable_text(current) != self._build_searchable_text(payload):
+                # A later writer changed this record during remote I/O.  Leave
+                # its queue row pending; its new revision will be embedded next.
+                conn.rollback()
+                return False
+            # Legacy memory_embeddings has memory_id as its primary key. Keep
+            # it untouched as rollback data; API vectors live in versioned
+            # chunks until the entire target version becomes active.
+            conn.execute("DELETE FROM memory_vector_chunks WHERE memory_id=? AND model_version=?", (memory_id, batch.model_version))
+            for (chunk_id, text), embedding in zip(texts, batch.vectors):
+                versioned_chunk_id = f"{chunk_id}:{hashlib.blake2b(batch.model_version.encode(), digest_size=4).hexdigest()}"
+                conn.execute(
+                    """INSERT INTO memory_vector_chunks(chunk_id, memory_id, chunk_text, content_hash, model_version, embedding, embedding_dim, group_id, user_id, permission_type, group_scope, cross_group_allowed, salience, confidence, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (versioned_chunk_id, memory_id, text, self._vector_content_hash(text), batch.model_version, json.dumps(embedding, ensure_ascii=False), batch.dimension, str(payload.get("group_id") or ""), str(payload.get("user_id") or ""), str(payload.get("permission_type", "public_preference") or "public_preference"), str(payload.get("group_scope", "shared") or "shared"), 1 if bool(payload.get("cross_group_allowed", False)) else 0, float(payload.get("salience", 0) or 0), float(payload.get("confidence", 0) or 0), updated_at),
+                )
+            conn.execute("DELETE FROM memory_embedding_queue WHERE memory_id=?", (memory_id,))
+            self._activate_api_version_if_complete(conn, batch.model_version)
+            conn.commit()
+        return True
+
+    def _active_api_embedding_version(self) -> str:
+        try:
+            with _connect(self.memory_palace_dir / "memory_palace.db") as conn:
+                row = conn.execute("SELECT value FROM memory_embedding_index_state WHERE key='active_version'").fetchone()
+                return str(row["value"] if row else "")
+        except Exception:
+            return ""
+
+    def _activate_api_version_if_complete(self, conn: sqlite3.Connection, version: str) -> None:
+        # Do not switch reads to a partially rebuilt version. New writes queued
+        # after activation remain lexical until their next successful API pass.
+        outstanding = conn.execute("SELECT COUNT(1) AS cnt FROM memory_embedding_queue").fetchone()
+        expected = conn.execute("SELECT COUNT(1) AS cnt FROM memory_items WHERE supports_recall=1").fetchone()
+        indexed = conn.execute("SELECT COUNT(DISTINCT memory_id) AS cnt FROM memory_vector_chunks WHERE model_version=?", (version,)).fetchone()
+        if int(outstanding["cnt"] if outstanding else 0) == 0 and int(indexed["cnt"] if indexed else 0) >= int(expected["cnt"] if expected else 0):
+            conn.execute("INSERT INTO memory_embedding_index_state(key, value, updated_at) VALUES ('active_version', ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at", (version, now_ts()))
+
+    def _mark_embedding_failure(self, memory_id: str, error: str) -> None:
+        with _connect(self.memory_palace_dir / "memory_palace.db") as conn:
+            conn.execute("UPDATE memory_embedding_queue SET status='failed', attempts=attempts+1, last_error=?, updated_at=? WHERE memory_id=?", (str(error or "embedding API failed")[:500], now_ts(), memory_id))
+            conn.commit()
 
     def recall_memories(
         self,
@@ -968,6 +1131,8 @@ class MemoryStore:
         context_type: str = "auto",
         platform: str = "",
         bot_id: str = "",
+        _query_embedding: list[float] | None = None,
+        _embedding_model_version: str = "",
     ) -> list[dict[str, Any]]:
         configured_limit = int(
             getattr(self.plugin_config, "personification_memory_recall_top_k", MAX_RECALL_LIMIT) or MAX_RECALL_LIMIT
@@ -975,19 +1140,37 @@ class MemoryStore:
         limit = max(1, min(int(limit or configured_limit), MAX_RECALL_LIMIT))
         scan_limit = self._memory_search_scan_limit(limit=limit)
         normalized_query = normalize_text(query)
+        # Once API embedding is enabled, a synchronous caller has no valid
+        # query vector.  It may use lexical/time recall, but must not compare
+        # the query with a legacy hash vector under the semantic label.
+        if (self.embedding_service.enabled or self.embedding_service.misconfigured) and not _embedding_model_version:
+            _embedding_model_version = "__api_query_required__"
         if self.palace_enabled() and group_id and self.needs_bootstrap(group_id):
             self.bootstrap_group_memories(group_id)
         normalized_context_type = self._normalize_context_type(context_type, group_id=group_id)
 
         candidate_map: dict[str, MemorySearchCandidate] = {}
-        for candidate in self._search_fast(
+        initial_candidates = self._search_fast(
             query=normalized_query,
             scope=scope,
             user_id=user_id,
             group_id=group_id,
             limit=max(limit * 3, 12),
             scan_limit=scan_limit,
-        ):
+            query_embedding=_query_embedding,
+            embedding_model_version=_embedding_model_version,
+        )
+        # Normal automatic recall starts with the configured recent window.
+        # Older long-term records are appended only when that window cannot
+        # satisfy the requested result count; explicit deep recall remains
+        # all-time.  This is a ranking policy, not retention/deletion.
+        recent_days = max(0, int(getattr(self.plugin_config, "personification_memory_retrieval_days", 30) or 0))
+        if mode != "deep" and recent_days > 0:
+            cutoff = now_ts() - recent_days * 86400
+            recent = [item for item in initial_candidates if safe_float(item.payload.get("time_created", 0), 0) >= cutoff]
+            older = [item for item in initial_candidates if item not in recent]
+            initial_candidates = recent + older
+        for candidate in initial_candidates:
             if not self._payload_identity_visible(candidate.payload, platform=platform, bot_id=bot_id):
                 continue
             existing = candidate_map.get(candidate.memory_id)
@@ -1000,6 +1183,11 @@ class MemoryStore:
                         existing.match_reasons.append(reason)
 
         ranked = sorted(candidate_map.values(), key=lambda item: item.base_score, reverse=True)
+        if mode != "deep" and recent_days > 0:
+            cutoff = now_ts() - recent_days * 86400
+            recent_ranked = [item for item in ranked if safe_float(item.payload.get("time_created", 0), 0) >= cutoff]
+            older_ranked = [item for item in ranked if item not in recent_ranked]
+            ranked = recent_ranked[:limit] if len(recent_ranked) >= limit else recent_ranked + older_ranked
         deep_mode = mode == "deep" or (
             mode == "auto"
             and (
@@ -1090,6 +1278,64 @@ class MemoryStore:
             status="ok",
         )
         return results
+
+    async def arecall_memories(self, **kwargs: Any) -> list[dict[str, Any]]:
+        """Async recall using API embeddings when configured.
+
+        Permission and identity filtering remain in ``recall_memories``.  If the
+        API is unavailable, this deliberately falls back only to the existing
+        lexical/time/legacy index paths and records an explicit status rather
+        than manufacturing a new hash embedding.
+        """
+        if not self.embedding_service.enabled:
+            return self.recall_memories(**kwargs)
+        try:
+            batch = await self.embedding_service.embed_query(str(kwargs.get("query") or ""))
+        except EmbeddingServiceError as exc:
+            self._last_embedding_error = str(exc)
+            fallback_kwargs = dict(kwargs)
+            fallback_kwargs["_embedding_model_version"] = "__api_query_required__"
+            result = self.recall_memories(**fallback_kwargs)
+            self._record_search_stats(query=str(kwargs.get("query") or ""), scope=str(kwargs.get("scope") or "auto"), mode="api_error_fallback", requested_group_id=str(kwargs.get("group_id") or ""), requested_user_id=str(kwargs.get("user_id") or ""), hit_count=len(result), used_memory_ids=[], status="embedding_api_failed")
+            return result
+        enriched = dict(kwargs)
+        self._last_embedding_error = ""
+        if batch.model_version != self._active_api_embedding_version():
+            # Index not complete yet: source-bound lexical recall is safer than
+            # mixing a new query with a partially rebuilt document corpus.
+            enriched["_embedding_model_version"] = "__api_query_required__"
+            return self.recall_memories(**enriched)
+        enriched["_query_embedding"] = batch.vectors[0] if batch.vectors else []
+        enriched["_embedding_model_version"] = batch.model_version
+        return self.recall_memories(**enriched)
+
+    def embedding_status(self) -> dict[str, Any]:
+        """Safe, credential-free index diagnostic for runtime and WebUI."""
+        provider = self.embedding_service.provider
+        status: dict[str, Any] = {"enabled": self.embedding_service.enabled, "provider": provider.__class__.__name__, "model": provider.model_id, "dimension": 0, "indexed": 0, "total": 0, "pending": 0, "rebuilding": False, "error_code": ""}
+        if bool(getattr(self.embedding_service, "misconfigured", False)):
+            status["error_code"] = "misconfigured"
+            return status
+        if not self.embedding_service.enabled:
+            status["error_code"] = "disabled"
+            return status
+        try:
+            with _connect(self.memory_palace_dir / "memory_palace.db") as conn:
+                total = conn.execute("SELECT COUNT(1) AS cnt FROM memory_items WHERE supports_recall=1").fetchone()
+                pending = conn.execute("SELECT COUNT(1) AS cnt FROM memory_embedding_queue").fetchone()
+                rows = conn.execute("SELECT value AS model_version, 0 AS cnt FROM memory_embedding_index_state WHERE key='active_version'").fetchone()
+            status["total"] = int(total["cnt"] if total else 0)
+            status["pending"] = int(pending["cnt"] if pending else 0)
+            if rows:
+                status["indexed"] = int(conn.execute("SELECT COUNT(DISTINCT memory_id) AS cnt FROM memory_vector_chunks WHERE model_version=?", (str(rows["model_version"] or ""),)).fetchone()["cnt"] or 0)
+                version = str(rows["model_version"] or "")
+                if ":d" in version:
+                    status["dimension"] = int(version.rsplit(":d", 1)[-1] or 0)
+            status["rebuilding"] = bool(status["pending"])
+            status["error_code"] = "api_failed" if getattr(self, "_last_embedding_error", "") else ""
+        except Exception:
+            status["error_code"] = "index_unavailable"
+        return status
 
     def _memory_search_scan_limit(self, *, limit: int) -> int:
         configured = safe_float(
@@ -1319,6 +1565,9 @@ class MemoryStore:
     def rebuild_vector_index(self, *, limit: int = 0) -> dict[str, Any]:
         if not self.palace_enabled():
             return {"rebuilt": 0, "status": "disabled"}
+        if self.embedding_service.enabled:
+            queued = self._queue_unindexed_api_memories()
+            return {"rebuilt": 0, "queued": queued, "status": "queued_api", "index": self.embedding_status()}
         max_rows = int(limit or 0)
         sql = """
             SELECT payload
@@ -1341,6 +1590,17 @@ class MemoryStore:
                 rebuilt += 1
             conn.commit()
         return {"rebuilt": rebuilt, "status": "ok", "index": self.get_vector_index_status()}
+
+    async def arebuild_vector_index(self, *, limit: int = 0) -> dict[str, Any]:
+        """API-safe rebuild entrypoint for management/background callers."""
+        if not self.palace_enabled():
+            return {"rebuilt": 0, "status": "disabled"}
+        if not self.embedding_service.enabled:
+            return self.rebuild_vector_index(limit=limit)
+        self._queue_unindexed_api_memories()
+        result = await self.aindex_pending_embeddings(limit=max(1, int(limit or 32)))
+        result["index"] = self.embedding_status()
+        return result
 
     def mark_memories_summarized(self, memory_ids: list[str], *, summarized_by: str = "") -> int:
         updated = 0
@@ -2133,6 +2393,8 @@ class MemoryStore:
         group_id: str,
         limit: int,
         scan_limit: int,
+        query_embedding: list[float] | None = None,
+        embedding_model_version: str = "",
     ) -> list[MemorySearchCandidate]:
         groups = [
             self._search_by_vector_chunks(
@@ -2142,6 +2404,8 @@ class MemoryStore:
                 scope=scope,
                 limit=max(limit, 20),
                 scan_limit=scan_limit,
+                query_embedding=query_embedding,
+                embedding_model_version=embedding_model_version,
             ),
             self._search_by_fts(
                 query=query,
@@ -2158,6 +2422,8 @@ class MemoryStore:
                 scope=scope,
                 limit=max(limit, 20),
                 scan_limit=scan_limit,
+                query_embedding=query_embedding,
+                embedding_model_version=embedding_model_version,
             ),
             self._search_by_entity(
                 query=query,
@@ -2300,10 +2566,12 @@ class MemoryStore:
         scope: str,
         limit: int,
         scan_limit: int,
+        query_embedding: list[float] | None = None,
+        embedding_model_version: str = "",
     ) -> list[MemorySearchCandidate]:
         if not query or not self._vector_index_enabled():
             return []
-        query_embedding = embed_text(query)
+        query_embedding = query_embedding if query_embedding is not None else embed_text(query)
         if not query_embedding:
             return []
         configured_candidates = safe_float(
@@ -2322,7 +2590,7 @@ class MemoryStore:
                 ORDER BY c.salience DESC, c.updated_at DESC
                 LIMIT ?
                 """,
-                (VECTOR_CHUNK_MODEL_VERSION, min(scan, 5000)),
+                (str(embedding_model_version or VECTOR_CHUNK_MODEL_VERSION), min(scan, 5000)),
             ).fetchall()
         best_by_memory: dict[str, MemorySearchCandidate] = {}
         for row in rows:
@@ -2496,8 +2764,10 @@ class MemoryStore:
         scope: str,
         limit: int,
         scan_limit: int,
+        query_embedding: list[float] | None = None,
+        embedding_model_version: str = "",
     ) -> list[MemorySearchCandidate]:
-        query_embedding = embed_text(query)
+        query_embedding = query_embedding if query_embedding is not None else embed_text(query)
         with _connect(self.memory_palace_dir / "memory_palace.db") as conn:
             row_map: dict[str, sqlite3.Row] = {}
             scan = max(int(scan_limit or 800), max(limit * 8, 80))
@@ -2556,7 +2826,12 @@ class MemoryStore:
                     continue
                 if not self._candidate_visible_for_request(payload, group_id=group_id, user_id=user_id):
                     continue
-                embedding = self._embedding_for_payload(conn=conn, payload=payload, row=row)
+                # API vectors may only be compared with the exact observed
+                # provider/model/dimension version.  Do not refresh an API row
+                # with a local hash vector on a mismatch.
+                if embedding_model_version and str(row["model_version"] or "") != embedding_model_version:
+                    continue
+                embedding = self._embedding_for_payload(conn=conn, payload=payload, row=row) if not embedding_model_version else _json_loads(row["embedding"], [])
                 if str(row["model_version"] or "") != EMBED_MODEL_VERSION:
                     refreshed_any = True
                 similarity = cosine_similarity(query_embedding, embedding)
@@ -2941,6 +3216,22 @@ class MemoryStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS memory_embedding_queue(
+                    memory_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS memory_embedding_index_state(
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '', updated_at REAL NOT NULL
+                )"""
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS memory_entities(
                     entity TEXT NOT NULL,
                     memory_id TEXT NOT NULL,
@@ -2998,6 +3289,9 @@ class MemoryStore:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memory_vector_lookup ON memory_vector_chunks(model_version, group_id, user_id, updated_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_embedding_queue_status ON memory_embedding_queue(status, updated_at)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memory_vector_memory ON memory_vector_chunks(memory_id)"

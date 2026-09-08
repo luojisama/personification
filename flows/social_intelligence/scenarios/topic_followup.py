@@ -65,6 +65,10 @@ async def topic_followup_handler(ctx: SocialContext) -> None:
 
     sent = 0
     for item in due:
+        if item.get("bot_id") and str(item["bot_id"]) != str(getattr(bot, "self_id", "") or ""):
+            continue
+        if item.get("platform") and str(item["platform"]) != str(getattr(bot, "platform", "") or "onebot"):
+            continue
         uid = str(item.get("user_id", "") or "")
         if not uid:
             continue

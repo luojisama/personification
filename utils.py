@@ -7,6 +7,7 @@ from .core.db import connect_sync
 from .core.group_roles import normalize_group_role
 from .core.group_relation_edges import update_relation_edges_from_message
 from .core.thread_tracker import assign_thread_for_message
+from .core.llm_context import current_llm_context
 
 
 _WHITELIST_STORE = "whitelist"
@@ -136,6 +137,9 @@ def record_group_msg(
         image_count = 0
     visual_summary = str(safe_metadata.get("visual_summary", "") or "").strip()
     sender_role = normalize_group_role(safe_metadata.get("sender_role", ""))
+    llm_context = current_llm_context()
+    platform = str(safe_metadata.get("platform") or llm_context.get("platform") or "unknown").strip() or "unknown"
+    bot_id = str(safe_metadata.get("bot_id") or llm_context.get("bot_id") or "unknown").strip() or "unknown"
 
     with connect_sync() as conn:
         thread_assignment = assign_thread_for_message(
@@ -154,8 +158,8 @@ def record_group_msg(
             """
             INSERT INTO group_messages(
                 group_id, user_id, nickname, content, image_count, visual_summary, is_bot,
-                reply_to_msg_id, reply_to_user_id, mentioned_ids, is_at_bot, message_id, thread_id, source_kind, sender_role, timestamp
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                reply_to_msg_id, reply_to_user_id, mentioned_ids, is_at_bot, message_id, thread_id, source_kind, sender_role, platform, bot_id, timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(group_id),
@@ -173,6 +177,8 @@ def record_group_msg(
                 thread_assignment.thread_id,
                 str(safe_metadata.get("source_kind", "bot" if is_bot else "user") or "user"),
                 sender_role,
+                platform,
+                bot_id,
                 now_ts,
             ),
         )
@@ -251,10 +257,16 @@ def get_group_msg_by_message_id(group_id: str, message_id: str) -> Optional[Dict
         return None
 
     with connect_sync() as conn:
+        columns = {
+            str(row["name"] if hasattr(row, "__getitem__") else row[1])
+            for row in conn.execute("PRAGMA table_info(group_messages)").fetchall()
+        }
+        platform_select = "platform" if "platform" in columns else "'unknown' AS platform"
+        bot_select = "bot_id" if "bot_id" in columns else "'unknown' AS bot_id"
         row = conn.execute(
-            """
+            f"""
             SELECT group_id, user_id, nickname, content, image_count, visual_summary, is_bot,
-                   reply_to_msg_id, reply_to_user_id, mentioned_ids, is_at_bot, message_id, thread_id, source_kind, sender_role, timestamp
+                   reply_to_msg_id, reply_to_user_id, mentioned_ids, is_at_bot, message_id, thread_id, source_kind, sender_role, {platform_select}, {bot_select}, timestamp
             FROM group_messages
             WHERE group_id=? AND message_id=?
             ORDER BY timestamp DESC
@@ -287,10 +299,19 @@ def get_group_msg_by_message_id(group_id: str, message_id: str) -> Optional[Dict
         "thread_id": row["thread_id"],
         "source_kind": row["source_kind"],
         "sender_role": row["sender_role"],
+        "platform": row["platform"],
+        "bot_id": row["bot_id"],
     }
 
 
-def get_recent_group_msgs(group_id: str, limit: int = 200, expire_hours: Optional[float] = None) -> List[Dict]:
+def get_recent_group_msgs(
+    group_id: str,
+    limit: int = 200,
+    expire_hours: Optional[float] = None,
+    *,
+    bot_id: Optional[str] = None,
+    platform: Optional[str] = None,
+) -> List[Dict]:
     if expire_hours is None:
         expire_hours = _get_message_expire_hours()
 
@@ -299,20 +320,57 @@ def get_recent_group_msgs(group_id: str, limit: int = 200, expire_hours: Optiona
     if expire_hours > 0:
         clauses.append("timestamp>=?")
         params.append(time.time() - expire_hours * 3600)
-    params.append(max(1, int(limit)))
+    # Explicit identity filters are strict: old unbound rows are deliberately
+    # excluded rather than silently borrowed into a bot-scoped context.
+    if bot_id is not None:
+        clauses.append("bot_id=?")
+        params.append(str(bot_id))
+    if platform is not None:
+        clauses.append("platform=?")
+        params.append(str(platform))
+    requested = max(1, int(limit))
 
     with connect_sync() as conn:
-        rows = conn.execute(
-            f"""
+        columns = {
+            str(row["name"] if hasattr(row, "__getitem__") else row[1])
+            for row in conn.execute("PRAGMA table_info(group_messages)").fetchall()
+        }
+        has_identity_columns = {"platform", "bot_id"}.issubset(columns)
+        if (bot_id is not None or platform is not None) and not has_identity_columns:
+            # A manually-created/transition-era database cannot prove scope.
+            # Fail closed for identity-filtered archive reads; never infer it.
+            return []
+        platform_select = "platform" if "platform" in columns else "'unknown' AS platform"
+        bot_select = "bot_id" if "bot_id" in columns else "'unknown' AS bot_id"
+        rows: list[Any] = []
+        # SQLite LIMIT accepts 12k, but bounded keyset pages keep archive
+        # expansion predictable and avoid one giant result materialization.
+        cursor_timestamp: float | None = None
+        cursor_id: int | None = None
+        while len(rows) < requested:
+            page_size = min(1000, requested - len(rows))
+            page_clauses = list(clauses)
+            page_params = list(params)
+            if cursor_timestamp is not None and cursor_id is not None:
+                page_clauses.append("(timestamp < ? OR (timestamp = ? AND id < ?))")
+                page_params.extend([cursor_timestamp, cursor_timestamp, cursor_id])
+            page_params.append(page_size)
+            page = conn.execute(
+                f"""
             SELECT group_id, user_id, nickname, content, image_count, visual_summary, is_bot,
-                   reply_to_msg_id, reply_to_user_id, mentioned_ids, is_at_bot, message_id, thread_id, source_kind, sender_role, timestamp
+                   reply_to_msg_id, reply_to_user_id, mentioned_ids, is_at_bot, message_id, thread_id, source_kind, sender_role, {platform_select}, {bot_select}, timestamp, id
             FROM group_messages
-            WHERE {" AND ".join(clauses)}
-            ORDER BY timestamp DESC
+            WHERE {" AND ".join(page_clauses)}
+            ORDER BY timestamp DESC, id DESC
             LIMIT ?
             """,
-            tuple(params),
-        ).fetchall()
+                tuple(page_params),
+            ).fetchall()
+            if not page:
+                break
+            rows.extend(page)
+            cursor_timestamp = float(page[-1]["timestamp"] or 0)
+            cursor_id = int(page[-1]["id"] or 0)
 
     messages: List[Dict[str, Any]] = []
     for row in reversed(rows):
@@ -339,6 +397,8 @@ def get_recent_group_msgs(group_id: str, limit: int = 200, expire_hours: Optiona
                 "thread_id": row["thread_id"],
                 "source_kind": row["source_kind"],
                 "sender_role": row["sender_role"],
+                "platform": row["platform"],
+                "bot_id": row["bot_id"],
             }
         )
     return messages

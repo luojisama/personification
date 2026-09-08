@@ -386,6 +386,24 @@ def test_record_group_msg_assigns_reply_to_same_thread(tmp_path) -> None:
     assert second["thread_id"] == first["thread_id"]
 
 
+def test_group_archive_identity_scope_is_strict_and_unknown_rows_are_excluded(tmp_path) -> None:
+    cfg = SimpleNamespace(personification_data_dir=str(tmp_path))
+    data_store.init_data_store(cfg)
+    db.init_db_sync(tmp_path)
+    utils.record_group_msg("g", "old", "legacy", user_id="u0", time=1)
+    utils.record_group_msg("g", "a", "bot-a", user_id="u1", platform="onebot", bot_id="a", time=2)
+    utils.record_group_msg("g", "b", "bot-b", user_id="u2", platform="onebot", bot_id="b", time=3)
+    utils.record_group_msg("g", "other", "other-platform", user_id="u3", platform="discord", bot_id="a", time=4)
+
+    assert [row["content"] for row in utils.get_recent_group_msgs("g", expire_hours=0)] == [
+        "legacy", "bot-a", "bot-b", "other-platform"
+    ]
+    scoped = utils.get_recent_group_msgs("g", expire_hours=0, platform="onebot", bot_id="a")
+    assert [row["content"] for row in scoped] == ["bot-a"]
+    assert scoped[0]["platform"] == "onebot"
+    assert scoped[0]["bot_id"] == "a"
+
+
 def test_record_group_msg_keeps_plugin_episode_in_one_thread(tmp_path) -> None:
     cfg = SimpleNamespace(personification_data_dir=str(tmp_path))
     data_store.init_data_store(cfg)

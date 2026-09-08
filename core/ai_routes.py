@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from .llm_context import (
     LLM_MAX_WIRE_ATTEMPTS,
@@ -18,6 +19,7 @@ from .llm_context import (
     use_single_attempt_retry_policy,
 )
 from .gemini_transport import safe_upstream_diagnostics
+from .context_budget import ContextBudget, fit_request_to_budget, record_usage_calibration, request_token_categories, route_estimation_multiplier
 from .provider_types import (
     PROVIDER_TYPE_REMOVED,
     normalize_removed_provider_type,
@@ -1128,6 +1130,16 @@ class RoutedToolCaller:
                 "auth_mode": str(source.get("gemini_auth_mode") or "")[:48],
                 "caller": type(caller).__name__[:80],
                 "route_fingerprint": capability_key.fingerprint,
+                # The full values originate in an api_pool descriptor.  They
+                # are numeric limits, not secrets, and are consumed locally
+                # just before every wire request (including loop/review calls).
+                "context_window_tokens": source.get("context_window_tokens", 0),
+                "max_input_tokens": source.get("max_input_tokens", 0),
+                "max_output_tokens": source.get("max_output_tokens", 0),
+                "input_token_limit": source.get("input_token_limit", 0),
+                "context_budget_enabled": source.get("context_budget_enabled", True),
+                "context_input_ratio": source.get("context_input_ratio", 0.50),
+                "context_safety_margin_ratio": source.get("context_safety_margin_ratio", 0.05),
             }
 
     def _route_attempt(
@@ -1283,6 +1295,11 @@ class RoutedToolCaller:
                 id(caller), {"caller": type(caller).__name__[:80]}
             )
             shape = dict(request_shape)
+            calibration = record_usage_calibration(
+                route_key=descriptor.get("route_fingerprint") or descriptor.get("provider"),
+                estimated_input_tokens=int(shape.get("estimated_input_tokens") or 0),
+                usage=getattr(response, "usage", None) if response is not None else None,
+            )
             if cancelled:
                 status = "warn"
                 code = "provider_cancelled"
@@ -1329,7 +1346,11 @@ class RoutedToolCaller:
                     f"image_count={max(0, int(shape.get('image_count') or 0))} "
                     f"multimodal={shape.get('multimodal_types') or 'none'} "
                     f"multimodal_counts={shape.get('multimodal_type_counts') or 'none'} "
-                    f"builtin_search={str(bool(shape.get('builtin_search'))).lower()}"
+                    f"builtin_search={str(bool(shape.get('builtin_search'))).lower()} "
+                    f"context_estimate={max(0, int(shape.get('estimated_input_tokens') or 0))}/"
+                    f"{max(0, int(shape.get('input_token_limit') or 0))} "
+                    f"context_source={shape.get('budget_source') or 'unavailable'} "
+                    f"context_calibration={calibration.get('usage_calibration', 'unavailable')}"
                 ),
                 hint="仅记录安全路由描述、枚举与计数；不记录正文、媒体引用、URL、Base64 或凭据。",
                 elapsed_ms=max(0, int(elapsed_ms)),
@@ -1353,8 +1374,31 @@ class RoutedToolCaller:
         cancelled = False
         wire_retry_token = set_wire_retry_disabled()
         try:
+            descriptor = self._caller_route_descriptors.get(id(caller), {})
+            if descriptor.get("context_budget_enabled", True) is not False:
+                budget_route = dict(descriptor)
+                budget_route["_context_estimate_multiplier"] = route_estimation_multiplier(
+                    descriptor.get("route_fingerprint") or descriptor.get("provider")
+                )
+                budget = ContextBudget.from_route(budget_route)
+                bounded_messages, budget_detail = fit_request_to_budget(messages, wire_tools, budget)
+                categories = request_token_categories(
+                    bounded_messages, wire_tools, multiplier=budget.estimation_multiplier
+                )
+                budget_detail.update(categories)
+                budget_detail["output_reserve_tokens"] = budget.max_output_tokens
+                budget_detail["thinking_reserve_tokens"] = budget.thinking_reserve_tokens
+                budget_detail["pre_trim_message_count"] = len(messages)
+                budget_detail["post_trim_message_count"] = len(bounded_messages)
+                native = await self._optional_native_token_count(caller, bounded_messages, wire_tools)
+                budget_detail.update(native)
+                request_shape = dict(request_shape)
+                request_shape.update(budget_detail)
+                self._record_context_budget_stage(descriptor, budget_detail)
+            else:
+                bounded_messages = messages
             response = await caller.chat_with_tools(
-                self._strip_route_markers(messages),
+                self._strip_route_markers(bounded_messages),
                 wire_tools,
                 use_builtin_search,
             )
@@ -1376,6 +1420,58 @@ class RoutedToolCaller:
                 cancelled=cancelled,
                 reframe=reframe,
             )
+
+    @staticmethod
+    async def _optional_native_token_count(
+        caller: ToolCaller,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> dict[str, Any]:
+        """Use a caller's explicit counter when available; never emulate one."""
+        counter = getattr(caller, "count_tokens", None)
+        if not callable(counter):
+            return {"token_count_source": "estimate"}
+        try:
+            value = counter(messages=messages, tools=tools)
+        except TypeError:
+            try:
+                value = counter(messages, tools)
+            except Exception:
+                return {"token_count_source": "estimate"}
+        except Exception:
+            return {"token_count_source": "estimate"}
+        try:
+            if inspect.isawaitable(value):
+                value = await value
+            if isinstance(value, Mapping):
+                value = value.get("total_tokens", value.get("input_tokens", value.get("prompt_tokens", 0)))
+            count = max(0, int(value or 0))
+        except Exception:
+            return {"token_count_source": "estimate"}
+        return {"token_count_source": "native" if count else "estimate", "native_input_tokens": count}
+
+    @staticmethod
+    def _record_context_budget_stage(descriptor: dict[str, Any], detail: dict[str, Any]) -> None:
+        try:
+            from .reply_turn_trace import current_trace_id, record_stage
+            if not current_trace_id():
+                return
+            allowed = {
+                "budget_source", "token_count_source", "estimated_input_tokens", "original_estimated_input_tokens",
+                "native_input_tokens", "input_token_limit", "context_window_tokens", "system_tokens",
+                "history_tokens", "memory_tokens", "tools_tokens", "media_tokens", "output_reserve_tokens",
+                "thinking_reserve_tokens", "pre_trim_message_count", "post_trim_message_count",
+            }
+            payload = {name: detail[name] for name in allowed if name in detail}
+            payload.update({"status": "fitted", "diagnostic_code": "context_budget_fitted"})
+            record_stage(
+                key="context_budget", label="上下文预算", status="info",
+                detail=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                hint="仅记录 Token 计数和安全路由状态，不记录提示词、媒体或工具参数。",
+                elapsed_ms=0,
+            )
+        except Exception:
+            pass
 
     async def _call_provider_with_retry(
         self,

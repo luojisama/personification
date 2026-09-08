@@ -119,6 +119,29 @@ def test_memory_and_labeler_defaults_match_long_term_memory_design() -> None:
     assert entries["memory_vector_backend"].choices == ("sqlite_exact", "disabled")
     assert entries["memory_rag_enabled"].default is True
     assert entries["memory_rag_candidate_limit"].default == 80
+    assert cfg.personification_memory_context_enabled is True
+    assert cfg.personification_context_budget_enabled is True
+    assert cfg.personification_private_history_days == 14
+    assert cfg.personification_private_history_max_messages == 4000
+    assert cfg.personification_group_history_days == 7
+    assert cfg.personification_group_history_max_messages == 12000
+    assert cfg.personification_memory_retrieval_days == 30
+    assert cfg.personification_memory_auto_recall_timeout_seconds == 5.0
+    assert cfg.personification_memory_auto_recall_candidate_limit == 32
+    assert cfg.personification_memory_auto_recall_inject_limit == 12
+    assert cfg.personification_session_compress_token_threshold == 0
+    assert entries["context_input_ratio"].default == 0.5
+    assert entries["context_safety_margin_ratio"].default == 0.05
+
+
+def test_provider_context_capacity_fields_have_typed_chinese_ui_schema() -> None:
+    entries = {entry.key: entry for entry in config_registry.get_config_entries()}
+    schema = entries["api_pools"].ui_schema
+    assert schema is not None
+    fields = {field["key"]: field for field in schema["item_schema"]["fields"]}
+    for key in ("context_window_tokens", "max_input_tokens", "max_output_tokens", "input_token_limit"):
+        assert fields[key]["control_kind"] == "number"
+        assert fields[key]["label"]
 
 
 def test_secret_inference_for_key_and_auth_path_fields() -> None:

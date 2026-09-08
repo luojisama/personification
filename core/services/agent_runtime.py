@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
@@ -216,6 +217,9 @@ def build_agent_tool_registry(
         )
         registry.register(
             _build_recall_group_memory_tool(memory_store, plugin_config, logger)
+        )
+        registry.register(
+            _build_search_conversation_history_tool(memory_store, plugin_config, logger)
         )
         if bool(getattr(plugin_config, "personification_agent_memory_write_enabled", True)):
             registry.register(
@@ -502,7 +506,7 @@ def _build_recall_user_memory_tool(memory_store: Any, plugin_config: Any, logger
         if not request_scope.can_recall or not user_id:
             return _json.dumps({"query": query, "memories": [], "note": "无法确定当前用户，跳过记忆召回"}, ensure_ascii=False)
         try:
-            memories = memory_store.recall_memories(
+            memories = await memory_store.arecall_memories(
                 query=query,
                 scope="auto",
                 **request_scope.actor_recall_kwargs(),
@@ -551,7 +555,7 @@ def _build_recall_group_memory_tool(memory_store: Any, plugin_config: Any, logge
         if not request_scope.can_recall or not group_id:
             return _json.dumps({"query": query, "memories": [], "note": "当前不是群聊，无法召回群记忆"}, ensure_ascii=False)
         try:
-            memories = memory_store.recall_memories(
+            memories = await memory_store.arecall_memories(
                 query=query,
                 scope="auto",
                 **request_scope.group_recall_kwargs(),
@@ -583,6 +587,57 @@ def _build_recall_group_memory_tool(memory_store: Any, plugin_config: Any, logge
         handler=_handler,
         local=True,
         enabled=lambda: _memory_tools_enabled(memory_store, plugin_config),
+    )
+
+
+def _build_search_conversation_history_tool(memory_store: Any, plugin_config: Any, logger: Any) -> AgentTool:
+    """Search raw, archived session evidence within the current trusted scope."""
+    import json as _json
+
+    async def _handler(query: str, days: int = 30, limit: int = 12) -> str:
+        scope = MemoryRequestScope.from_runtime(plugin_config=plugin_config, memory_store=memory_store)
+        # Raw archive is especially sensitive: refuse legacy/unknown Bot
+        # identity rather than treating a group-only session key as portable.
+        if not scope.can_recall or not scope.platform or not scope.bot_id:
+            return _json.dumps({"query": str(query or ""), "messages": [], "note": "无法确定当前会话范围"}, ensure_ascii=False)
+        try:
+            from .. import session_store
+            from ..embedding_index import normalize_text, tokenize
+            session_id = (session_store.build_group_session_id(scope.group_id) if scope.group_id
+                          else session_store.build_private_session_id(scope.user_id))
+            rows = await asyncio.to_thread(
+                session_store.get_recent_session_candidates,
+                session_id,
+                limit=max(1, min(int(limit or 12) * 12, 384)),
+                days=max(0, min(int(days), 3650)),
+                platform=scope.platform,
+                bot_id=scope.bot_id,
+                query_terms=tuple(sorted(set(tokenize(normalize_text(query)))))[:8],
+            )
+        except Exception as exc:
+            logger.debug(f"[search_conversation_history] query failed: {exc}")
+            rows = []
+        from ..embedding_index import normalize_text, tokenize
+        tokens = set(tokenize(normalize_text(query)))
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for row in rows:
+            if not isinstance(row, dict) or bool(row.get("is_summary")):
+                continue
+            # Session identity is derived locally; row content is evidence only.
+            text = str(row.get("content") or "").strip()
+            overlap = len(tokens & set(tokenize(normalize_text(text))))
+            if tokens and not overlap:
+                continue
+            scored.append((overlap, row))
+        scored.sort(key=lambda pair: (-pair[0], float(pair[1].get("timestamp", 0) or 0), int(pair[1].get("id", 0) or 0)))
+        items = [{"id": int(row.get("id", 0) or 0), "time": float(row.get("timestamp", 0) or 0), "role": str(row.get("role", "") or ""), "speaker": str(row.get("speaker", "") or ""), "content": str(row.get("content", "") or "")[:600], "source": "archived_session_evidence"} for _, row in scored[:max(1, min(int(limit or 12), 32))]]
+        return _json.dumps({"query": str(query or ""), "days": int(days), "messages": items, "searched_limit": max(1, min(int(limit or 12) * 12, 384)), "truncated": len(rows) >= max(1, min(int(limit or 12) * 12, 384))}, ensure_ascii=False)
+
+    return AgentTool(
+        name="search_conversation_history",
+        description="按关键词查找当前私聊或当前群的原始、已压缩归档对话证据。默认近30天；days=0 扩展当前会话的有界归档窗口。不能查询其他用户、群或身份不明的Bot会话。",
+        parameters={"type": "object", "properties": {"query": {"type": "string", "description": "要找的事实、原话或主题"}, "days": {"type": "integer", "description": "默认30，0表示当前会话全部归档"}, "limit": {"type": "integer", "description": "返回条数，最大32"}}, "required": ["query"]},
+        handler=_handler, local=True, enabled=lambda: _memory_tools_enabled(memory_store, plugin_config),
     )
 
 

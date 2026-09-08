@@ -55,18 +55,20 @@ def add_pending_topic(
     raw_quote: str,
     time_hint_ts: float,
     now: float | None = None,
+    platform: str = "", bot_id: str = "", group_id: str = "",
 ) -> str | None:
     """添加一条 pending topic；已存在的同 topic_id 不覆盖。返回 topic_id。"""
     uid = str(user_id).strip()
     quote = str(raw_quote).strip()
     if not uid or not quote:
         return None
-    tid = _topic_id(uid, quote)
+    tid = _topic_id(f"{platform}|{bot_id}|{group_id}|{uid}" if bot_id else uid, quote)
     data = _load()
     if tid in data:
         return tid  # 幂等：已经存在不动
     data[tid] = {
         "user_id": uid,
+        "platform": platform, "bot_id": bot_id, "group_id": group_id,
         "topic": str(topic).strip(),
         "raw_quote": quote,
         "time_hint_ts": float(time_hint_ts or 0),

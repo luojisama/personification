@@ -243,6 +243,8 @@ async def _recall_agent_candidate_memories(
             scope="auto",
             user_id=user_id,
             group_id=group_id,
+            platform=str(getattr(event, "platform", "") or "onebot"),
+            bot_id=str(getattr(event, "self_id", "") or ""),
             # Broad candidate pool; the second-stage gate below owns the
             # automatic-context limit and never exposes all candidates.
             limit=24,

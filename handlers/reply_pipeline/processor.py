@@ -2287,7 +2287,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
     session_messages = session.sanitize_session_messages(session.get_session_messages(session_id))
     if is_private_session:
-        session_messages = session_messages[-_private_history_window_limit(runtime.plugin_config):]
+        summaries = [m for m in session_messages if m.get("is_summary")]
+        recent = [m for m in session_messages if not m.get("is_summary")]
+        from ...core.history_config import effective_history_message_limit
+        session_messages = summaries + recent[-effective_history_message_limit(runtime.plugin_config, private=True)[0]:]
     session_messages_for_model = (
         session_messages
         if incoming_append_metadata or (not is_private_session and len(batched_events) > 1)
@@ -2346,6 +2349,15 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             )
         return True
 
+    from ...core.memory_context import prepare_memory_context
+    prepared_memory_context = await prepare_memory_context(
+        runtime=runtime, event=event, bot=bot, messages=session_messages_for_model,
+        turn_plan=semantic_frame,
+    )
+    session_messages_for_model = prepared_memory_context.history
+    # Legacy hooks can still serve alternate entrypoints; this turn already recalled.
+    hook_ctx.prepared_memory_context = prepared_memory_context
+
     base_prompt = persona.load_prompt(str(group_id))
     if isinstance(base_prompt, dict):
         from ...core.builtin_hooks import schedule_pending_topic_extraction
@@ -2379,6 +2391,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             current_image_urls=tool_image_urls,
             media_transport_aliases=media_transport_aliases,
             prepared_visual_projection=yaml_visual_projection,
+            prepared_memory_context=prepared_memory_context,
             get_configured_api_providers=runtime.get_configured_api_providers,
             vision_caller=runtime.vision_caller,
             disable_network_hooks=disable_network_hooks,
@@ -2430,13 +2443,16 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     hook_ctx.semantic_frame = semantic_frame
     prelude_chunks = await get_hook_registry().run_all(hook_ctx, phase="system_prelude")
     context_chunks = await get_hook_registry().run_all(hook_ctx, phase="system_context")
+    from ...core.context_budget import primary_route_budget
+    memory_budget = primary_route_budget(runtime.plugin_config, runtime.logger)
     primary_api_type, primary_model = _get_primary_provider_signature(runtime)
     context_chunks = await compress_context_if_needed(
         context_chunks,
-        max_tokens=context_token_budget_for_route(primary_api_type, primary_model),
+        max_tokens=memory_budget.component_tokens,
         keep_recent=context_keep_recent_for_route(primary_api_type, primary_model),
         call_ai_api=runtime.lite_call_ai_api or runtime.call_ai_api,
     )
+    context_chunks.append(prepared_memory_context.render())
     postlude_chunks = await get_hook_registry().run_all(hook_ctx, phase="system_postlude")
     plugin_summary = ""
     if runtime.knowledge_store is not None:

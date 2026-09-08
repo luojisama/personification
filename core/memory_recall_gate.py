@@ -40,14 +40,14 @@ def _now() -> float:
     return time.time()
 
 
-def _hard_filter(item: dict[str, Any], *, now: float) -> tuple[bool, str]:
+def _hard_filter(item: dict[str, Any], *, now: float, private_owner_id: str = "") -> tuple[bool, str]:
     if not bool(item.get("supports_recall", True)):
         return False, "supports_recall=false"
     expires_at = _float(item.get("expires_at", 0), 0)
     if expires_at > 0 and expires_at <= now:
         return False, "expired"
     permission = str(item.get("permission_type") or "").strip().lower()
-    if permission in _BLOCKED_PERMISSIONS:
+    if permission in _BLOCKED_PERMISSIONS and not (permission == "private_fact" and private_owner_id and str(item.get("user_id") or "") == private_owner_id):
         return False, f"permission={permission}"
     tier = str(item.get("tier") or "").strip().lower()
     if tier in _BLOCKED_TIERS:
@@ -66,6 +66,7 @@ def _dedupe_and_rank(
     query: str,
     minimum_score: float,
     max_candidates: int,
+    private_owner_id: str = "",
     on_diagnostic: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     query_tokens = _tokens(query)
@@ -76,7 +77,7 @@ def _dedupe_and_rank(
         if not isinstance(raw, dict):
             continue
         item = dict(raw)
-        allowed, reason = _hard_filter(item, now=now)
+        allowed, reason = _hard_filter(item, now=now, private_owner_id=private_owner_id)
         if not allowed:
             if on_diagnostic is not None:
                 code = (
@@ -147,7 +148,7 @@ async def _semantic_gate(
             "score": _float(item.get("score"), 0),
             "trust": "untrusted_data_only",
         }
-        for item in candidates[:8]
+        for item in candidates[:32]
         if str(item.get("memory_id") or "").strip()
     ]
     messages = [
@@ -203,9 +204,10 @@ async def gate_memory_candidates(
     query: str,
     turn_plan: Any = None,
     tool_caller: Any = None,
-    maximum: int = 3,
+    maximum: int = 12,
     minimum_score: float = 0.72,
-    timeout_seconds: float = 1.5,
+    timeout_seconds: float = 5.0,
+    private_owner_id: str = "",
     on_diagnostic: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Return at most ``maximum`` safe automatic-context memory records."""
@@ -214,18 +216,19 @@ async def gate_memory_candidates(
         list(candidates or []),
         query=query,
         minimum_score=max(0.0, min(1.0, float(minimum_score))),
-        max_candidates=24,
+        max_candidates=32,
+        private_owner_id=private_owner_id,
         on_diagnostic=on_diagnostic,
     )
     kept = await _semantic_gate(
-        candidates=ranked[:8],
+        candidates=ranked[:32],
         query=query,
         turn_plan=turn_plan,
         tool_caller=tool_caller,
         timeout_seconds=timeout_seconds,
         on_diagnostic=on_diagnostic,
     )
-    return kept[: max(0, min(3, int(maximum or 0)))]
+    return kept[: max(0, min(32, int(maximum or 0)))]
 
 
 __all__ = ["gate_memory_candidates"]

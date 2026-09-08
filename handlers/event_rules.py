@@ -558,6 +558,10 @@ def resolve_record_message(
         sender_role=extract_sender_role(event),
         image_count=image_count,
         visual_summary=visual_summary,
+        # This is provenance of the inbound adapter event, not a claim made by
+        # message content.  It scopes archive retrieval for multi-bot groups.
+        platform=str(getattr(event, "platform", "") or "onebot").strip() or "onebot",
+        bot_id=self_id or "unknown",
         **relation_metadata,
     )
     if source_kind != "user":

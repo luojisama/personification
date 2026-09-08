@@ -186,6 +186,7 @@ export interface TraceStage {
   summary: string;
   detail_code: string;
   remaining_ms: number | null;
+  context_diagnostic?: Record<string, string | number> | null;
 }
 
 export interface TraceToolStep {
@@ -479,6 +480,7 @@ export interface ConfigPage extends Page<ConfigListItem> {
   groups: string[];
   group_counts: Record<string, number>;
   modified_counts: Record<string, number>;
+  compatibility_warnings?: Array<{ code: string; title: string; message: string }>;
 }
 
 export interface ConfigMetadata {

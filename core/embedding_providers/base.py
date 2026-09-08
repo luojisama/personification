@@ -15,7 +15,13 @@ class EmbeddingProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+    async def embed_batch(self, texts: list[str], *, task: str = "document") -> list[list[float]]:
+        """Embed text remotely for either stored documents or a retrieval query.
+
+        ``task`` is deliberately part of the provider contract.  Providers that
+        do not expose task types may ignore it, but callers must never silently
+        use a chat completion model as an embedding endpoint.
+        """
         raise NotImplementedError
 
 

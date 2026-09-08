@@ -79,6 +79,7 @@ class ConfigEntriesResponse(BaseModel):
     entries: list[ConfigEntryView]
     groups: list[str]
     removed_provider_routes: list[dict[str, Any]] = Field(default_factory=list)
+    compatibility_warnings: list[dict[str, str]] = Field(default_factory=list)
 
 
 class ConfigUpdateRequest(BaseModel):

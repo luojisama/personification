@@ -57,7 +57,7 @@ async def recall_memory(
         if request_scope.context_type == "group"
         else request_scope.actor_recall_kwargs()
     )
-    memories = store.recall_memories(
+    memories = await store.arecall_memories(
         query=str(query or ""),
         scope=str(scope or "auto"),
         **recall_kwargs,

@@ -118,6 +118,26 @@ describe("MemoryPages.vue", () => {
     expect(resources.rebuildMemoryIndex).not.toHaveBeenCalled();
   });
 
+  it("renders API embedding status as unverified instead of healthy connectivity", async () => {
+    vi.mocked(resources.memoryBusiness).mockResolvedValue({
+      status: "ready", document_count: 42, diagnostic_code: "vector_index_ready",
+      embedding: {
+        enabled: true, state: "ready", connectivity_state: "unknown",
+        indexed: 18, total: 20, pending: 2, rebuilding: true,
+        provider: "OpenAIEmbeddingProvider", model: "text-embedding-3-small",
+        dimension: 1536, diagnostic_code: "embedding_status_observed",
+      },
+    });
+    await router.push("/persona/memories/vector-index");
+    await router.isReady();
+    const wrapper = mount(MemoryPages, { global: { plugins: [router, [VueQueryPlugin, { queryClient }]] } });
+    await flushPromises();
+    expect(wrapper.text()).toContain("Embedding API 索引状态");
+    expect(wrapper.text()).toContain("未核验");
+    expect(wrapper.text()).toContain("18 / 20");
+    expect(wrapper.text()).toContain("text-embedding-3-small");
+  });
+
   it("点击 v2 宫殿分区后，缺少后端 entries 时明确展示空态而不伪造条目", async () => {
     vi.mocked(resources.memoryBusiness).mockResolvedValue({
       schema_version: 2,

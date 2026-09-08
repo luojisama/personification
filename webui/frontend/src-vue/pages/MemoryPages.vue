@@ -321,6 +321,28 @@
           </div>
         </dl>
 
+        <section class="memory-embedding-status" aria-labelledby="embedding-status-title">
+          <h3 id="embedding-status-title">Embedding API 索引状态</h3>
+          <p class="muted">这是本地索引与队列观察结果，不会主动请求 Provider，因此“未核验”不表示连接正常。</p>
+          <dl class="detail-list">
+            <div>
+              <dt>运行状态</dt>
+              <dd><StateBadge :tone="embeddingTone"><span :title="embeddingState">{{ embeddingStateLabel }}</span></StateBadge></dd>
+            </div>
+            <div>
+              <dt>连通性</dt>
+              <dd><StateBadge :tone="embeddingConnectivityTone"><span :title="embeddingConnectivity">{{ embeddingConnectivityLabel }}</span></StateBadge></dd>
+            </div>
+            <div><dt>已索引 / 可召回</dt><dd>{{ embeddingIndexed }} / {{ embeddingTotal }}</dd></div>
+            <div><dt>待处理</dt><dd>{{ embeddingPending }}</dd></div>
+            <div><dt>重建中</dt><dd>{{ embeddingRebuilding ? '是' : '否' }}</dd></div>
+            <div v-if="embeddingProvider"><dt>Provider</dt><dd>{{ embeddingProvider }}</dd></div>
+            <div v-if="embeddingModel"><dt>模型</dt><dd><code>{{ embeddingModel }}</code></dd></div>
+            <div v-if="embeddingDimension"><dt>向量维度</dt><dd>{{ embeddingDimension }}</dd></div>
+            <div><dt>诊断代码</dt><dd><code>{{ embeddingDiagnosticCode }}</code></dd></div>
+          </dl>
+        </section>
+
         <div v-if="rebuildFeedback" class="rebuild-banner" :class="{ 'banner-success': rebuildSuccess }">
           <p>{{ rebuildFeedback }}</p>
         </div>
@@ -477,6 +499,21 @@ const businessQuery = useQuery<RecordObj>({
 });
 
 const businessRecord = computed(() => asRecord(businessQuery.data.value));
+const embeddingRecord = computed(() => asRecord(businessRecord.value.embedding));
+const embeddingState = computed(() => textAt(embeddingRecord.value, "state") || "unknown");
+const embeddingConnectivity = computed(() => textAt(embeddingRecord.value, "connectivity_state") || "unknown");
+const embeddingIndexed = computed(() => textAt(embeddingRecord.value, "indexed") || "0");
+const embeddingTotal = computed(() => textAt(embeddingRecord.value, "total") || "0");
+const embeddingPending = computed(() => textAt(embeddingRecord.value, "pending") || "0");
+const embeddingRebuilding = computed(() => Boolean(embeddingRecord.value.rebuilding));
+const embeddingProvider = computed(() => textAt(embeddingRecord.value, "provider"));
+const embeddingModel = computed(() => textAt(embeddingRecord.value, "model"));
+const embeddingDimension = computed(() => textAt(embeddingRecord.value, "dimension"));
+const embeddingDiagnosticCode = computed(() => textAt(embeddingRecord.value, "diagnostic_code") || "embedding_status_unavailable");
+const embeddingStateLabel = computed(() => (({ ready: "索引就绪", rebuilding: "重建中", degraded: "有告警", disabled: "未启用", unknown: "状态未知" } as Record<string, string>)[embeddingState.value] || `未知状态（${embeddingState.value}）`));
+const embeddingConnectivityLabel = computed(() => (({ unknown: "未核验", not_applicable: "不适用" } as Record<string, string>)[embeddingConnectivity.value] || `未知状态（${embeddingConnectivity.value}）`));
+const embeddingTone = computed(() => embeddingState.value === "ready" ? "ok" : embeddingState.value === "degraded" ? "warn" : "unknown");
+const embeddingConnectivityTone = computed(() => embeddingConnectivity.value === "not_applicable" ? "warn" : "unknown");
 const graphNodes = computed(() => (Array.isArray(businessRecord.value.nodes) ? (businessRecord.value.nodes as RecordObj[]) : []));
 const graphEdges = computed(() => (Array.isArray(businessRecord.value.edges) ? (businessRecord.value.edges as RecordObj[]) : []));
 const palaceZones = computed(() => (Array.isArray(businessRecord.value.zones) ? (businessRecord.value.zones as RecordObj[]) : Array.isArray(businessRecord.value.items) ? (businessRecord.value.items as RecordObj[]) : []));

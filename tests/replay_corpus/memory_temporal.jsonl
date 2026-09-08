@@ -1,0 +1,3 @@
+{"id":"next_day_holiday","current":"早上好","history":"用户：今天下午培训结束，休假六天。助手：再坚持半天。","time_fix":"当前时间2026-09-08 07:20+08:00。2026-09-07 11:00用户：今天下午培训结束，休假六天。2026-09-07 11:01助手：再坚持半天。","retrieval":"依据昨天的计划，现在应已进入假期；尚未确认是否回家。","expanded_context":"2026-09-08 07:19用户补充：培训昨天结束了，今天是休假第一天。","expected_contains":["假"]}
+{"id":"cancelled_plan","current":"我今天怎么安排好呢","history":"用户：周三去面试。用户：对方临时取消了，不去面试。","time_fix":"当前周三。周一用户：周三去面试。周二用户：对方临时取消了，不去面试。","retrieval":"当前面试安排已取消，新信息替代周一计划。","expanded_context":"用户：我希望今天休息一下。","expected_contains":["休息"]}
+{"id":"planned_not_confirmed","current":"你知道我现在到哪里了吗","history":"用户：明天下午出发去海边。","time_fix":"当前周四晚上。周三用户：明天下午出发去海边。","retrieval":"只有出行计划，没有实际出发、到达或位置确认。","expanded_context":"用户没有报告实际位置。","expected_contains":[]}

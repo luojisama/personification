@@ -674,6 +674,7 @@ async def process_yaml_response_logic(
     solo_speaker_follow: bool = False,
     reply_required: bool = False,
     response_deadline: float | None = None,
+    prepared_memory_context: Any = None,
     prepared_inner_state: dict[str, Any] | None = None,
     prepared_emotion_state: dict[str, Any] | None = None,
     turn_media_context: List[Dict[str, Any]] | None = None,
@@ -955,34 +956,10 @@ async def process_yaml_response_logic(
         except Exception as e:
             logger.warning(f"拟人插件：提取转发消息内容失败: {e}")
 
-    history_new_text = ""
+    from ...core.memory_context import render_history, TEMPORAL_POLICY
     recent_msgs = chat_history[:-1] if len(chat_history) > 1 else []
-    for msg in recent_msgs:
-        role = msg["role"]
-        content = msg["content"]
-        text_content = ""
-        if isinstance(content, list):
-            for item in content:
-                if item["type"] == "text":
-                    text_content += item["text"]
-                elif item["type"] == "image_url":
-                    if "[图片" not in text_content:
-                        text_content += "[图片]"
-        else:
-            text_content = str(content)
+    history_new_text = render_history(recent_msgs)
 
-        if role == "user":
-            is_direct = msg.get("is_direct", True)
-            if is_direct:
-                history_new_text += f"{text_content}\n"
-            else:
-                history_new_text += f"{text_content}（群员间对话，非对你说）\n"
-        elif role == "assistant":
-            clean_content = re.sub(r" \[发送了表情包:.*?\]", "", text_content)
-            history_new_text += f"[我]: {clean_content}\n"
-
-    if not history_new_text:
-        history_new_text = "(无最近消息)"
 
     # Render the exact same bounded/untrusted envelope as normal replies.
     # YAML owns no second hand-written batch format.
@@ -1520,6 +1497,7 @@ async def process_yaml_response_logic(
         max_facts=self_continuity_max_facts,
     )
     system_prompt = prompt_config.get("system", "")
+    system_prompt += "\n\n" + (prepared_memory_context.render() if prepared_memory_context is not None else TEMPORAL_POLICY)
     if self_continuity_enabled:
         self_continuity_prompt = render_self_continuity_prompt(self_continuity_snapshot)
         if self_continuity_prompt:
@@ -1678,13 +1656,21 @@ async def process_yaml_response_logic(
     system_prompt = system_prompt.replace("{system_schedule_instruction}", system_schedule_instruction)
 
     input_template = prompt_config.get("input", "")
+    from ...core.context_budget import primary_route_budget, fit_history_to_budget
+    if bool(getattr(plugin_config, "personification_context_budget_enabled", True)):
+        recent_msgs, history_budget_diagnostic = fit_history_to_budget(
+            recent_msgs, fixed_messages=[{"role": "system", "content": system_prompt},
+                {"role": "user", "content": input_template + history_last_text}],
+            budget=primary_route_budget(plugin_config, logger),
+        )
+        history_new_text = render_history(recent_msgs)
     input_text = input_template.replace("{trigger_reason}", trigger_reason)
     input_text = input_text.replace("{time}", current_time_str)
     input_text = input_text.replace("{history_new}", history_new_text)
     input_text = input_text.replace("{history_last}", history_last_text)
     input_text = input_text.replace("{status}", current_status)
     input_text = input_text.replace("{schedule_instruction}", schedule_instruction)
-    input_text = input_text.replace("{long_memory('guild')}", "(暂无长期记忆)")
+    input_text = input_text.replace("{long_memory('guild')}", "记忆已在共享上下文中提供" if prepared_memory_context is not None else "本轮未准备共享记忆")
 
     topic_hint = ""
     if not is_private_session:
@@ -1848,6 +1834,14 @@ async def process_yaml_response_logic(
         {"role": "system", "content": agent_system_prompt},
         {"role": "user", "content": agent_user_content},
     ]
+    # Trusted in-process projection metadata lets a smaller fallback route re-fit
+    # the history before serializing the flattened YAML user request.
+    for request_messages in (messages, agent_messages):
+        request_messages[-1].update(
+            _context_history=list(recent_msgs),
+            _context_history_rendered=history_new_text,
+            _context_history_renderer=render_history,
+        )
     used_agent = False
     agent_result: Any = None
     reply_content = ""

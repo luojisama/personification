@@ -61,6 +61,9 @@
 
         <div class="config-main">
           <Panel eyebrow="FILTER / CONFIG REGISTRY" title="快速筛选">
+            <div v-for="warning in configQuery.data.value?.compatibility_warnings ?? []" :key="warning.code" class="empty-notice" role="status">
+              <strong>{{ warning.title }}：</strong>{{ warning.message }}
+            </div>
             <div class="config-search-row">
               <TextField
                 v-model="searchInput"

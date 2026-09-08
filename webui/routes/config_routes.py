@@ -887,10 +887,33 @@ def build_config_router(*, runtime) -> APIRouter:
         groups = sorted({view.group for view in entries})
         from ...core.provider_router import detect_removed_provider_routes
 
+        # New long-context limits deliberately coexist with legacy limits.
+        # We must not infer that an old explicit value is safe to overwrite,
+        # even if it happens to equal an old default.  Surface that boundary to
+        # the administrator instead of silently changing retained history.
+        compatibility_warnings: list[dict[str, str]] = []
+        legacy_fields = (
+            "personification_history_len",
+            "personification_private_history_turns",
+            "personification_message_expire_hours",
+            "personification_group_context_expire_hours",
+        )
+        explicit = set(getattr(runtime.plugin_config, "__pydantic_fields_set__", set()) or set())
+        managed_info = getattr(runtime.plugin_config, "_personification_env_config_info", {})
+        persisted = set(managed_info.get("applied_fields", []) if isinstance(managed_info, dict) else [])
+        active_legacy = [field for field in legacy_fields if field in explicit or field in persisted]
+        if active_legacy:
+            compatibility_warnings.append({
+                "code": "legacy_history_limits_may_apply",
+                "title": "检测到旧版历史限制",
+                "message": "已保留显式旧配置，未自动覆盖；运行路径未完全迁移时它们仍可能限制长上下文。请核对新旧设置后手动调整。",
+            })
+
         return ConfigEntriesResponse(
             entries=entries,
             groups=groups,
             removed_provider_routes=detect_removed_provider_routes(runtime.plugin_config),
+            compatibility_warnings=compatibility_warnings,
         )
 
     @router.get("/recommended-defaults")

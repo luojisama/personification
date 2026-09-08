@@ -366,6 +366,10 @@ def parse_api_pool_config(raw_config: Any, logger: Any = None) -> List[Dict[str,
             "priority": _to_int(item.get("priority", index), index),
             "timeout": _provider_timeout({**item, "api_type": api_type}),
             "max_retries": _provider_max_retries(item),
+            "context_window_tokens": max(0, _to_int(item.get("context_window_tokens", 0), 0)),
+            "max_input_tokens": max(0, _to_int(item.get("max_input_tokens", 0), 0)),
+            "max_output_tokens": max(0, _to_int(item.get("max_output_tokens", 0), 0)),
+            "input_token_limit": max(0, _to_int(item.get("input_token_limit", 0), 0)),
             "supports_native_search": _to_bool(
                 item.get(
                     "supports_native_search",
@@ -471,10 +475,28 @@ def load_api_pool_config(plugin_config: Any, logger: Any) -> List[Dict[str, Any]
     return providers
 
 
+def _decorate_context_budget_config(providers: List[Dict[str, Any]], plugin_config: Any) -> None:
+    """Attach global budget switches without overwriting per-route limits."""
+    enabled = _to_bool(getattr(plugin_config, "personification_context_budget_enabled", True), True)
+    try:
+        input_ratio = float(getattr(plugin_config, "personification_context_input_ratio", 0.50) or 0.50)
+    except (TypeError, ValueError):
+        input_ratio = 0.50
+    try:
+        margin_ratio = float(getattr(plugin_config, "personification_context_safety_margin_ratio", 0.05) or 0.05)
+    except (TypeError, ValueError):
+        margin_ratio = 0.05
+    for provider in providers:
+        provider["context_budget_enabled"] = enabled
+        provider["context_input_ratio"] = input_ratio
+        provider["context_safety_margin_ratio"] = margin_ratio
+
+
 def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[str, Any]]:
     _log_removed_provider_routes(logger, detect_removed_provider_routes(plugin_config))
     providers = load_api_pool_config(plugin_config, logger)
     if providers:
+        _decorate_context_budget_config(providers, plugin_config)
         _log_active_provider_config_once(
             logger=logger,
             source="personification_api_pools",
@@ -531,6 +553,7 @@ def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[s
             source="personification_api_*",
             providers=providers,
         )
+        _decorate_context_budget_config(providers, plugin_config)
         return providers
 
     api_url = str(getattr(plugin_config, "personification_api_url", "") or "").strip()
@@ -566,6 +589,7 @@ def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[s
         source="personification_api_*",
         providers=providers,
     )
+    _decorate_context_budget_config(providers, plugin_config)
     return providers
 
 

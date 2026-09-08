@@ -13,7 +13,7 @@ class HashBowEmbeddingProvider(EmbeddingProvider):
     def dim(self) -> int:
         return EMBED_DIM
 
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+    async def embed_batch(self, texts: list[str], *, task: str = "document") -> list[list[float]]:
         return [embed_text(text) for text in list(texts or [])]
 
 

@@ -9,7 +9,17 @@ from .core.memory_defaults import (
     DEFAULT_GROUP_CONTEXT_EXPIRE_HOURS,
     DEFAULT_GROUP_SUMMARY_EXPIRE_HOURS,
     DEFAULT_HISTORY_LEN,
+    DEFAULT_CONTEXT_INPUT_RATIO,
+    DEFAULT_CONTEXT_SAFETY_MARGIN_RATIO,
+    DEFAULT_GROUP_HISTORY_DAYS,
+    DEFAULT_GROUP_HISTORY_MAX_MESSAGES,
+    DEFAULT_MEMORY_AUTO_RECALL_CANDIDATE_LIMIT,
+    DEFAULT_MEMORY_AUTO_RECALL_INJECT_LIMIT,
+    DEFAULT_MEMORY_AUTO_RECALL_TIMEOUT_SECONDS,
+    DEFAULT_MEMORY_RETRIEVAL_DAYS,
     DEFAULT_MEMORY_RECALL_TOP_K,
+    DEFAULT_PRIVATE_HISTORY_DAYS,
+    DEFAULT_PRIVATE_HISTORY_MAX_MESSAGES,
     DEFAULT_MESSAGE_EXPIRE_HOURS,
     DEFAULT_PERSONA_HISTORY_MAX,
     DEFAULT_PRIVATE_HISTORY_TURNS,
@@ -251,6 +261,22 @@ class Config(BaseModel):
     personification_memory_vector_backend: str = "sqlite_exact"
     personification_memory_rag_enabled: bool = True
     personification_memory_rag_candidate_limit: int = 80
+    # Long-context memory is independently reversible.  It does not alter an
+    # existing operator's legacy history/expiry values during configuration
+    # load; the runtime decides when the new bounds are enabled.
+    personification_memory_context_enabled: bool = True
+    personification_context_budget_enabled: bool = True
+    personification_private_history_days: int = DEFAULT_PRIVATE_HISTORY_DAYS
+    personification_private_history_max_messages: int = DEFAULT_PRIVATE_HISTORY_MAX_MESSAGES
+    personification_group_history_days: int = DEFAULT_GROUP_HISTORY_DAYS
+    personification_group_history_max_messages: int = DEFAULT_GROUP_HISTORY_MAX_MESSAGES
+    personification_memory_retrieval_days: int = DEFAULT_MEMORY_RETRIEVAL_DAYS
+    personification_memory_auto_recall_timeout_seconds: float = DEFAULT_MEMORY_AUTO_RECALL_TIMEOUT_SECONDS
+    personification_memory_auto_recall_candidate_limit: int = DEFAULT_MEMORY_AUTO_RECALL_CANDIDATE_LIMIT
+    personification_memory_auto_recall_inject_limit: int = DEFAULT_MEMORY_AUTO_RECALL_INJECT_LIMIT
+    personification_session_compress_token_threshold: int = 0
+    personification_context_input_ratio: float = DEFAULT_CONTEXT_INPUT_RATIO
+    personification_context_safety_margin_ratio: float = DEFAULT_CONTEXT_SAFETY_MARGIN_RATIO
     personification_memory_decay_enabled: bool = True
     personification_memory_consolidation_enabled: bool = True
     personification_memory_recall_top_k: int = DEFAULT_MEMORY_RECALL_TOP_K

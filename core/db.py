@@ -65,6 +65,8 @@ DDL_STATEMENTS = (
         thread_id        TEXT NOT NULL DEFAULT '',
         source_kind      TEXT NOT NULL DEFAULT 'user',
         sender_role      TEXT NOT NULL DEFAULT '',
+        platform         TEXT NOT NULL DEFAULT 'unknown',
+        bot_id           TEXT NOT NULL DEFAULT 'unknown',
         timestamp   REAL    NOT NULL
     )
     """,
@@ -75,6 +77,10 @@ DDL_STATEMENTS = (
     """
     CREATE INDEX IF NOT EXISTS idx_group_messages_thread
         ON group_messages(group_id, thread_id, timestamp)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_group_messages_identity
+        ON group_messages(group_id, platform, bot_id, timestamp, id)
     """,
     """
     CREATE TABLE IF NOT EXISTS conversation_threads (
@@ -853,6 +859,14 @@ def _ensure_group_message_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE group_messages ADD COLUMN sender_role TEXT NOT NULL DEFAULT ''")
     if "thread_id" not in columns:
         conn.execute("ALTER TABLE group_messages ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''")
+    if "platform" not in columns:
+        conn.execute("ALTER TABLE group_messages ADD COLUMN platform TEXT NOT NULL DEFAULT 'unknown'")
+    if "bot_id" not in columns:
+        conn.execute("ALTER TABLE group_messages ADD COLUMN bot_id TEXT NOT NULL DEFAULT 'unknown'")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_group_messages_identity "
+        "ON group_messages(group_id, platform, bot_id, timestamp, id)"
+    )
 
 
 def _ensure_mcp_tool_policy_schema(conn: sqlite3.Connection) -> None:

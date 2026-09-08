@@ -211,6 +211,8 @@ async def _user_persona_hook(ctx: HookContext) -> Optional[str]:
 
 
 async def _private_memory_recall_hook(ctx: HookContext) -> Optional[str]:
+    if getattr(ctx, "prepared_memory_context", None) is not None:
+        return None
     if not ctx.is_private:
         return None
     memory_store = getattr(ctx.runtime, "memory_store", None)
@@ -631,6 +633,9 @@ async def schedule_pending_topic_extraction(ctx: HookContext) -> Optional[str]:
                 topic=result["topic"],
                 raw_quote=result["raw_quote"],
                 time_hint_ts=result["time_hint_ts"],
+                platform=str(getattr(ctx.event, "platform", "") or "onebot"),
+                bot_id=str(getattr(ctx.bot, "self_id", "") or ""),
+                group_id="",
             )
             if tid:
                 logger.info(

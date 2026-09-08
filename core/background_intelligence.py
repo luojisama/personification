@@ -95,6 +95,8 @@ class BackgroundIntelligence:
             "crystals_updated": 0,
             "migrator_checked": False,
             "repaired": True,
+            "embedding_indexed": 0,
+            "embedding_failed": 0,
         }
         try:
             if bool(getattr(self.plugin_config, "personification_memory_decay_enabled", True)):
@@ -121,6 +123,17 @@ class BackgroundIntelligence:
             await asyncio.to_thread(self.memory_store.initialize)
         except Exception as exc:
             self._log_warning(f"[background_intelligence] repair initialize failed: {exc}")
+            result["status"] = "partial"
+        try:
+            embedding_result = await self.memory_store.aindex_pending_embeddings(
+                limit=max(1, min(128, int(getattr(self.plugin_config, "personification_embedding_batch_size", 32) or 32)))
+            )
+            result["embedding_indexed"] = int(embedding_result.get("indexed", 0) or 0)
+            result["embedding_failed"] = int(embedding_result.get("failed", 0) or 0)
+            if result["embedding_failed"]:
+                result["status"] = "partial"
+        except Exception as exc:
+            self._log_warning(f"[background_intelligence] embedding index failed: {exc}")
             result["status"] = "partial"
         if self.migrator_factory is not None:
             try:

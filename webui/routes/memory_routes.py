@@ -94,6 +94,44 @@ _PALACE_ZONE_META: dict[str, tuple[str, str]] = {
 _CUSTOM_PALACE_ZONE_META = ("自定义分区", "未注册的历史或自定义分区。")
 _PALACE_CAPACITY_DIAGNOSTIC = "memory_zone_capacity_not_configured"
 
+_EMBEDDING_ERROR_CODES = frozenset({"", "disabled", "api_failed", "index_unavailable", "misconfigured"})
+
+
+def _safe_embedding_status(store: Any) -> dict[str, Any]:
+    """Project API-embedding state without credentials, endpoint or raw errors.
+
+    This is an observation rather than a health probe: a configured API stays
+    ``unknown`` until a separate operation produces connectivity evidence.
+    """
+    getter = getattr(store, "embedding_status", None)
+    if not callable(getter):
+        return {"available": False, "state": "unknown", "connectivity_state": "unknown", "diagnostic_code": "embedding_status_unavailable"}
+    try:
+        raw = getter()
+    except Exception:
+        return {"available": False, "state": "unknown", "connectivity_state": "unknown", "diagnostic_code": "embedding_status_unavailable"}
+    raw = raw if isinstance(raw, dict) else {}
+    error_code = str(raw.get("error_code") or "")
+    if error_code not in _EMBEDDING_ERROR_CODES:
+        error_code = "index_unavailable"
+    enabled = bool(raw.get("enabled"))
+    state = ("degraded" if error_code and error_code != "disabled" else "disabled" if not enabled
+             else "rebuilding" if raw.get("rebuilding") else "ready" if _safe_nonnegative_int(raw.get("indexed")) else "unknown")
+    return {
+        "available": True,
+        "enabled": enabled,
+        "state": state,
+        "connectivity_state": "not_applicable" if not enabled else "unknown",
+        "provider": str(raw.get("provider") or "")[:80],
+        "model": str(raw.get("model") or "")[:160],
+        "dimension": _safe_nonnegative_int(raw.get("dimension")),
+        "indexed": _safe_nonnegative_int(raw.get("indexed")),
+        "total": _safe_nonnegative_int(raw.get("total")),
+        "pending": _safe_nonnegative_int(raw.get("pending")),
+        "rebuilding": bool(raw.get("rebuilding")),
+        "diagnostic_code": error_code or "embedding_status_observed",
+    }
+
 
 def _safe_nonnegative_int(value: Any) -> int:
     try:
@@ -368,7 +406,8 @@ def build_memory_router(*, runtime) -> APIRouter:
         if store is None:
             return {"available": False, "reason": "memory_store_missing"}
         try:
-            return {"available": True, **dict(store.get_vector_index_status())}
+            vector_status = dict(store.get_vector_index_status())
+            return {"available": True, **vector_status, "embedding": _safe_embedding_status(store)}
         except Exception as exc:
             report = _exception_report(
                 exc,
@@ -392,7 +431,11 @@ def build_memory_router(*, runtime) -> APIRouter:
         if store is None:
             _raise_operation(503, _store_unavailable_report(operation_id=operation_id, mutation=True))
         try:
-            result = dict(store.rebuild_vector_index(limit=int(limit or 0)))
+            async_rebuild = getattr(store, "arebuild_vector_index", None)
+            if callable(async_rebuild):
+                result = dict(await async_rebuild(limit=int(limit or 0)))
+            else:
+                result = dict(store.rebuild_vector_index(limit=int(limit or 0)))
             verified_index = dict(store.get_vector_index_status())
         except Exception as exc:
             report = _exception_report(
@@ -415,7 +458,8 @@ def build_memory_router(*, runtime) -> APIRouter:
             )
             _raise_operation(500, report)
         result["index"] = verified_index
-        rebuilt = int(result.get("rebuilt", 0) or 0)
+        result["embedding"] = _safe_embedding_status(store)
+        rebuilt = int(result.get("rebuilt", result.get("indexed", 0)) or 0)
         disabled = str(result.get("status", "") or "").lower() == "disabled"
         report = operation_diagnostic(
             ok=True,

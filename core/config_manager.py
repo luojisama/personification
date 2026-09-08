@@ -100,6 +100,11 @@ def _new_load_info(path: Path) -> dict[str, Any]:
         "skipped_fields": [],
         "errors": [],
         "loaded": False,
+        # Set before env.json assignment.  Pydantic records setattr fields,
+        # so reading __pydantic_fields_set__ after load is not provenance.
+        "pre_load_explicit_fields": [],
+        "provenance_fields": [],
+        "provenance_unknown": False,
     }
 
 
@@ -139,6 +144,7 @@ class ConfigManager:
         self.plugin_config = plugin_config
         self.logger = logger
         self.path = get_env_config_path(plugin_config)
+        self.provenance_path = self.path.with_name(self.path.name + ".provenance.json")
         self._async_lock = _get_async_lock(self.path)
         self._sync_lock = _get_sync_lock(self.path)
 
@@ -154,11 +160,17 @@ class ConfigManager:
     async def update(self, updates: Mapping[str, Any]) -> None:
         async with self._async_lock:
             with self._sync_lock:
+                had_provenance = self._read_provenance_unlocked() is not None
+                had_payload = self.path.exists()
                 payload = self._managed_payload()
                 for field_name, value in dict(updates or {}).items():
                     if field_name in payload:
                         payload[field_name] = value
                 _write_payload_atomic(self.path, payload)
+                self._write_provenance_unlocked(
+                    set(dict(updates or {})),
+                    legacy_snapshot_unknown=not had_provenance and had_payload,
+                )
                 for field_name, value in payload.items():
                     try:
                         setattr(self.plugin_config, field_name, value)
@@ -178,10 +190,42 @@ class ConfigManager:
             for field_name in _managed_field_names()
         }
 
+    def _read_provenance_payload_unlocked(self) -> dict[str, Any] | None:
+        if not self.provenance_path.exists():
+            return None
+        try:
+            raw = json.loads(self.provenance_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        return raw if isinstance(raw, dict) else None
+
+    def _read_provenance_unlocked(self) -> set[str] | None:
+        raw = self._read_provenance_payload_unlocked()
+        fields = raw.get("user_fields") if isinstance(raw, dict) else None
+        if not isinstance(fields, list):
+            return None
+        return {str(field) for field in fields if str(field).startswith("personification_")}
+
+    def _write_provenance_unlocked(self, changed_fields: set[str] | None = None, *, legacy_snapshot_unknown: bool = False) -> None:
+        existing = self._read_provenance_unlocked() or set()
+        existing_payload = self._read_provenance_payload_unlocked() or {}
+        fields = existing | {str(field) for field in (changed_fields or set()) if str(field).startswith("personification_")}
+        _write_payload_atomic(self.provenance_path, {
+            "schema_version": 1,
+            "user_fields": sorted(fields),
+            "legacy_snapshot_unknown": bool(legacy_snapshot_unknown or existing_payload.get("legacy_snapshot_unknown")),
+        })
+
     def _save_unlocked(self) -> None:
         payload = self._managed_payload()
+        had_payload = self.path.exists()
+        had_provenance = self._read_provenance_unlocked() is not None
         try:
             _write_payload_atomic(self.path, payload)
+            info = get_env_config_load_info(self.plugin_config)
+            initial = set(info.get("pre_load_explicit_fields", []) if isinstance(info, dict) else [])
+            # Do not erase uncertainty when saving an old full snapshot.
+            self._write_provenance_unlocked(initial, legacy_snapshot_unknown=not had_provenance and had_payload)
         except Exception as exc:
             if self.logger is not None:
                 self.logger.warning(f"personification: save env config failed path={self.path}: {exc}")
@@ -189,6 +233,13 @@ class ConfigManager:
 
     def _load_unlocked(self) -> None:
         info = _new_load_info(self.path)
+        pre_load_explicit = _collect_explicit_env_fields(self.plugin_config)
+        info["pre_load_explicit_fields"] = sorted(pre_load_explicit)
+        provenance = self._read_provenance_unlocked()
+        if provenance is not None:
+            info["provenance_fields"] = sorted(provenance)
+            provenance_payload = self._read_provenance_payload_unlocked() or {}
+            info["provenance_unknown"] = bool(provenance_payload.get("legacy_snapshot_unknown"))
         had_file = self.path.exists()
         payload: dict[str, Any] = {}
         if not had_file:
@@ -217,7 +268,7 @@ class ConfigManager:
         for field_name in removed_fields:
             payload.pop(field_name, None)
         imported_fields: list[str] = []
-        for field_name in sorted(_collect_explicit_env_fields(self.plugin_config)):
+        for field_name in sorted(pre_load_explicit):
             if field_name not in managed_fields or field_name in payload:
                 continue
             if not hasattr(self.plugin_config, field_name):
@@ -228,6 +279,7 @@ class ConfigManager:
         if imported_fields or removed_fields:
             try:
                 _write_payload_atomic(self.path, payload)
+                self._write_provenance_unlocked(set(imported_fields) | set(pre_load_explicit), legacy_snapshot_unknown=False)
             except Exception as exc:
                 info["errors"].append(f"managed config migration save failed: {exc}")
                 if self.logger is not None:
@@ -238,6 +290,12 @@ class ConfigManager:
         if not had_file and not imported_fields:
             _set_env_config_info(self.plugin_config, info)
             return
+
+        # A pre-provenance full snapshot cannot reveal which legacy settings
+        # were chosen.  Preserve it conservatively and make the uncertainty
+        # visible; do not infer intent from equal-to-default values.
+        if had_file and provenance is None:
+            info["provenance_unknown"] = True
 
         for field_name in _managed_field_names():
             if field_name not in payload:
