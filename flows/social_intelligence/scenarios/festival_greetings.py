@@ -16,6 +16,7 @@ from ..framework import SocialContext, dispatch_social_outbound, run_social_text
 from ..gate import gate_should_send
 from ..quota import is_quota_exceeded, mark_sent
 from ....core.visible_output import guard_visible_text
+from ....core.social_decision import SocialDecision, scheduled_event_id
 
 _SCENARIO = "festival_greeting"
 
@@ -186,9 +187,10 @@ async def _try_send(
     persona_max = max(
         20, int(getattr(ctx.plugin_config, "personification_persona_snippet_max_chars", 150) or 150)
     )
-    draft = await _generate(ctx, snippet[:persona_max], occasion_label)
+    draft = await _generate(ctx, bot, uid, snippet[:persona_max], occasion_label)
     if not draft:
         return False
+    social_decision = None
     if gate_enabled:
         allow, _rewritten, reason = await gate_should_send(
             tool_caller=ctx.tool_caller,
@@ -201,10 +203,15 @@ async def _try_send(
             draft=draft,
             persona_snippet=snippet[:persona_max],
             now_str=_now_str(ctx),
+            memory_scope={"platform": "onebot", "bot_id": str(getattr(bot, "self_id", "") or ""), "user_id": str(uid), "group_id": ""},
         )
         if not allow:
             ctx.logger.info(f"[social/festival] gate denied uid={uid}: {reason}")
             return False
+        social_decision = SocialDecision(
+            action="contact", target_id=uid, content=draft, motivation=reason or occasion_label,
+            source_event_ids=(scheduled_event_id(scenario=scenario, period=_now_str(ctx)[:10], target_id=uid, detail=occasion_label),),
+        )
     final_text = draft
     final_text = guard_visible_text(
         final_text, logger=ctx.logger, surface="social_festival_greeting", allow_direct_media=False
@@ -220,6 +227,7 @@ async def _try_send(
             surface="social_festival_greeting",
             content=final_text,
             user_target=uid,
+            social_decision=social_decision,
         )
     except Exception as exc:
         ctx.logger.warning(f"[social/festival] send {uid} failed: {exc}")
@@ -232,7 +240,7 @@ async def _try_send(
     return True
 
 
-async def _generate(ctx: SocialContext, snippet: str, occasion_label: str) -> str:
+async def _generate(ctx: SocialContext, bot: Any, uid: str, snippet: str, occasion_label: str) -> str:
     prompt = _GREETING_PROMPT.format(occasion_label=occasion_label, persona_snippet=snippet or "<无画像>")
     messages = [{"role": "user", "content": prompt}]
     if not (
@@ -247,6 +255,7 @@ async def _generate(ctx: SocialContext, snippet: str, occasion_label: str) -> st
             messages=messages,
             trigger_reason="social_festival_greeting",
             chat_intent_hint="social_festival_greeting",
+            memory_scope={"platform": "onebot", "bot_id": str(getattr(bot, "self_id", "") or ""), "user_id": str(uid), "group_id": ""},
         )
     except Exception as exc:
         ctx.logger.debug(f"[social/festival] Agent generate failed: {exc}")

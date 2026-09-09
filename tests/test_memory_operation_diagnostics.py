@@ -84,6 +84,7 @@ def test_memory_router_remains_original_read_only_surface() -> None:
     actual = {(route.path, method) for route in router.routes for method in route.methods}
     assert actual == {
         ("/api/memory/vector-index", "GET"),
+        ("/api/memory/text-index", "GET"),
         ("/api/memory/vector-index/rebuild", "POST"),
         ("/api/memory/search-test", "GET"),
         ("/api/memory/recent", "GET"),

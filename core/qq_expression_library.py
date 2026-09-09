@@ -907,40 +907,31 @@ def maybe_choose_auto_qq_expression_marker(
     is_private: bool = False,
     is_random_chat: bool = False,
     force_mode: str | None = None,
+    expression_mode: str = "auto",
     has_rich_sticker: bool = False,
     rng: Any = random,
 ) -> str:
     if contains_qq_expression_marker(reply_text):
         return ""
+    selected_mode = str(expression_mode or "auto").strip().lower()
+    if selected_mode not in {"auto", "text", "emoji", "qq_face", "sticker"}:
+        selected_mode = "auto"
     intent = str(message_intent or "").strip()
-    explicit = intent == "expression"
-    if has_rich_sticker and not explicit:
+    # qq_face is the planner's explicit primary-surface decision.  The old
+    # expression intent remains a compatibility bridge for pre-TurnPlan
+    # callers, but text/emoji/sticker are hard vetoes for native QQ faces.
+    if selected_mode in {"text", "emoji", "sticker"}:
         return ""
-    if not explicit and not bool(getattr(semantic_frame, "sticker_appropriate", True)):
+    explicit = selected_mode == "qq_face" or (selected_mode == "auto" and intent == "expression")
+    if not explicit:
         return ""
+    # A literal user/model marker can still be combined with a separately
+    # explicit local sticker; this helper never creates that combination by
+    # itself, so do not erase it merely because the caller reports one.
     key = _state_key(str(group_id or ""), str(user_id or ""), is_private=is_private)
     if not _auto_allowed(plugin_config=plugin_config, key=key, explicit=explicit, rng=rng):
         return ""
-    favorite_probability = _bounded_float(
-        getattr(plugin_config, "personification_qq_favorite_expression_probability", 0.02),
-        0.02,
-    )
-    super_probability = _bounded_float(
-        getattr(plugin_config, "personification_qq_expression_super_probability", 0.02),
-        0.02,
-    )
-    triple_probability = _bounded_float(
-        getattr(plugin_config, "personification_qq_expression_triple_probability", 0.02),
-        0.02,
-    )
     mode = "face"
-    if not explicit and not is_private:
-        if is_random_chat and rng.random() < super_probability:
-            mode = "super"
-        elif is_random_chat and rng.random() < triple_probability:
-            mode = "triple"
-        elif favorite_probability > 0 and rng.random() < favorite_probability:
-            mode = "recommended"
     if force_mode in {"qq_super", "text_qq_super"}:
         mode = "super"
     elif force_mode in {"qq_face_combo", "triple"}:

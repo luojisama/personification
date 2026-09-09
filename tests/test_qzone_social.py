@@ -258,14 +258,12 @@ def test_qzone_comment_feed_falls_back_to_top_level_rich_mention(monkeypatch, tm
         )
     )
 
-    assert ok is True
-    assert msg == "ok"
+    assert ok is False
+    assert msg.startswith("child_reply_failed_no_fallback:")
     assert [call["url"] for call in calls] == [
-        "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds",
         "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds",
     ]
     assert calls[0]["data"]["content"] == "测试收到"
-    assert calls[1]["data"]["content"] == "@{uin:20001,nick:白咲零,who:1} 测试收到"
 
 
 def test_qzone_forward_feed_uses_forward_endpoint(monkeypatch, tmp_path) -> None:  # noqa: ANN001

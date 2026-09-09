@@ -205,8 +205,34 @@ class MemoryStore:
         self.recycle_bin_dir.mkdir(parents=True, exist_ok=True)
         self._init_shared_db()
         self._init_palace_db()
-        if self.embedding_service.enabled:
+        if self.embedding_service.enabled and not self.algorithm_retrieval():
             self._queue_unindexed_api_memories()
+
+    def algorithm_retrieval(self) -> bool:
+        return str(getattr(self.plugin_config, "personification_memory_retrieval_mode", "algorithm_llm")) != "hybrid_api"
+
+    def rebuild_text_index_batch(self, limit: int = 256) -> int:
+        from . import text_memory_index as index
+        with self.maintenance_lock, _connect(self.memory_palace_dir / "memory_palace.db") as conn:
+            index.ensure(conn)
+            rows = conn.execute("""SELECT i.memory_id,i.payload,i.updated_at FROM memory_items i
+                LEFT JOIN memory_text_versions v ON v.memory_id=i.memory_id
+                WHERE v.memory_id IS NULL OR v.version!=? OR v.updated_at!=i.updated_at
+                ORDER BY i.memory_id LIMIT ?""", (index.VERSION, max(1, min(1000, limit)))).fetchall()
+            for row in rows:
+                payload = _json_loads(row["payload"], {})
+                index.write(conn, row["memory_id"], self._build_searchable_text(payload), row["updated_at"])
+            conn.commit()
+            return len(rows)
+
+    def text_index_status(self) -> dict[str, Any]:
+        from .text_memory_index import VERSION
+        with _connect(self.memory_palace_dir / "memory_palace.db") as conn:
+            total = conn.execute("SELECT COUNT(*) FROM memory_items").fetchone()[0]
+            indexed = conn.execute("""SELECT COUNT(*) FROM memory_text_versions v JOIN memory_items i
+                ON i.memory_id=v.memory_id WHERE v.version=? AND v.updated_at=i.updated_at""", (VERSION,)).fetchone()[0]
+        return {"mode": "algorithm_llm" if self.algorithm_retrieval() else "hybrid_api", "version": VERSION,
+                "total": total, "indexed": indexed, "pending": total-indexed}
 
     def _relocate_old_memory_dirs(self) -> None:
         current_root = self.root_dir
@@ -902,29 +928,17 @@ class MemoryStore:
             if conn.total_changes == before_changes:
                 conn.rollback()
                 return memory_id
-            if self.embedding_service.enabled:
+            if self.algorithm_retrieval():
+                pass  # Preserve rollback vectors; do not create or compare hashes.
+            elif self.embedding_service.enabled:
                 # Never label a local hash as a real semantic representation.
                 # Existing legacy rows are retained as rollback data until a
                 # successful remote embedding replaces them under a new version.
                 self._enqueue_embedding_unlocked(conn, memory_id=memory_id, updated_at=updated_at)
-            elif bool(getattr(self.embedding_service, "misconfigured", False)):
-                # Keep raw text/indexes, but do not fabricate an API semantic
-                # vector while a real-embedding configuration is invalid.
-                self._enqueue_embedding_unlocked(conn, memory_id=memory_id, updated_at=updated_at)
             else:
-                conn.execute("DELETE FROM memory_embeddings WHERE memory_id=?", (memory_id,))
-                conn.execute(
-                    """
-                    INSERT INTO memory_embeddings(memory_id, model_version, embedding, updated_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (memory_id, EMBED_MODEL_VERSION, json.dumps(payload.get("_embedding", []), ensure_ascii=False), updated_at),
-                )
-                conn.execute(
-                    "UPDATE memory_items SET embedding=?, embedding_model=? WHERE memory_id=?",
-                    (_pack_float16_vector(payload.get("_embedding", [])), EMBED_MODEL_VERSION, memory_id),
-                )
-                self._write_vector_chunks(conn, payload=payload, updated_at=updated_at)
+                # Disabled or incomplete optional API configuration keeps raw
+                # evidence and a resumable queue, never synthesizes hash vectors.
+                self._enqueue_embedding_unlocked(conn, memory_id=memory_id, updated_at=updated_at)
             conn.execute("DELETE FROM memory_entities WHERE memory_id=?", (memory_id,))
             for entity in payload.get("_entities", []):
                 conn.execute(
@@ -936,6 +950,8 @@ class MemoryStore:
                 )
             conn.execute("DELETE FROM memory_relations WHERE source_memory_id=?", (memory_id,))
             self._write_relations(conn, payload)
+            from . import text_memory_index as text_index
+            text_index.write(conn, memory_id, searchable_text, updated_at)
             if self._fts_available:
                 conn.execute("DELETE FROM memory_fts WHERE memory_id=?", (memory_id,))
                 conn.execute(
@@ -971,7 +987,7 @@ class MemoryStore:
                     ),
                 )
             conn.commit()
-        if self.embedding_service.enabled:
+        if self.embedding_service.enabled and not self.algorithm_retrieval():
             self._schedule_pending_embedding_work()
         return memory_id
 
@@ -1019,6 +1035,8 @@ class MemoryStore:
         )
 
     async def aindex_pending_embeddings(self, *, limit: int = 32) -> dict[str, Any]:
+        if self.algorithm_retrieval():
+            return {"indexed": 0, "failed": 0, "status": "algorithm_llm"}
         """Index queued items through the configured remote embedding API.
 
         Raw memories remain readable on every failure.  A failed API request is
@@ -1143,7 +1161,7 @@ class MemoryStore:
         # Once API embedding is enabled, a synchronous caller has no valid
         # query vector.  It may use lexical/time recall, but must not compare
         # the query with a legacy hash vector under the semantic label.
-        if (self.embedding_service.enabled or self.embedding_service.misconfigured) and not _embedding_model_version:
+        if not _embedding_model_version:
             _embedding_model_version = "__api_query_required__"
         if self.palace_enabled() and group_id and self.needs_bootstrap(group_id):
             self.bootstrap_group_memories(group_id)
@@ -1151,6 +1169,7 @@ class MemoryStore:
 
         candidate_map: dict[str, MemorySearchCandidate] = {}
         initial_candidates = self._search_fast(
+            platform=platform, bot_id=bot_id,
             query=normalized_query,
             scope=scope,
             user_id=user_id,
@@ -1287,8 +1306,8 @@ class MemoryStore:
         lexical/time/legacy index paths and records an explicit status rather
         than manufacturing a new hash embedding.
         """
-        if not self.embedding_service.enabled:
-            return self.recall_memories(**kwargs)
+        if self.algorithm_retrieval() or not self.embedding_service.enabled:
+            return await asyncio.to_thread(self.recall_memories, **kwargs)
         try:
             batch = await self.embedding_service.embed_query(str(kwargs.get("query") or ""))
         except EmbeddingServiceError as exc:
@@ -1563,36 +1582,19 @@ class MemoryStore:
         return status
 
     def rebuild_vector_index(self, *, limit: int = 0) -> dict[str, Any]:
+        if self.algorithm_retrieval():
+            return {"rebuilt": self.rebuild_text_index_batch(limit or 256), "status": "ok", "retrieval_mode": "algorithm_llm", "index": self.text_index_status()}
         if not self.palace_enabled():
             return {"rebuilt": 0, "status": "disabled"}
-        if self.embedding_service.enabled:
-            queued = self._queue_unindexed_api_memories()
-            return {"rebuilt": 0, "queued": queued, "status": "queued_api", "index": self.embedding_status()}
-        max_rows = int(limit or 0)
-        sql = """
-            SELECT payload
-            FROM memory_items
-            WHERE supports_recall=1
-            ORDER BY updated_at DESC
-        """
-        params: tuple[Any, ...] = ()
-        if max_rows > 0:
-            sql += " LIMIT ?"
-            params = (max_rows,)
-        rebuilt = 0
-        with _connect(self.memory_palace_dir / "memory_palace.db") as conn:
-            rows = conn.execute(sql, params).fetchall()
-            for row in rows:
-                payload = _json_loads(row["payload"], {})
-                if not isinstance(payload, dict):
-                    continue
-                self._write_vector_chunks(conn, payload=payload, updated_at=now_ts())
-                rebuilt += 1
-            conn.commit()
-        return {"rebuilt": rebuilt, "status": "ok", "index": self.get_vector_index_status()}
+        if not self.embedding_service.enabled:
+            return {"rebuilt": 0, "status": "embedding_unconfigured", "index": self.embedding_status()}
+        queued = self._queue_unindexed_api_memories()
+        return {"rebuilt": 0, "queued": queued, "status": "queued_api", "index": self.embedding_status()}
 
     async def arebuild_vector_index(self, *, limit: int = 0) -> dict[str, Any]:
         """API-safe rebuild entrypoint for management/background callers."""
+        if self.algorithm_retrieval():
+            return await asyncio.to_thread(self.rebuild_vector_index, limit=limit)
         if not self.palace_enabled():
             return {"rebuilt": 0, "status": "disabled"}
         if not self.embedding_service.enabled:
@@ -2097,7 +2099,7 @@ class MemoryStore:
                 " ".join(payload["snippets"]),
             ]
         )
-        payload["_embedding"] = embed_text(searchable)
+        payload["_embedding"] = []  # New writes require API vectors; legacy hashes are rollback data only.
         payload["_entities"] = extract_entities(payload["summary"], payload["topic_tags"], payload["entity_tags"])
         return payload
 
@@ -2393,6 +2395,8 @@ class MemoryStore:
         group_id: str,
         limit: int,
         scan_limit: int,
+        platform: str = "",
+        bot_id: str = "",
         query_embedding: list[float] | None = None,
         embedding_model_version: str = "",
     ) -> list[MemorySearchCandidate]:
@@ -2408,6 +2412,7 @@ class MemoryStore:
                 embedding_model_version=embedding_model_version,
             ),
             self._search_by_fts(
+                platform=platform, bot_id=bot_id,
                 query=query,
                 group_id=group_id,
                 user_id=user_id,
@@ -2442,6 +2447,7 @@ class MemoryStore:
                 scan_limit=scan_limit,
             ),
         ]
+        groups = [[candidate for candidate in group if self._payload_identity_visible(candidate.payload, platform=platform, bot_id=bot_id)] for group in groups]
         return _fuse_recall_candidates(groups, limit=limit)
 
     def _rerank_deep(
@@ -2569,7 +2575,7 @@ class MemoryStore:
         query_embedding: list[float] | None = None,
         embedding_model_version: str = "",
     ) -> list[MemorySearchCandidate]:
-        if not query or not self._vector_index_enabled():
+        if self.algorithm_retrieval() or embedding_model_version == "__api_query_required__" or not query or not self._vector_index_enabled():
             return []
         query_embedding = query_embedding if query_embedding is not None else embed_text(query)
         if not query_embedding:
@@ -2633,23 +2639,33 @@ class MemoryStore:
         scope: str,
         limit: int,
         scan_limit: int,
+        platform: str = "",
+        bot_id: str = "",
     ) -> list[MemorySearchCandidate]:
         if not query:
             return []
-        query_tokens = [token for token in tokenize(query) if token][:6]
+        from . import text_memory_index as text_index
+        self.rebuild_text_index_batch()
+        query_tokens = text_index.tokens(query, limit=128)
         rows: list[sqlite3.Row] = []
         with _connect(self.memory_palace_dir / "memory_palace.db") as conn:
+            def visible(raw: str) -> int:
+                payload = _json_loads(raw, {})
+                return int(isinstance(payload, dict) and self._payload_identity_visible(payload, platform=platform, bot_id=bot_id)
+                           and self._scope_matches(payload, scope)
+                           and self._candidate_visible_for_request(payload, group_id=group_id, user_id=user_id))
+            conn.create_function("recall_visible", 1, visible)
             if self._fts_available and query_tokens:
                 try:
-                    match_query = " OR ".join(query_tokens)
+                    match_query = text_index.match_expression(query)
                     rows = conn.execute(
                         """
                         SELECT i.payload
-                        FROM memory_fts f
+                        FROM memory_text_fts_v1 f
                         JOIN memory_items i ON i.memory_id = f.memory_id
-                        WHERE i.supports_recall=1
-                          AND memory_fts MATCH ?
-                        ORDER BY i.updated_at DESC
+                        WHERE i.supports_recall=1 AND recall_visible(i.payload)=1
+                          AND memory_text_fts_v1 MATCH ?
+                        ORDER BY bm25(memory_text_fts_v1), i.updated_at DESC
                         LIMIT ?
                         """,
                         (match_query, min(max(limit * 4, 40), max(int(scan_limit or 80), 80))),
@@ -2661,7 +2677,7 @@ class MemoryStore:
                     """
                     SELECT payload
                     FROM memory_items
-                    WHERE supports_recall=1
+                    WHERE supports_recall=1 AND recall_visible(payload)=1
                       AND summary LIKE ?
                     ORDER BY updated_at DESC
                     LIMIT ?
@@ -2669,7 +2685,7 @@ class MemoryStore:
                     (f"%{query[:32]}%", min(max(limit * 4, 40), max(int(scan_limit or 80), 80))),
                 ).fetchall()
         results: list[MemorySearchCandidate] = []
-        query_token_set = set(tokenize(query))
+        query_token_set = set(text_index.tokens(query))
         for row in rows:
             payload = _json_loads(row["payload"], {})
             if not isinstance(payload, dict):
@@ -2687,7 +2703,7 @@ class MemoryStore:
                     " ".join(payload.get("snippets", [])),
                 ]
             )
-            tokens = set(tokenize(searchable))
+            tokens = set(text_index.tokens(searchable))
             overlap = len(query_token_set & tokens)
             payload["_query"] = query
             results.append(
@@ -2767,6 +2783,8 @@ class MemoryStore:
         query_embedding: list[float] | None = None,
         embedding_model_version: str = "",
     ) -> list[MemorySearchCandidate]:
+        if self.algorithm_retrieval() or embedding_model_version == "__api_query_required__":
+            return []
         query_embedding = query_embedding if query_embedding is not None else embed_text(query)
         with _connect(self.memory_palace_dir / "memory_palace.db") as conn:
             row_map: dict[str, sqlite3.Row] = {}
@@ -3183,6 +3201,8 @@ class MemoryStore:
                 """
             )
             self._fts_available = True
+            from .text_memory_index import ensure as ensure_text_index
+            ensure_text_index(conn)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS memory_embeddings(

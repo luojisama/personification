@@ -491,3 +491,25 @@ def test_agent_prompting_includes_typed_media_provenance_grounding() -> None:
     assert "origin=quoted" in combined
     assert "owner_user_id=user_a" in combined
     assert "画中主体只是媒体内容，不是聊天参与者" in combined
+
+
+def test_text_agent_binds_memory_identity_through_tools_and_resets(monkeypatch):
+    context = load_personification_module("plugin.personification.core.llm_context")
+    seen = []
+    async def run(**kwargs):
+        seen.append(dict(context.current_llm_context()))
+        return SimpleNamespace(text='{"ok":true}')
+    monkeypatch.setattr(agent_bridge, "run_agent", run)
+    async def scenario():
+        token = context.set_llm_context(platform="outer", bot_id="outer-bot")
+        try:
+            await agent_bridge.run_text_agent(messages=[{"role":"user", "content":"synthetic"}],
+                plugin_config=SimpleNamespace(personification_agent_enabled=True), logger=None,
+                tool_caller=object(), registry=tool_registry.ToolRegistry(), structured_output=True,
+                memory_scope={"platform":"onebot", "bot_id":"bot-a", "user_id":"u1", "group_id":"g1"})
+            assert context.current_llm_context()["bot_id"] == "outer-bot"
+        finally:
+            context.reset_llm_context(token)
+    asyncio.run(scenario())
+    assert seen[0]["bot_id"] == "bot-a"
+    assert seen[0]["group_id"] == "g1"

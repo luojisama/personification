@@ -14,6 +14,7 @@ from ..framework import SocialContext, dispatch_social_outbound, run_social_text
 from ..gate import gate_should_send
 from ..quota import is_quota_exceeded, mark_sent
 from ....core.visible_output import guard_visible_text
+from ....core.social_decision import SocialDecision
 
 _SCENARIO = "topic_followup"
 
@@ -77,10 +78,11 @@ async def topic_followup_handler(ctx: SocialContext) -> None:
             uid, scenario=_SCENARIO, daily_quota_per_user=daily_quota, cooldown_seconds=cooldown
         ):
             continue
-        draft = await _generate_followup(ctx, item)
+        draft = await _generate_followup(ctx, bot, uid, item)
         if not draft:
             pt.mark_skipped(topic_id)
             continue
+        social_decision = None
         if gate_enabled:
             allow, _rewritten, reason = await gate_should_send(
                 tool_caller=ctx.tool_caller,
@@ -93,11 +95,19 @@ async def topic_followup_handler(ctx: SocialContext) -> None:
                 draft=draft,
                 persona_snippet=str(item.get("topic", "") or "")[:120],
                 now_str=_now_str(ctx),
+                memory_scope={"platform": str(item.get("platform", "") or "onebot"), "bot_id": str(getattr(bot, "self_id", "") or ""), "user_id": str(uid), "group_id": str(item.get("group_id", "") or "")},
             )
             if not allow:
                 ctx.logger.info(f"[social/topic_followup] gate denied uid={uid} tid={topic_id}: {reason}")
                 pt.mark_skipped(topic_id)
                 continue
+            if not topic_id:
+                # No locally persisted event means no safe cross-surface claim.
+                continue
+            social_decision = SocialDecision(
+                action="contact", target_id=uid, content=draft, motivation=reason or _SCENARIO,
+                source_event_ids=(topic_id,),
+            )
         final_text = draft
         final_text = guard_visible_text(
             final_text, logger=ctx.logger, surface="social_topic_followup", allow_direct_media=False
@@ -114,6 +124,7 @@ async def topic_followup_handler(ctx: SocialContext) -> None:
                 surface="social_topic_followup",
                 content=final_text,
                 user_target=uid,
+                social_decision=social_decision,
             )
         except Exception as exc:
             ctx.logger.warning(f"[social/topic_followup] send {uid} failed: {exc}")
@@ -138,7 +149,7 @@ def _get_first_bot(ctx: SocialContext) -> Any | None:
     return next(iter(bots.values()), None) if bots else None
 
 
-async def _generate_followup(ctx: SocialContext, topic_entry: dict) -> str:
+async def _generate_followup(ctx: SocialContext, bot: Any, uid: str, topic_entry: dict) -> str:
     if not (
         getattr(ctx.plugin_config, "personification_agent_enabled", True)
         and ctx.tool_caller
@@ -156,6 +167,7 @@ async def _generate_followup(ctx: SocialContext, topic_entry: dict) -> str:
             messages=messages,
             trigger_reason="social_topic_followup",
             chat_intent_hint="social_topic_followup",
+            memory_scope={"platform": str(topic_entry.get("platform", "") or "onebot"), "bot_id": str(getattr(bot, "self_id", "") or ""), "user_id": str(uid), "group_id": str(topic_entry.get("group_id", "") or "")},
         )
     except Exception as exc:
         ctx.logger.debug(f"[social/topic_followup] Agent gen failed: {exc}")

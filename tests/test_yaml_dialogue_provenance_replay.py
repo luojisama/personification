@@ -16,6 +16,7 @@ tool_registry_module = load_personification_module("plugin.personification.agent
 agent_synthesis_module = load_personification_module(
     "plugin.personification.agent.runtime.final_synthesis"
 )
+planner = load_personification_module("plugin.personification.agent.runtime.planner")
 
 
 class _Bot:
@@ -37,6 +38,10 @@ class _Segments:
     @staticmethod
     def poke(value: int) -> tuple[str, int]:
         return ("poke", value)
+
+
+async def _accepted_review() -> str:
+    return '{"action":"accept","persona_verdict":"consistent","flags":[]}'
 
 
 def _event(*, text: str, message_id: str, reply_to_msg_id: str = "") -> SimpleNamespace:
@@ -372,11 +377,55 @@ def test_yaml_final_local_sticker_uses_narrow_runtime(monkeypatch, tmp_path) -> 
     bot, _primary, reviews, _stages = _run_yaml_turn(
         monkeypatch, history=[], event=_event(text="hi", message_id="m"), candidate="reply", review_call=review,
         final_gate_enabled=False,
+        # This test covers an explicitly structured YAML marker in the
+        # planner's permissive auto surface.  Restrictive planner modes have
+        # their own regression test below and must reject this image.
+        semantic_frame=planner.turn_plan_to_semantic_frame(
+            planner.TurnPlan(sticker_appropriate=False, expression_mode="auto")
+        ),
         parse_yaml_response=lambda _text: {"status":"","think":"","action":"","messages":[{"text":"reply","sticker":"ok"}]},
         configure=lambda cfg: (setattr(cfg, "personification_sticker_path", str(tmp_path)), setattr(cfg, "personification_sticker_probability", 1.0)),
     )
     assert seen and seen[0].plugin_config.personification_sticker_path == str(tmp_path)
     assert reviews and bot.sent
+
+
+@pytest.mark.parametrize("expression_mode", ["text", "emoji", "qq_face"])
+def test_yaml_explicit_sticker_cannot_override_restrictive_expression_mode(
+    monkeypatch, tmp_path, expression_mode: str,
+) -> None:  # noqa: ANN001
+    """An explicit YAML field bypasses inferred suitability, never a planner mode."""
+    from PIL import Image
+
+    image = tmp_path / "candidate.png"
+    Image.new("RGB", (4, 4), "pink").save(image, "PNG")
+    selected: list[object] = []
+    prepared: list[object] = []
+
+    async def choose(*_args, **_kwargs):  # noqa: ANN202
+        selected.append(True)
+        return image
+
+    async def allow(**kwargs):  # noqa: ANN003, ANN202
+        prepared.append(kwargs)
+        return "data:image/png;base64,QUJD"
+
+    monkeypatch.setattr(yaml_processor, "choose_sticker_for_context", choose)
+    monkeypatch.setattr(yaml_processor, "prepare_local_expression", allow)
+    semantic = planner.turn_plan_to_semantic_frame(
+        planner.TurnPlan(sticker_appropriate=False, expression_mode=expression_mode)
+    )
+
+    bot, _primary, reviews, _stages = _run_yaml_turn(
+        monkeypatch,
+        history=[], event=_event(text="hi", message_id=f"restricted-{expression_mode}"),
+        candidate="reply", review_call=lambda *_a, **_k: _accepted_review(),
+        final_gate_enabled=False, semantic_frame=semantic,
+        parse_yaml_response=lambda _text: {"status":"", "think":"", "action":"", "messages":[{"text":"reply", "sticker":"requested"}]},
+        configure=lambda cfg: setattr(cfg, "personification_sticker_path", str(tmp_path)),
+    )
+    assert reviews and bot.sent == ["reply"]
+    assert selected == [] and prepared == []
 
 
 def test_yaml_final_local_sticker_visual_rejection_sends_no_image(monkeypatch, tmp_path) -> None:

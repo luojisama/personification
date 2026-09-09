@@ -43,7 +43,51 @@ def load_current_states(scope: dict) -> list[dict]:
         return result
 
 
-def _commit(scope: dict, updates: list[dict], existing: list[dict], messages: list[dict]) -> None:
+def _sources_are_live(conn: Any, scope: dict, messages: list[dict]) -> bool:
+    """Verify that evidence still exists while the caller holds the write lock."""
+    evidence_ids = {
+        int(message["id"])
+        for message in messages
+        if str(message.get("id", "")).isdigit() and not message.get("is_summary")
+    }
+    live_ids: set[int] = set()
+    for table in ("session_messages", "session_message_archive"):
+        if not evidence_ids or not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name=?", (table,)
+        ).fetchone():
+            continue
+        placeholders = ",".join("?" for _ in evidence_ids)
+        live_ids.update(
+            int(row[0])
+            for row in conn.execute(
+                f"SELECT id FROM {table} WHERE id IN ({placeholders})", tuple(evidence_ids)
+            )
+        )
+    if live_ids != evidence_ids:
+        return False
+
+    for message in messages:
+        if message.get("_evidence_table") != "group_messages":
+            continue
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='group_messages'"
+        ).fetchone():
+            return False
+        row = conn.execute(
+            """SELECT 1 FROM group_messages WHERE message_id=? AND group_id=?
+               AND platform=? AND bot_id=? AND user_id=? AND content=?""",
+            (
+                message.get("message_id"), scope.get("group_id"), scope.get("platform"),
+                scope.get("bot_id"), message.get("user_id"), message.get("content"),
+            ),
+        ).fetchone()
+        if row is None:
+            return False
+    return True
+
+
+def _commit(scope: dict, updates: list[dict], existing: list[dict], messages: list[dict],
+            *, validate_sources: bool = False) -> bool:
     # The model may reference only evidence and state IDs from its own input.
     sources = {str(m.get("id")): m for m in messages if m.get("id") is not None
                and m.get("role") in {"user", "assistant"} and not m.get("is_summary")}
@@ -51,6 +95,11 @@ def _commit(scope: dict, updates: list[dict], existing: list[dict], messages: li
     with connect_sync() as conn:
         _ensure(conn)
         conn.execute("BEGIN IMMEDIATE")
+        # This cannot be a separate preflight connection: a concurrent clear
+        # could otherwise delete the source between that check and this write.
+        if validate_sources and not _sources_are_live(conn, scope, messages):
+            conn.rollback()
+            return False
         conn.execute("INSERT OR IGNORE INTO memory_state_scopes VALUES (?,?,?,?,?)",
                      (_scope_key(scope), scope.get("platform", ""), scope.get("bot_id", ""),
                       scope.get("user_id", ""), scope.get("group_id", "")))
@@ -105,6 +154,7 @@ def _commit(scope: dict, updates: list[dict], existing: list[dict], messages: li
                 conn.execute("INSERT INTO memory_current_states VALUES (?,?,?,?,?)",
                              (_scope_key(scope), str(replaced), retired["revision"], json.dumps(retired, ensure_ascii=False), time.time()))
         conn.commit()
+    return True
 
 
 async def update_current_states(*, scope: dict, messages: list[dict], caller: Any,
@@ -123,7 +173,7 @@ async def update_current_states(*, scope: dict, messages: list[dict], caller: An
         "对已有事项的补充/取消/纠正必须复用state_id，其他无关事项不修改。新事项state_id留空。"
         "如新事项取代已有事项，在supersedes列出被取代state_id；不得让相互冲突的当前说法同时有效。"
         "真实用户经历layer=real，角色模拟layer=simulated，不能互相作证。不要把助手的猜测变成用户事实。"
-        "source_ids必须是输入原始消息的数字id，不用QQ message_id。仅输出JSON："
+        "source_ids必须逐字复制输入source_id，不自行生成或转换。仅输出JSON："
         '{"cancel_pending":[{"topic_id":"","source_ids":[]}],"updates":[{"state_id":"","statement":"","status":"planned|inferred|confirmed|cancelled",'
         '"layer":"real|simulated","source_ids":[],"supersedes":[],"valid_from":"","valid_until":""}]}。无变化输出空数组。'
     )
@@ -137,18 +187,9 @@ async def update_current_states(*, scope: dict, messages: list[dict], caller: An
     from ..agent.runtime.planner import extract_json_payload
     payload = extract_json_payload(str(getattr(response, "content", "") or ""))
     if isinstance(payload, dict) and isinstance(payload.get("updates"), list):
-        # A clear/delete during remote inference must not resurrect its sources.
-        evidence_ids = {int(m["id"]) for m in messages if m.get("id") is not None and not m.get("is_summary")}
-        with connect_sync() as conn:
-            live_ids = set()
-            for table in ("session_messages", "session_message_archive"):
-                if not conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone() or not evidence_ids:
-                    continue
-                placeholders = ",".join("?" for _ in evidence_ids)
-                live_ids.update(int(row[0]) for row in conn.execute(f"SELECT id FROM {table} WHERE id IN ({placeholders})", tuple(evidence_ids)))
-        if live_ids != evidence_ids:
+        accepted = _commit(scope, payload["updates"], existing, messages, validate_sources=True)
+        if not accepted:
             return load_current_states(scope)
-        _commit(scope, payload["updates"], existing, messages)
         bound_pending = {str(p["topic_id"]) for p in pending}
         user_sources = {str(m.get("id")) for m in messages if m.get("role") == "user" and not m.get("is_summary")}
         for cancellation in (payload.get("cancel_pending") or [])[:12]:

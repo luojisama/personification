@@ -110,7 +110,10 @@ def test_auto_collect_persists_persona_scoped_decisions_and_never_caches_unknown
     assert len(judge_calls) == 4
     metadata = json.loads((tmp_path / "stickers.json").read_text(encoding="utf-8"))
     assert len(metadata["_meta"]["persona_adaptations"]) == 2
-    assert len(vision_calls) == 4
+    # Visual evidence is content-addressed and persona-independent; every
+    # distinct persona still receives its own second judgement above.
+    assert len(vision_calls) == 1
+    assert len(metadata["_meta"]["visual_labels"]) == 1
 
 
 def test_missing_persona_and_unknown_visual_result_cannot_collect(tmp_path, monkeypatch):

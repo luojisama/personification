@@ -145,6 +145,7 @@ class PluginRuntimeBundle:
     memory_store: Any = None
     profile_service: Any = None
     scoped_profile_service: Any = None
+    private_profile_refresh: Any = None
     memory_curator: Any = None
     memory_decay_scheduler: Any = None
     background_intelligence: Any = None

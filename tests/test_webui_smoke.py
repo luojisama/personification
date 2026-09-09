@@ -379,6 +379,7 @@ def test_memory_vector_index_routes(_runtime_context, tmp_path) -> None:
     cfg.personification_memory_enabled = True
     cfg.personification_memory_palace_enabled = True
     cfg.personification_memory_rag_enabled = True
+    cfg.personification_memory_retrieval_mode = "algorithm_llm"
     cfg.personification_memory_vector_backend = "sqlite_exact"
     cfg.personification_memory_rag_candidate_limit = 80
     cfg.personification_memory_recall_top_k = 8
@@ -419,7 +420,15 @@ def test_memory_vector_index_routes(_runtime_context, tmp_path) -> None:
 
     status = client.get("/personification/api/memory/vector-index")
     assert status.status_code == 200, status.text
-    assert status.json()["chunk_count"] >= 1
+    # Algorithm+LLM is now the default recall path; the legacy vector index
+    # remains observable/rebuildable for rollback but is not the acceptance
+    # signal for default retrieval.
+    assert status.json()["available"] is True
+
+    text_index = client.get("/personification/api/memory/text-index")
+    assert text_index.status_code == 200, text_index.text
+    assert text_index.json()["mode"] == "algorithm_llm"
+    assert {"version", "total", "indexed", "pending"} <= set(text_index.json())
 
     search = client.get("/personification/api/memory/search-test?query=月面基地模型&user_id=u1")
     assert search.status_code == 200, search.text
@@ -428,6 +437,7 @@ def test_memory_vector_index_routes(_runtime_context, tmp_path) -> None:
     rebuild = client.post("/personification/api/memory/vector-index/rebuild")
     assert rebuild.status_code == 200, rebuild.text
     assert rebuild.json()["status"] == "ok"
+    assert rebuild.json()["retrieval_mode"] == "algorithm_llm"
 
 
 def test_devices_listing_and_revoke(_runtime_context) -> None:
@@ -447,3 +457,11 @@ def test_devices_listing_and_revoke(_runtime_context) -> None:
     # 再访问应 401
     res4 = client.get("/personification/api/auth/me")
     assert res4.status_code == 401
+
+
+def test_scoped_profile_admin_routes_require_login(_runtime_context):
+    client = _build_client(_runtime_context)
+    response = client.get("/personification/api/personas/scoped-document?platform=onebot&bot_id=b&user_id=u")
+    assert response.status_code in {401, 403}
+    response = client.post("/personification/api/personas/scoped-sharing", json={"enabled":True,"revision":1})
+    assert response.status_code in {401, 403}

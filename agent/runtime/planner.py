@@ -49,6 +49,7 @@ MessageTarget = Literal["bot", "someone_else", "external_plugin", "broadcast", "
 DomainFocus = Literal["general", "social", "technology", "science", "game_anime", "plugin", "realtime", "emotion"]
 EvidencePolicy = Literal["none", "light", "standard", "strict"]
 CitationMode = Literal["none", "urls_on_request"]
+ExpressionMode = Literal["auto", "text", "emoji", "qq_face", "sticker"]
 
 
 ALLOWED_REPLY_ACTIONS = {"reply", "silence", "ask_clarify"}
@@ -74,6 +75,7 @@ ALLOWED_MESSAGE_TARGETS = {"bot", "someone_else", "external_plugin", "broadcast"
 ALLOWED_DOMAIN_FOCUS = {"general", "social", "technology", "science", "game_anime", "plugin", "realtime", "emotion"}
 ALLOWED_EVIDENCE_POLICIES = {"none", "light", "standard", "strict"}
 ALLOWED_CITATION_MODES = {"none", "urls_on_request"}
+ALLOWED_EXPRESSION_MODES = {"auto", "text", "emoji", "qq_face", "sticker"}
 ALLOWED_RELATIONSHIP_PROGRESS = {"none", "meaningful", "resonant", "milestone"}
 
 
@@ -162,6 +164,11 @@ class TurnPlan:
     emotion_intensity: str = "medium"
     emotion_updates: list[dict[str, Any]] = field(default_factory=list)
     expression_style: str = "自然简短"
+    # Exactly one primary expression surface selected by the planner.  It is
+    # not a send command: transport policy and explicit user-requested
+    # markers are still enforced downstream.
+    expression_mode: ExpressionMode = "auto"
+    memory_queries: list[str] = field(default_factory=list)
     reply_shape: ReplyShape = "auto"
     tts_style_hint: str = "自然"
     sticker_mood_hint: str = DEFAULT_STICKER_SEMANTIC_HINT
@@ -318,6 +325,8 @@ def parse_turn_plan_payload(payload: Any) -> TurnPlan | None:
         emotion_intensity=_enum_value(payload.get("emotion_intensity"), {"low", "medium", "high"}, "medium"),
         emotion_updates=_parse_emotion_updates(payload.get("emotion_updates")),
         expression_style=str(payload.get("expression_style", "") or "").strip()[:80] or "自然简短",
+        expression_mode=_enum_value(payload.get("expression_mode"), ALLOWED_EXPRESSION_MODES, "auto"),  # type: ignore[arg-type]
+        memory_queries=[q.strip()[:300] for q in payload.get("memory_queries", [])[:4] if isinstance(q, str) and q.strip()] if isinstance(payload.get("memory_queries"), list) else [],
         reply_shape=_parse_reply_shape(payload.get("reply_shape")),
         tts_style_hint=str(payload.get("tts_style_hint", "") or "").strip()[:80] or "自然",
         sticker_mood_hint=normalize_sticker_semantic_hint(payload.get("sticker_mood_hint")),
@@ -548,6 +557,8 @@ async def plan_turn_with_llm(
         '"emotional_support":{"needed":false,"listen":false,"validate":false,"advice_permission":"not_needed|ask_first|allowed","risk_level":"none|concern|high"},'
         '"sticker_appropriate":true,"meta_question":false,'
         '"user_attitude":"一句短中文", "bot_emotion":"一句短中文", "emotion_intensity":"low|medium|high", "expression_style":"一句短中文",'
+        '"expression_mode":"auto|text|emoji|qq_face|sticker",'
+        '"memory_queries":["最多四组基于当前话题与上下文的简短记忆检索表达；无需要则空数组"],'
         '"reply_shape":"auto|micro|fragment|sentence|compact",'
         '"emotion_updates":[{"scope":"global|user|group","vad":{"valence":0.0,"arousal":0.5,"dominance":0.0},"category":"短标签","confidence":0.0,"appraisal":{"reason":"短摘要","goal":"短摘要","certainty":"短摘要","controllability":"短摘要"},"action_tendency":"approach|avoid|support|observe"}],'
         '"tts_style_hint":"短风格词","sticker_mood_hint":"情绪标签|场景标签",'
@@ -572,6 +583,8 @@ async def plan_turn_with_llm(
         "围绕插件结果接梗；不要因结果里的专业名词切成百科解释，也不要声称结果是自己刚说、刚查或刚抽到的。"
         "只有最新消息明确另起独立事实问题时才用 answer/lookup。\n"
         "4. user_attitude、bot_emotion、emotion_intensity、emotion_updates、expression_style、TTS 与表情提示要结合完整上下文规划。"
+        "expression_mode 选择本轮一个主要表达手段：text=纯文字，emoji=文字中的少量 emoji，qq_face=QQ 小黄脸，sticker=一张本地表情包；"
+        "无合适表情时选 text/emoji，严肃、安慰或信息答复不要硬加；auto 只供旧语义帧兼容，不能用它叠加多个表情手段。"
         "reply_shape 结构化决定这一拍的表达颗粒：micro=一到几个符号/表情或极短感叹，fragment=几个字的口语碎片，"
         "sentence=一小句话，compact=确有任务需要时的一到数个紧凑句，auto=交给最终回复模型现场选择。"
         "它不是字数配额；不要给每一轮套固定长度，也不要为了凑成完整句或靠近上限补解释。\n"
@@ -744,6 +757,7 @@ def turn_plan_from_semantic_frame(
         emotion_intensity=_enum_value(getattr(frame, "emotion_intensity", "medium"), {"low", "medium", "high"}, "medium"),
         emotion_updates=_parse_emotion_updates(getattr(frame, "emotion_updates", None)),
         expression_style=str(getattr(frame, "expression_style", "") or "自然简短"),
+        expression_mode=_enum_value(getattr(frame, "expression_mode", "auto"), ALLOWED_EXPRESSION_MODES, "auto"),  # type: ignore[arg-type]
         reply_shape=_parse_reply_shape(getattr(frame, "reply_shape", "auto")),
         tts_style_hint=str(getattr(frame, "tts_style_hint", "") or "自然"),
         sticker_mood_hint=normalize_sticker_semantic_hint(
@@ -844,6 +858,8 @@ def turn_plan_to_semantic_frame(plan: TurnPlan) -> Any:
         frame.message_target = plan.message_target
         frame.citation_mode = plan.citation_mode
         frame.media_only_turn = plan.media_only_turn
+        frame.expression_mode = plan.expression_mode
+        frame.memory_queries = list(plan.memory_queries)
     except Exception:
         pass
     return frame

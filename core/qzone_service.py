@@ -364,7 +364,7 @@ def _set_qzone_auth_failure(
 
 def _qzone_response_page_kind(raw_text: Any) -> str:
     text = str(raw_text or "").lstrip("\ufeff\r\n\t ").lower()
-    is_html = text.startswith(("<html", "<!doctype")) or "<html" in text[:500]
+    is_html = text.startswith(("<html", "<!doctype", "<!--", "<head", "<body", "<div")) or "<html" in text[:2000]
     if "login.qzone.qq.com" in text or "ptlogin" in text or (is_html and "请先登录" in text):
         return "auth"
     if is_html and any(marker in text for marker in ("安全验证", "验证码", "captcha", "verifycode")):
@@ -645,11 +645,11 @@ def _parse_qzone_jsonp(text: str) -> dict[str, Any]:
         return payload if isinstance(payload, dict) else {}
     except Exception:
         pass
-    match = re.search(r"\{[\s\S]*\}", raw)
+    match = re.search(r"^\s*[\w$.]+\s*\(\s*(\{[\s\S]*?\})\s*\)\s*;?", raw)
     if not match:
         return {}
     try:
-        payload = json.loads(match.group(0))
+        payload = json.loads(match.group(1))
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
@@ -1129,6 +1129,8 @@ def _qzone_payload_success(
         return False, "Qzone 返回了非预期 HTML 页面"
     if not payload:
         return False, "Qzone 返回无法解析"
+    if not any(key in payload for key in ("code", "ret", "subcode")):
+        return False, "outcome_unknown: Qzone 返回缺少明确结果码"
     for key in ("code", "ret", "subcode"):
         if key in payload:
             try:
@@ -1883,7 +1885,8 @@ class QzoneSocialService:
                 http_status=resp.status_code,
                 detail_code=f"http_{resp.status_code}",
             )
-            return False, f"点赞失败，状态码：{resp.status_code}"
+            prefix = "outcome_unknown: " if resp.status_code in {408, 409, 425, 429} or resp.status_code >= 500 else ""
+            return False, f"{prefix}点赞失败，状态码：{resp.status_code}"
         payload = _parse_qzone_jsonp(resp.text)
         success, message = _qzone_payload_success(payload, resp.text, bot_id=ctx["qq"])
         result_code = _qzone_payload_result_code(payload)
@@ -2212,9 +2215,8 @@ class QzoneSocialService:
             )
             if sub_ok:
                 return True, "ok"
-            if "请求异常" in sub_msg or "无法解析" in sub_msg or "outcome_unknown" in sub_msg:
-                return False, f"outcome_unknown: {sub_msg}"
-            self.logger.warning(f"[qzone] 子评论回复失败，回退为顶级 @ 评论: {sub_msg}")
+            self.logger.warning(f"[qzone] 子评论回复失败，终止而不降级: {sub_msg}")
+            return False, f"child_reply_failed_no_fallback: {sub_msg}"
 
         url = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds"
         send_text = _format_qzone_reply_content(text, reply_to_comment)

@@ -15,6 +15,7 @@ from ..framework import SocialContext, dispatch_social_outbound, run_social_text
 from ..gate import gate_should_send
 from ..quota import is_quota_exceeded, mark_sent
 from ....core.visible_output import guard_visible_text
+from ....core.social_decision import SocialDecision
 
 _SCENARIO = "news_push"
 
@@ -52,11 +53,10 @@ async def news_push_handler(ctx: SocialContext) -> None:
     if not raw_news:
         ctx.logger.warning(f"[social/news] no raw news for source={source}, skip")
         return
-    draft = await _pack_news(ctx, source, raw_news)
-    if not draft:
-        ctx.logger.warning("[social/news] LLM pack returned empty, skip")
-        return
-
+    # The fetch result is the only trusted event evidence for this scheduler
+    # run.  It is never model-supplied; content changes produce a new event.
+    import hashlib
+    news_event_id = "news:" + hashlib.sha256(raw_news.encode("utf-8")).hexdigest()[:24]
     users = _string_list(getattr(ctx.plugin_config, "personification_social_news_users", []))
     groups = _string_list(getattr(ctx.plugin_config, "personification_social_news_groups", []))
     if not users and not groups:
@@ -66,6 +66,12 @@ async def news_push_handler(ctx: SocialContext) -> None:
     bot = _get_first_bot(ctx)
     if bot is None:
         ctx.logger.warning("[social/news] no bot online, skip")
+        return
+    # This source is shared across targets: bind only the trusted Bot scope;
+    # per-target gates/outbound calls remain separately scoped below.
+    draft = await _pack_news(ctx, bot, source, raw_news)
+    if not draft:
+        ctx.logger.warning("[social/news] LLM pack returned empty, skip")
         return
 
     daily_quota = max(
@@ -82,7 +88,7 @@ async def news_push_handler(ctx: SocialContext) -> None:
     for uid in users:
         if is_quota_exceeded(uid, scenario=_SCENARIO, daily_quota_per_user=daily_quota, cooldown_seconds=cooldown):
             continue
-        final_text = await _gate_or_pass(ctx, uid, draft, gate_enabled)
+        final_text, social_decision = await _gate_or_pass(ctx, uid, draft, gate_enabled, bot=bot, event_id=news_event_id)
         if final_text is None:
             continue
         final_text = guard_visible_text(
@@ -99,6 +105,7 @@ async def news_push_handler(ctx: SocialContext) -> None:
                 surface="social_news_private",
                 content=final_text,
                 user_target=uid,
+                social_decision=social_decision,
             )
         except Exception as exc:
             ctx.logger.warning(f"[social/news] send user {uid} failed: {exc}")
@@ -117,7 +124,7 @@ async def news_push_handler(ctx: SocialContext) -> None:
             gid_key, scenario=_SCENARIO, daily_quota_per_user=daily_quota, cooldown_seconds=cooldown
         ):
             continue
-        final_text = await _gate_or_pass(ctx, gid_key, draft, gate_enabled)
+        final_text, social_decision = await _gate_or_pass(ctx, gid_key, draft, gate_enabled, bot=bot, group_id=gid, event_id=news_event_id)
         if final_text is None:
             continue
         final_text = guard_visible_text(
@@ -133,6 +140,7 @@ async def news_push_handler(ctx: SocialContext) -> None:
                 conversation_id=gid,
                 surface="social_news_group",
                 content=final_text,
+                social_decision=social_decision,
             )
         except Exception as exc:
             ctx.logger.warning(f"[social/news] send group {gid} failed: {exc}")
@@ -199,7 +207,7 @@ async def _fetch_raw_news(ctx: SocialContext, source: str) -> str:
         return ""
 
 
-async def _pack_news(ctx: SocialContext, source: str, raw_news: str) -> str:
+async def _pack_news(ctx: SocialContext, bot: Any, source: str, raw_news: str) -> str:
     label = _SOURCE_LABELS.get(source, "新闻")
     prompt = _PACK_PROMPT.format(source_label=label, raw_news=raw_news[:1500])
     messages = [{"role": "user", "content": prompt}]
@@ -216,6 +224,7 @@ async def _pack_news(ctx: SocialContext, source: str, raw_news: str) -> str:
             trigger_reason="social_news_push",
             chat_intent_hint="social_news_push",
             use_builtin_search_hint=True,
+            memory_scope={"platform": "onebot", "bot_id": str(getattr(bot, "self_id", "") or ""), "user_id": "", "group_id": ""},
         )
     except Exception as exc:
         ctx.logger.debug(f"[social/news] Agent pack failed: {exc}")
@@ -225,10 +234,10 @@ async def _pack_news(ctx: SocialContext, source: str, raw_news: str) -> str:
 
 
 async def _gate_or_pass(
-    ctx: SocialContext, target_key: str, draft: str, gate_enabled: bool
-) -> str | None:
+    ctx: SocialContext, target_key: str, draft: str, gate_enabled: bool, *, bot: Any, group_id: str = "", event_id: str = ""
+) -> tuple[str | None, SocialDecision | None]:
     if not gate_enabled:
-        return draft
+        return draft, None
     allow, _rewritten, reason = await gate_should_send(
         tool_caller=ctx.tool_caller,
         plugin_config=ctx.plugin_config,
@@ -240,11 +249,15 @@ async def _gate_or_pass(
         draft=draft,
         persona_snippet="",
         now_str=_now_str(ctx),
+        memory_scope={"platform": "onebot", "bot_id": str(getattr(bot, "self_id", "") or ""), "user_id": "" if group_id else str(target_key), "group_id": str(group_id)},
     )
     if not allow:
         ctx.logger.info(f"[social/news] gate denied {target_key}: {reason}")
-        return None
-    return draft
+        return None, None
+    return draft, SocialDecision(
+        action="join", target_id=str(group_id or target_key), content=draft, motivation=reason or _SCENARIO,
+        source_event_ids=(event_id,) if event_id else (),
+    )
 
 
 def _now_str(ctx: SocialContext) -> str:

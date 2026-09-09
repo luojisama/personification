@@ -278,18 +278,18 @@ def test_quota_different_scenarios_independent_cooldown() -> None:
 
 # ========== gate ==========
 
-def test_gate_returns_allow_when_no_tool_caller() -> None:
+def test_gate_rejects_when_no_tool_caller() -> None:
     allow, rewritten, _reason = asyncio.run(
         gate.gate_should_send(
             tool_caller=None, logger=MagicMock(), scenario="x", user_id="u",
             draft="hi", persona_snippet="", now_str=""
         )
     )
-    assert allow is True
+    assert allow is False
     assert rewritten is None
 
 
-def test_gate_default_allow_on_exception() -> None:
+def test_gate_rejects_on_exception() -> None:
     bad_caller = MagicMock()
 
     async def boom(*args, **kwargs):
@@ -302,7 +302,7 @@ def test_gate_default_allow_on_exception() -> None:
             draft="hi", persona_snippet="", now_str=""
         )
     )
-    assert allow is True
+    assert allow is False
     assert "failed" in reason
 
 

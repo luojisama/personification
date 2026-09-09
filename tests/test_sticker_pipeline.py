@@ -98,6 +98,53 @@ def test_rank_sticker_candidates_uses_feedback_score(monkeypatch) -> None:  # no
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def test_choose_sticker_one_candidate_still_allows_llm_rejection(monkeypatch) -> None:  # noqa: ANN001
+    candidate = {
+        "score": 8,
+        "path": Path("only.png"),
+        "summary": "角色摊手",
+        "meta": {
+            "ocr_text": "不行",
+            "subject_action": "摊手",
+            "literal_emotion": "无奈",
+            "social_intent": "婉拒",
+            "suitable_contexts": ["熟人吐槽"],
+            "unsuitable_contexts": ["严肃安慰"],
+            "visual_confidence": 0.92,
+        },
+    }
+    monkeypatch.setattr(sticker_impl, "rank_sticker_candidates", lambda *_args, **_kwargs: [candidate])
+    reviewed = []
+
+    async def reject(messages):  # noqa: ANN001
+        reviewed.extend(messages)
+        assert "即使只有一个候选也必须独立判定" in messages[0]["content"]
+        assert "未经信任的资料" in messages[0]["content"]
+        assert '"subject_action": "摊手"' in messages[1]["content"]
+        return '{"pick":"NONE","reason":"这轮安慰不适合发图"}'
+
+    result = asyncio.run(sticker_impl.choose_sticker_for_context(
+        Path("."), mood="无奈|安慰", context="对方正在认真倾诉", proactive=False,
+        plugin_config=SimpleNamespace(personification_sticker_semantic=True), call_ai_api=reject,
+    ))
+    assert len(reviewed) == 2
+    assert result is None
+
+
+def test_choose_sticker_api_timeout_never_falls_back_to_candidate(monkeypatch) -> None:  # noqa: ANN001
+    candidate = {"score": 8, "path": Path("only.png"), "summary": "角色摊手", "meta": {}}
+    monkeypatch.setattr(sticker_impl, "rank_sticker_candidates", lambda *_args, **_kwargs: [candidate])
+
+    async def timeout(_messages):  # noqa: ANN001
+        raise asyncio.TimeoutError
+
+    result = asyncio.run(sticker_impl.choose_sticker_for_context(
+        Path("."), mood="无奈|安慰", context="对方正在认真倾诉", proactive=False,
+        plugin_config=SimpleNamespace(personification_sticker_semantic=True), call_ai_api=timeout,
+    ))
+    assert result is None
+
+
 def test_select_sticker_can_filter_gif_media_type() -> None:
     temp_dir = _make_workspace_temp_dir("stickers-gif-")
     try:
@@ -118,7 +165,7 @@ def test_select_sticker_can_filter_gif_media_type() -> None:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def test_send_sticker_tool_queues_gif_action() -> None:
+def test_send_sticker_tool_requires_semantic_api_gate() -> None:
     temp_dir = _make_workspace_temp_dir("stickers-send-gif-")
     try:
         (temp_dir / "animated.gif").write_bytes(b"gif")
@@ -142,10 +189,8 @@ def test_send_sticker_tool_queues_gif_action() -> None:
             )
         )
 
-        assert '"queued": true' in result
-        assert queued[0]["type"] == "send_sticker"
-        assert queued[0]["params"]["path"].endswith("animated.gif")
-        assert queued[0]["params"]["history_text"] == "[GIF表情包:animated]"
+        assert '"ok": false' in result
+        assert queued == []
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 

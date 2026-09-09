@@ -32,6 +32,7 @@ from ...core.sticker_library import (
     save_sticker_metadata_sync,
     sticker_metadata_path,
 )
+from ...core.sticker_relabel_jobs import create_job, fail, get_job, pause, resume, schedule_next
 
 
 def _load_raw_manifest(sticker_dir: Path, *, strict: bool = False) -> dict[str, Any]:
@@ -295,6 +296,37 @@ def _mark_sticker_projection_stale(runtime: Any, detail_code: str) -> None:
 
 def build_sticker_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/stickers", tags=["stickers"])
+
+    @router.post("/visual-relabel/jobs")
+    async def start_visual_relabel(body: dict = Body(default_factory=dict), _: AdminIdentity = Depends(require_admin)) -> dict:
+        job = create_job(batch_size=int(body.get("batch_size", 5) or 5))
+        bundle = getattr(runtime, "runtime_bundle", None)
+        reply_runtime = getattr(getattr(bundle, "reply_processor_deps", None), "runtime", None)
+        if reply_runtime is None or getattr(reply_runtime, "vision_caller", None) is None:
+            return fail(job["job_id"], "vision_caller_unavailable") or job
+        schedule_next(job_id=job["job_id"], sticker_dir=_sticker_dir(runtime), runtime=reply_runtime, logger=getattr(runtime, "logger", None), concurrency=max(1, int(getattr(getattr(runtime, "plugin_config", None), "personification_labeler_concurrency", 3) or 3)))
+        return get_job(job["job_id"]) or job
+
+    @router.get("/visual-relabel/jobs/{job_id}")
+    async def visual_relabel_status(job_id: str, _: AdminIdentity = Depends(require_admin)) -> dict:
+        job = get_job(job_id)
+        if job is None: raise HTTPException(status_code=404, detail="视觉重标任务不存在")
+        return job
+
+    @router.post("/visual-relabel/jobs/{job_id}/pause")
+    async def pause_visual_relabel(job_id: str, _: AdminIdentity = Depends(require_admin)) -> dict:
+        job = pause(job_id)
+        if job is None: raise HTTPException(status_code=404, detail="视觉重标任务不存在")
+        return job
+
+    @router.post("/visual-relabel/jobs/{job_id}/resume")
+    async def resume_visual_relabel(job_id: str, _: AdminIdentity = Depends(require_admin)) -> dict:
+        job = get_job(job_id)
+        if job is None: raise HTTPException(status_code=404, detail="视觉重标任务不存在")
+        job = resume(job_id)
+        if job is None or job.get("status") != "queued": return job or {}
+        schedule_next(job_id=job_id, sticker_dir=_sticker_dir(runtime), runtime=getattr(getattr(getattr(runtime, "runtime_bundle", None), "reply_processor_deps", None), "runtime", None), logger=getattr(runtime, "logger", None), concurrency=max(1, int(getattr(getattr(runtime, "plugin_config", None), "personification_labeler_concurrency", 3) or 3)))
+        return get_job(job_id) or job
 
     @router.get("")
     async def list_stickers(_: AdminIdentity = Depends(require_admin)) -> dict:

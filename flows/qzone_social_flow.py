@@ -20,6 +20,7 @@ from ..core.qzone_social_operations import (
     QzoneSocialOperationCoordinator,
     coordinate_qzone_social_write,
 )
+from ..core.social_decision import SocialDecision
 from ..core.time_ctx import inject_current_time_context
 from ..core.user_policy import PolicyAuthorization
 from ..core.visible_output import guard_visible_text
@@ -847,6 +848,7 @@ async def _decide_feed_action(
     agent_tool_registry: Any = None,
     agent_max_steps: int = 4,
     logger: Any = None,
+    bot_id: str = "",
 ) -> dict[str, Any]:
     prompt = (
         "你正在阅读一位好友刚发的 QQ 空间动态。把它当成熟人朋友圈，决定是否互动。\n"
@@ -863,7 +865,7 @@ async def _decide_feed_action(
         f"动态正文：{feed.get('content') or '（无文字）'}\n"
         f"图片内部线索（仅供理解，不可复述）：{image_summary or ('有图片，但视觉摘要不可用' if feed.get('images') else '无图片')}\n\n"
         "互动要求：\n"
-        "- 默认倾向轻互动：日常熟人内容能点赞就点赞；动态里有具体可接的细节就 like_comment；只有确实没话可说时才 ignore。\n"
+        "- 有具体关系或话题动机才互动；ignore是正常选择，不必每条动态都点赞或评论。避免跨渠道重复追问同一件事。\n"
         "- 只有当动态文案本身足够抽象、有意思、像你会想拿到自己空间转一下，而且适合公开转发时，才选择 forward；转发不是常规互动，宁缺毋滥。\n"
         "- 禁止转发这些内容：漫展自由行/摊位招募/求捞人，瓜条/吃瓜爆料，挂人/曝光/网暴，涉及黄赌毒暴/血腥伤害/违法，转发好运/抽奖诱导/扩散链，隐私求助、沉重争议、营销广告。遇到这些最多 like/comment/ignore，不能 forward。\n"
         "- forward_text 是你转发时自己的短附言，0-24 个中文字符，可以不写；要像真人顺手转，不要解释“我觉得很有趣所以转发”。\n"
@@ -890,6 +892,7 @@ async def _decide_feed_action(
         try:
             result = await run_text_agent(
                 messages=messages,
+                memory_scope={"platform": "onebot", "bot_id": bot_id, "user_id": str(candidate.get("user_id") or ""), "group_id": ""},
                 plugin_config=plugin_config,
                 logger=logger,
                 tool_caller=agent_tool_caller,
@@ -1103,6 +1106,7 @@ async def _decide_bot_comment_reply(
         try:
             result = await run_text_agent(
                 messages=messages,
+                memory_scope={"platform": "onebot", "bot_id": bot_id, "user_id": str(comment.get("user_id") or comment.get("uin") or ""), "group_id": ""},
                 plugin_config=plugin_config,
                 logger=logger,
                 tool_caller=agent_tool_caller,
@@ -1969,6 +1973,7 @@ async def scan_qzone_social_feeds(
                         continue
                     decision = await _decide_feed_action(
                         feed=feed,
+                        bot_id=str(getattr(bot, "self_id", "") or ""),
                         candidate=candidate,
                         system_prompt=system_prompt,
                         call_ai_api=call_ai_api,
@@ -2012,6 +2017,7 @@ async def scan_qzone_social_feeds(
                     acted = False
                     liked = False
                     commented = False
+                    like_dispatch = None
                     forwarded = False
                     comment_text = str(decision.get("comment", "") or "")
                     if action in {"comment", "like_comment"}:
@@ -2126,6 +2132,10 @@ async def scan_qzone_social_feeds(
                             group_daily_limit=1_000_000,
                             target_daily_limit=1_000_000,
                             target_cooldown_seconds=0,
+                            # like_comment is an explicit composite action:
+                            # child actions have independent receipts while
+                            # retaining the locally-read feed provenance.
+                            social_decision=SocialDecision("qzone_interact", feed_owner_uid, "[like]", str(decision.get("reason", "") or "qzone like"), (feed_key, "qzone:like")),
                         )
                         like_ok = like_dispatch.succeeded
                         like_msg = like_dispatch.diagnostic_code
@@ -2153,6 +2163,10 @@ async def scan_qzone_social_feeds(
                     if (
                         action in {"comment", "like_comment"}
                         and comment_text
+                        # A composite QZone action is ordered. If the first
+                        # visible sub-action has unknown delivery, do not send
+                        # its comment sibling or replay either child.
+                        and not (action == "like_comment" and like_dispatch is not None and like_dispatch.status == "unknown")
                         and await _user_policy_allows(
                             user_policy_authorizer,
                             feed_owner_uid,
@@ -2173,6 +2187,7 @@ async def scan_qzone_social_feeds(
                             group_daily_limit=1_000_000,
                             target_daily_limit=1_000_000,
                             target_cooldown_seconds=0,
+                            social_decision=SocialDecision("qzone_interact", feed_owner_uid, comment_text, str(decision.get("reason", "") or "qzone comment"), (feed_key, "qzone:comment")),
                         )
                         comment_ok = comment_dispatch.succeeded
                         comment_msg = comment_dispatch.diagnostic_code

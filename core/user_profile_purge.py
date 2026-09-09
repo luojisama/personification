@@ -30,6 +30,10 @@ async def purge_user_profile_data(
     cancel_user_tasks = getattr(scoped_service, "cancel_user_tasks", None)
     if callable(cancel_user_tasks):
         counts["cancelled_scoped_tasks"] = int(await cancel_user_tasks(uid))
+    private_refresh = getattr(bundle, "private_profile_refresh", None)
+    cancel_private = getattr(private_refresh, "cancel_user_tasks", None)
+    if callable(cancel_private):
+        counts["cancelled_private_profile_tasks"] = int(await cancel_private(uid))
 
     persona_store = getattr(bundle, "persona_store", None)
     purge_persona = getattr(persona_store, "purge_user", None)
@@ -52,6 +56,12 @@ async def purge_user_profile_data(
     db_path = getattr(policy_service, "db_path", None) or get_db_path()
     with connect_sync(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='scoped_profile_documents_v3'").fetchone():
+            conn.execute("DELETE FROM scoped_profile_documents_v3 WHERE user_id=?", (uid,))
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='scoped_profile_history_v3'").fetchone():
+            conn.execute("DELETE FROM scoped_profile_history_v3 WHERE user_id=?", (uid,))
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='scoped_profile_shares_v1'").fetchone():
+            conn.execute("DELETE FROM scoped_profile_shares_v1 WHERE user_id=?", (uid,))
         # These legacy rows are deleted here as a safe fallback when PersonaStore is
         # disabled or unavailable in a partially initialized runtime.
         persona_cursor = conn.execute("DELETE FROM user_personas WHERE user_id=?", (uid,))

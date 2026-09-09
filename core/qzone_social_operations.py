@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
+from .social_decision import SocialDecision, claim_social_decision, settle_social_decision
 
 from .db import connect_sync, get_db_path
 
@@ -264,7 +265,16 @@ async def coordinate_qzone_social_write(
     group_daily_limit: int = 3,
     target_daily_limit: int = 1,
     target_cooldown_seconds: float = 1800.0,
+    social_decision: SocialDecision | None = None,
 ) -> QzoneSocialDispatch:
+    # QZone is another surface of the same QQ Bot identity, not a separate
+    # identity namespace.  This makes private/group/QZone motivation claims
+    # coordinate across channels.
+    decision_scope = f"onebot:{str(bot_id or '').strip()}"
+    if social_decision is not None and not claim_social_decision(
+        social_decision, channel="qzone_social", scope=decision_scope
+    ):
+        return QzoneSocialDispatch("definite_failure", "qzone_social_decision_duplicate")
     reservation = coordinator.reserve(
         bot_id=bot_id,
         group_id=group_id,
@@ -277,12 +287,16 @@ async def coordinate_qzone_social_write(
         target_cooldown_seconds=target_cooldown_seconds,
     )
     if not reservation.ok:
+        if social_decision is not None:
+            settle_social_decision(social_decision, status="failed", scope=decision_scope)
         return QzoneSocialDispatch(
             "definite_failure",
             reservation.diagnostic_code,
             reservation.operation_id,
         )
     if not coordinator.mark_dispatching(reservation.operation_id):
+        if social_decision is not None:
+            settle_social_decision(social_decision, status="unknown", scope=decision_scope)
         return QzoneSocialDispatch("unknown", "qzone_social_dispatch_unknown", reservation.operation_id)
     try:
         if action == "like":
@@ -299,15 +313,21 @@ async def coordinate_qzone_social_write(
             status="unknown",
             result_code=f"dispatch_{type(exc).__name__}",
         )
+        if social_decision is not None:
+            settle_social_decision(social_decision, status="unknown", scope=decision_scope)
         return QzoneSocialDispatch("unknown", "qzone_social_dispatch_unknown", reservation.operation_id)
-    status = "succeeded" if ok else (
+    # A truthy string/dict from an adapter is not a protocol acknowledgement.
+    # Only a real boolean True may make the durable operation replay-safe.
+    status = "succeeded" if type(ok) is bool and ok else (
         "unknown" if "outcome_unknown" in str(message or "").lower() else "definite_failure"
     )
     coordinator.finalize(
         reservation.operation_id,
         status=status,
-        result_code="ok" if ok else status,
+        result_code="ok" if status == "succeeded" else status,
     )
+    if social_decision is not None:
+        settle_social_decision(social_decision, status="sent" if status == "succeeded" else "unknown" if status == "unknown" else "failed", scope=decision_scope)
     return QzoneSocialDispatch(
         status,
         "qzone_social_dispatch_succeeded"

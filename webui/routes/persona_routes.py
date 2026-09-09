@@ -463,6 +463,26 @@ def _safe_effective_claims(svc: Any, *, user_id: str, group_id: str = "") -> lis
 def build_persona_router(*, runtime) -> APIRouter:
     router = APIRouter(prefix="/api/personas", tags=["personas"])
 
+    @router.get("/profile-jobs/diagnostics")
+    async def profile_job_diagnostics(_: AdminIdentity = Depends(require_admin)) -> dict:
+        """Expose scheduler facts, never evidence text or model reasoning."""
+        service = _scoped_profile_service(runtime)
+        reporter = getattr(service, "diagnostics", None) if service is not None else None
+        if not callable(reporter):
+            return {
+                "available": False,
+                "status": "unavailable",
+                "message": "动态画像调度服务未就绪。",
+            }
+        try:
+            return {"available": True, "status": "ready", **dict(reporter())}
+        except Exception:
+            return {
+                "available": False,
+                "status": "unknown",
+                "message": "动态画像调度状态暂时无法读取。",
+            }
+
     @router.get("")
     async def list_core(_: AdminIdentity = Depends(require_admin)) -> dict:
         svc = _profile_service(runtime)
@@ -1025,5 +1045,37 @@ def build_persona_router(*, runtime) -> APIRouter:
             outcome_unknown=False,
         )
         return {"success": True, "deleted": bool(deleted), **report}
+
+    @router.get("/scoped-document")
+    async def get_scoped_document(platform: str, bot_id: str, user_id: str, group_id: str = "",
+                                  _: AdminIdentity = Depends(require_admin)) -> dict:
+        service = getattr(_runtime_bundle(runtime), "scoped_profile_service", None)
+        if service is None:
+            raise HTTPException(status_code=503, detail="scoped_profile_unavailable")
+        document = service.get_scoped_document_v3(platform=platform, bot_id=bot_id, group_id=group_id, user_id=user_id)
+        return {"document": document, "shared_claims": service.get_shared_claims(platform=platform, bot_id=bot_id, user_id=user_id)}
+
+    @router.post("/scoped-sharing")
+    async def set_scoped_sharing(payload: dict = Body(...), admin: AdminIdentity = Depends(require_admin)) -> dict:
+        service = getattr(_runtime_bundle(runtime), "scoped_profile_service", None)
+        if service is None:
+            raise HTTPException(status_code=503, detail="scoped_profile_unavailable")
+        if type(payload.get("enabled")) is not bool or type(payload.get("revision")) is not int:
+            raise HTTPException(status_code=422, detail="enabled_boolean_and_revision_required")
+        try:
+            service.set_claim_sharing(**{k: str(payload.get(k) or "") for k in ("platform", "bot_id", "group_id", "user_id", "claim_key")},
+                                      revision=payload["revision"], enabled=payload["enabled"], approved_by=str(admin.qq))
+        except ValueError as exc:
+            # Claim keys and revision conflicts are administrator-visible
+            # states, but exception text can contain storage implementation
+            # details. Keep the HTTP projection stable and bounded.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "scoped_profile_sharing_conflict",
+                    "message": "画像已更新、claim 已失效或当前作用域不存在；请刷新后重试。",
+                },
+            ) from exc
+        return {"ok": True, "enabled": payload["enabled"]}
 
     return router

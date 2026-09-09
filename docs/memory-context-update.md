@@ -47,7 +47,7 @@ Provider 池每条路由支持 `context_window_tokens`、`max_input_tokens`、`m
 `scripts/memory_api_replay.py` 是独立合成回放工具，只读取明确指定的 JSONL，不读取插件数据库或密钥文件。示例（API 凭据预先置于环境变量，不写进命令行）：
 
 ```powershell
-python scripts/memory_api_replay.py --cases tests/replay_corpus/memory_temporal.jsonl --endpoint https://YOUR-API/v1 --model YOUR-MODEL --repeat 3 --output D:/test_artifacts/personification/memory_update/api-replay.json
+python scripts/memory_api_replay.py --cases tests/replay_corpus/global_memory/memory_temporal.jsonl --endpoint https://YOUR-API/v1 --model YOUR-MODEL --repeat 3 --output D:/test_artifacts/personification/memory_update/api-replay.json
 ```
 
 密钥变量默认 `PERSONIFICATION_REPLAY_API_KEY`。四个上下文变体输出 usage、P50/P95 和结果文本。用例的 expected_contains 仅作可复查的包含检查，不等同于独立语义评审或生产质量分数；实际对话自然度、费用与纠正复发率需要人工/API评审后验收。

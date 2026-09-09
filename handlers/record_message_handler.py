@@ -12,7 +12,8 @@ async def handle_record_message_event(
     create_background_task: Callable[[str], None],
     create_summary_task: Optional[Callable[[str], None]] = None,
     user_policy_gate: Any = None,
-    create_scoped_profile_task: Optional[Callable[[str, str], None]] = None,
+    create_scoped_profile_task: Optional[Callable[..., None]] = None,
+    create_private_profile_task: Optional[Callable[..., None]] = None,
     favorability_observer: Any = None,
     peer_bot_observer: Any = None,
     peer_bot_coordinator: Any = None,
@@ -72,7 +73,19 @@ async def handle_record_message_event(
     if group_id and create_summary_task is not None:
         create_summary_task(group_id)
     if group_id and create_scoped_profile_task is not None and not is_peer_bot_event:
-        create_scoped_profile_task(group_id, str(getattr(event, "user_id", "") or ""))
+        create_scoped_profile_task(
+            group_id,
+            str(getattr(event, "user_id", "") or ""),
+            platform=str(getattr(event, "platform", "onebot") or "onebot"),
+            bot_id=str(getattr(event, "self_id", "unknown") or "unknown"),
+        )
+    if not group_id and create_private_profile_task is not None and not is_peer_bot_event:
+        try:
+            message = getattr(event, "message", None)
+            text = message.extract_plain_text() if hasattr(message, "extract_plain_text") else str(message or "")
+            create_private_profile_task(str(getattr(event, "user_id", "") or ""), platform=str(getattr(event, "platform", "onebot") or "onebot"), bot_id=str(getattr(event, "self_id", "unknown") or "unknown"), source_id=str(getattr(event, "message_id", "") or ""), text=text)
+        except Exception as exc:
+            logger.debug(f"拟人插件：私聊画像观察失败: {type(exc).__name__}")
     if group_id and should_auto_analyze:
         logger.info(f"拟人插件：群 {group_id} 消息已满 200 条，已创建后台任务进行风格分析...")
         create_background_task(group_id)

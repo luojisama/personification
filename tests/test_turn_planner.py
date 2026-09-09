@@ -141,6 +141,7 @@ def test_parse_turn_plan_payload_clamps_and_normalizes() -> None:
             "bot_emotion": "关切",
             "emotion_intensity": "high",
             "expression_style": "先听再回应",
+            "expression_mode": "qq_face",
             "reply_shape": "fragment",
             "emotion_updates": [{"scope": "user", "category": "关切"}],
             "sticker_appropriate": False,
@@ -173,6 +174,7 @@ def test_parse_turn_plan_payload_clamps_and_normalizes() -> None:
     assert plan.evidence_policy == "strict"
     assert plan.emotional_support.advice_permission == "ask_first"
     assert plan.reply_shape == "fragment"
+    assert plan.expression_mode == "qq_face"
     assert plan.emotion_updates == [{"scope": "user", "category": "关切"}]
     assert plan.sticker_appropriate is False
     assert plan.meta_question is True
@@ -257,6 +259,7 @@ def test_turn_plan_semantic_frame_round_trip_preserves_care_and_emotion() -> Non
         emotion_intensity="high",
         emotion_updates=[{"scope": "user", "category": "认真关切"}],
         expression_style="先倾听确认",
+        expression_mode="sticker",
         reply_shape="micro",
         tts_style_hint="轻声",
         sticker_mood_hint="感动|表达关心",
@@ -282,6 +285,7 @@ def test_turn_plan_semantic_frame_round_trip_preserves_care_and_emotion() -> Non
     assert restored.bot_emotion == "认真关切"
     assert restored.emotion_updates == [{"scope": "user", "category": "认真关切"}]
     assert restored.reply_shape == "micro"
+    assert restored.expression_mode == "sticker"
     assert restored.tts_style_hint == "轻声"
     assert restored.sticker_mood_hint == "感动|表达关心"
     assert restored.sticker_appropriate is False

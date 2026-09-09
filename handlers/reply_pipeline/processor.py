@@ -459,6 +459,7 @@ class RuntimeDeps:
     knowledge_store: Any = None
     memory_store: Any = None
     profile_service: Any = None
+    scoped_profile_service: Any = None
     memory_curator: Any = None
     background_intelligence: Any = None
     user_policy_gate: Any = None
@@ -1583,7 +1584,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     user_profile_block = ""
     try:
         profile_service = getattr(runtime, "profile_service", None)
-        if profile_service is not None:
+        # v3 profiles are already projected through PreparedMemoryContext with
+        # platform/Bot scope. Never also inject unscoped legacy summaries.
+        if profile_service is not None and getattr(runtime, "scoped_profile_service", None) is None:
             user_profile_block = profile_service.build_prompt_block(
                 user_id=user_id,
                 group_id="" if is_private_session else str(group_id),
@@ -3559,6 +3562,14 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             return
 
         group_config = persona.get_group_config(str(group_id))
+        expression_mode = str(getattr(turn_plan, "expression_mode", "auto") or "auto").strip().lower()
+        if expression_mode not in {"auto", "text", "emoji", "qq_face", "sticker"}:
+            expression_mode = "auto"
+        # Legacy semantic frames encoded a requested QQ expression solely in
+        # message_intent.  Convert that old decision before local selection so
+        # it cannot produce a sticker plus a QQ face by accident.
+        if expression_mode == "auto" and message_intent == "expression":
+            expression_mode = "qq_face"
         sticker_segment, sticker_name = await maybe_choose_reply_sticker(
             runtime=runtime,
             group_id=str(group_id),
@@ -3573,6 +3584,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             is_random_chat=is_random_chat,
             is_group_idle_active=is_group_idle_active,
             force_mode=force_mode,
+            expression_mode=expression_mode,
             strip_injected_visual_summary=_strip_injected_visual_summary,
         )
 
@@ -3679,6 +3691,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             is_private=is_private_session,
             is_random_chat=is_random_chat,
             force_mode=force_mode,
+            expression_mode=expression_mode,
             has_rich_sticker=bool(sticker_segment),
         )
         if qq_auto_marker:

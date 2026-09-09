@@ -246,3 +246,14 @@ def test_config_manager_atomically_removes_deprecated_qwen_web_fields(monkeypatc
         ]
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_existing_explicit_embedding_keeps_hybrid_mode(tmp_path):
+    fields = {"personification_real_embedding_enabled", "personification_embedding_provider", "personification_embedding_model"}
+    cfg = _build_config(tmp_path, fields_set=fields)
+    cfg.personification_real_embedding_enabled = True
+    cfg.personification_embedding_provider = "gemini"
+    cfg.personification_embedding_model = "embedding-model"
+    cfg.personification_memory_retrieval_mode = "algorithm_llm"
+    config_manager.ConfigManager(plugin_config=cfg, logger=None).load()
+    assert cfg.personification_memory_retrieval_mode == "hybrid_api"

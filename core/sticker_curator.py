@@ -37,7 +37,7 @@ CURATOR_SYSTEM_PROMPT = (
     "- keep：保留，不做改动；\n"
     "- merge_into：与另一张高度重复，把当前文件的标签合并进 target_file（填重复文件的文件名），当前文件将被移入 trash 并在元数据中删除；\n"
     "- retag：标签错误或不准确，用 new_tags 给出修正后的 mood_tags 和 scene_tags；\n"
-    "- remove：低质量/模糊/无复用价值，移入 trash 并删除元数据条目。\n"
+    "- remove：仅限已有清晰视觉证据证明无复用价值，移入 trash 并删除元数据条目；低置信或描述不清的条目必须 keep，等待视觉重标。\n"
     "要求：合并操作 target_file 必须是同批出现的其他文件名；不要对同一批中多个文件选择 merge_into 指向同一 target（即一个目标最多被合并一次）；"
     "保留和合并的数量应占总数的 70% 以上，不要过度清除。"
 )
@@ -207,6 +207,20 @@ def _apply_curation_action(
 
     # 在变更前快照原始元数据，便于回滚
     original_entry = metadata.get(file_name, {})
+    visual_confidence = 0.0
+    if isinstance(original_entry, dict):
+        try:
+            visual_confidence = float(original_entry.get("visual_confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            visual_confidence = 0.0
+    # The curator only sees text.  It cannot turn a fuzzy old description into
+    # visual truth or destructively curate it; make the need for a real visual
+    # pass explicit and leave the source asset intact.
+    if visual_confidence < 0.7 and action_type in {"remove", "merge_into", "retag"}:
+        if isinstance(original_entry, dict):
+            original_entry["needs_visual_relabel"] = True
+        action_type = "keep"
+        action = {**action, "action": "keep", "reason": f"{reason}|needs_visual_relabel"}
     original_snapshot: dict[str, Any] = {}
     if isinstance(original_entry, dict):
         original_snapshot = {
@@ -333,7 +347,12 @@ async def _run_curation(
             )
         total_processed += len(batch)
 
-    if any(a["action"] != "keep" for a in log_entries):
+    needs_visual_relabel = any(
+        isinstance(entry, dict) and bool(entry.get("needs_visual_relabel"))
+        for name, entry in metadata.items()
+        if name != "_meta"
+    )
+    if any(a["action"] != "keep" for a in log_entries) or needs_visual_relabel:
         save_sticker_metadata_sync(sticker_dir, metadata)
         result.details.append(
             f"整理完成：保留 {result.keep_count}、合并 {result.merge_count}、"

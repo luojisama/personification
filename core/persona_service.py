@@ -4,6 +4,7 @@ import asyncio
 import re
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -181,6 +182,8 @@ class PersonaStore:
         logger: Any,
         data_file: Path | None = None,
         profile_service: Any = None,
+        scoped_profile_service: Any = None,
+        private_profile_refresh: Any = None,
         enabled_getter: Callable[[], bool] | None = None,
     ) -> None:
         self._data_dir = Path(data_dir)
@@ -188,6 +191,8 @@ class PersonaStore:
         self._history_max = max(1, int(history_max))
         self._logger = logger
         self._profile_service = profile_service
+        self._scoped_profile_service = scoped_profile_service
+        self._private_profile_refresh = private_profile_refresh
         self._enabled_getter = enabled_getter or (lambda: True)
         self._write_lock = asyncio.Lock()
         self._write_fence = threading.RLock()
@@ -600,13 +605,32 @@ class PersonaStore:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        cancelled_scoped_tasks = await self._cancel_bound_profile_tasks()
         counts = await asyncio.to_thread(self._clear_all_sync)
         self._generating.clear()
         self._tasks.clear()
         return {
             "cancelled_tasks": len(tasks),
+            "cancelled_scoped_tasks": cancelled_scoped_tasks,
             **counts,
         }
+
+    def bind_profile_refreshers(self, scoped_profile_service: Any = None, private_profile_refresh: Any = None) -> None:
+        """Bind runtime refreshers created after PersonaStore construction."""
+        self._scoped_profile_service = scoped_profile_service
+        self._private_profile_refresh = private_profile_refresh
+
+    async def _cancel_bound_profile_tasks(self) -> int:
+        total = 0
+        for service in (self._scoped_profile_service, self._private_profile_refresh):
+            cancel = getattr(service, "cancel_all_tasks", None)
+            if not callable(cancel):
+                continue
+            try:
+                total += max(0, int(await cancel() or 0))
+            except Exception as exc:
+                self._logger.warning(f"[persona] profile refresh cancellation failed type={type(exc).__name__}")
+        return total
 
     async def purge_user(self, user_id: str) -> dict[str, int]:
         uid = str(user_id or "").strip()
@@ -632,24 +656,56 @@ class PersonaStore:
     def _clear_all_sync(self) -> dict[str, int]:
         with self._write_fence:
             self._write_generation += 1
-            with connect_sync() as conn:
-                persona_row = conn.execute("SELECT COUNT(1) AS cnt FROM user_personas").fetchone()
-                history_user_row = conn.execute(
-                    "SELECT COUNT(DISTINCT user_id) AS cnt FROM persona_histories"
-                ).fetchone()
-                history_msg_row = conn.execute("SELECT COUNT(1) AS cnt FROM persona_histories").fetchone()
-                conn.execute("DELETE FROM user_personas")
-                conn.execute("DELETE FROM persona_histories")
-                conn.commit()
-            profile_counts = {"core_profiles": 0, "local_profiles": 0}
-            if self._profile_service is not None:
-                profile_counts = self._profile_service.memory_store.clear_all_profiles()
+            memory_store = getattr(self._profile_service, "memory_store", None)
+            maintenance_lock = getattr(memory_store, "maintenance_lock", None)
+            # The same lock protects legacy profile rows, the v3 document
+            # family and the profile-generation fence.  A late refresh either
+            # observes the new generation or is rejected by its CAS write.
+            lock_context = maintenance_lock if maintenance_lock is not None else nullcontext()
+            with lock_context:
+                profile_counts = {"core_profiles": 0, "local_profiles": 0}
+                if memory_store is not None:
+                    profile_counts = memory_store.clear_all_profiles()
+                scoped_counts = self._clear_scoped_documents_sync()
+                with connect_sync() as conn:
+                    persona_row = conn.execute("SELECT COUNT(1) AS cnt FROM user_personas").fetchone()
+                    history_user_row = conn.execute(
+                        "SELECT COUNT(DISTINCT user_id) AS cnt FROM persona_histories"
+                    ).fetchone()
+                    history_msg_row = conn.execute("SELECT COUNT(1) AS cnt FROM persona_histories").fetchone()
+                    conn.execute("DELETE FROM user_personas")
+                    conn.execute("DELETE FROM persona_histories")
+                    conn.commit()
             return {
                 "personas": int(persona_row["cnt"] if persona_row else 0),
                 "history_users": int(history_user_row["cnt"] if history_user_row else 0),
                 "history_messages": int(history_msg_row["cnt"] if history_msg_row else 0),
                 **profile_counts,
+                **scoped_counts,
             }
+
+    def _clear_scoped_documents_sync(self) -> dict[str, int]:
+        db_path = getattr(self._scoped_profile_service, "db_path", None)
+        counts = {"scoped_documents": 0, "scoped_history": 0, "scoped_shares": 0}
+        with connect_sync(db_path) as conn:
+            tables = {
+                str(row["name"]) for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+                    "('scoped_profile_documents_v3','scoped_profile_history_v3','scoped_profile_shares_v1')"
+                ).fetchall()
+            }
+            mapping = {
+                "scoped_profile_documents_v3": ("scoped_documents", "scoped_profile_documents_v3"),
+                "scoped_profile_history_v3": ("scoped_history", "scoped_profile_history_v3"),
+                "scoped_profile_shares_v1": ("scoped_shares", "scoped_profile_shares_v1"),
+            }
+            for table, (key, name) in mapping.items():
+                if table in tables:
+                    row = conn.execute(f"SELECT COUNT(1) AS cnt FROM {name}").fetchone()
+                    counts[key] = int(row["cnt"] if row else 0)
+                    conn.execute(f"DELETE FROM {name}")
+            conn.commit()
+        return counts
 
     def _purge_user_sync(self, user_id: str) -> dict[str, int]:
         uid = str(user_id or "").strip()

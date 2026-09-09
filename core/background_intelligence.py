@@ -98,6 +98,8 @@ class BackgroundIntelligence:
             "embedding_indexed": 0,
             "embedding_failed": 0,
         }
+        if callable(getattr(self.memory_store, "rebuild_text_index_batch", None)):
+            result["text_indexed"] = await asyncio.to_thread(self.memory_store.rebuild_text_index_batch)
         try:
             if bool(getattr(self.plugin_config, "personification_memory_decay_enabled", True)):
                 result["decayed"] = int(await asyncio.to_thread(self.memory_decay_scheduler.run_once))

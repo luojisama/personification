@@ -15,6 +15,7 @@ from ..framework import SocialContext, dispatch_social_outbound, run_social_text
 from ..gate import gate_should_send
 from ..quota import is_quota_exceeded, mark_sent
 from ....core.visible_output import guard_visible_text
+from ....core.social_decision import SocialDecision, scheduled_event_id
 
 _SCENARIO_MORNING = "morning_greeting"
 _SCENARIO_EVENING = "evening_greeting"
@@ -82,9 +83,10 @@ async def _run_greetings(ctx: SocialContext, *, time_of_day: str) -> None:
             cooldown_seconds=cooldown,
         ):
             continue
-        draft = await _generate_greeting(ctx, persona_snippet[:persona_max], time_of_day)
+        draft = await _generate_greeting(ctx, bot, user_id, persona_snippet[:persona_max], time_of_day)
         if not draft:
             continue
+        social_decision = None
         if gate_enabled:
             allow, _rewritten, reason = await gate_should_send(
                 tool_caller=ctx.tool_caller,
@@ -97,10 +99,15 @@ async def _run_greetings(ctx: SocialContext, *, time_of_day: str) -> None:
                 draft=draft,
                 persona_snippet=persona_snippet[:persona_max],
                 now_str=_now_str(ctx),
+                memory_scope={"platform": "onebot", "bot_id": str(getattr(bot, "self_id", "") or ""), "user_id": str(user_id), "group_id": ""},
             )
             if not allow:
                 ctx.logger.info(f"[social/greetings] gate denied user={user_id}: {reason}")
                 continue
+            social_decision = SocialDecision(
+                action="contact", target_id=user_id, content=draft, motivation=reason or scenario,
+                source_event_ids=(scheduled_event_id(scenario=scenario, period=_now_str(ctx)[:10], target_id=user_id),),
+            )
         final_text = draft
         final_text = guard_visible_text(
             final_text, logger=ctx.logger, surface="social_greeting", allow_direct_media=False
@@ -116,6 +123,7 @@ async def _run_greetings(ctx: SocialContext, *, time_of_day: str) -> None:
                 surface="social_greeting",
                 content=final_text,
                 user_target=user_id,
+                social_decision=social_decision,
             )
         except Exception as exc:
             ctx.logger.warning(f"[social/greetings] send to {user_id} failed: {exc}")
@@ -167,7 +175,7 @@ def _get_first_bot(ctx: SocialContext) -> Any | None:
     return next(iter(bots.values()), None) if bots else None
 
 
-async def _generate_greeting(ctx: SocialContext, persona_snippet: str, time_of_day: str) -> str:
+async def _generate_greeting(ctx: SocialContext, bot: Any, user_id: str, persona_snippet: str, time_of_day: str) -> str:
     label = "早安问候" if time_of_day == "morning" else "晚安问候"
     prompt = _GREETING_PROMPT.format(time_label=label, persona_snippet=persona_snippet or "<无画像>")
     messages = [{"role": "user", "content": prompt}]
@@ -183,6 +191,7 @@ async def _generate_greeting(ctx: SocialContext, persona_snippet: str, time_of_d
             messages=messages,
             trigger_reason=f"social_{time_of_day}_greeting",
             chat_intent_hint="social_greeting",
+            memory_scope={"platform": "onebot", "bot_id": str(getattr(bot, "self_id", "") or ""), "user_id": str(user_id), "group_id": ""},
         )
     except Exception as exc:
         ctx.logger.debug(f"[social/greetings] Agent generate failed: {exc}")

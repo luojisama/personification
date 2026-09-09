@@ -74,12 +74,13 @@ class PreparedMemoryContext:
     history: list[dict] = field(default_factory=list)
     memories: list[dict] = field(default_factory=list)
     states: list[dict] = field(default_factory=list)
+    profiles: list[dict] = field(default_factory=list)
     status: str = "not_triggered"
     diagnostics: dict[str, Any] = field(default_factory=dict)
     timezone: str = "Asia/Shanghai"
 
     def render(self) -> str:
-        data = {"current_states": [{**item, "trust": "untrusted_data_only", "usage": "reference_only"} for item in self.states], "recalled_evidence": [
+        data = {"profiles": self.profiles, "current_states": [{**item, "trust": "untrusted_data_only", "usage": "reference_only"} for item in self.states], "recalled_evidence": [
             {key: item.get(key) for key in ("memory_id", "summary", "time_created", "time_hint", "source_kind")}
             for item in self.memories
         ]}
@@ -88,10 +89,13 @@ class PreparedMemoryContext:
 
 
 async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
-                                 messages: list[dict], turn_plan: Any = None) -> PreparedMemoryContext:
+                                 messages: list[dict], turn_plan: Any = None,
+                                 surface: str = "chat", refresh: bool = True) -> PreparedMemoryContext:
     config = runtime.plugin_config
     timezone = str(getattr(config, "personification_timezone", "Asia/Shanghai") or "Asia/Shanghai")
     result = PreparedMemoryContext(history=project_history(messages, timezone), timezone=timezone)
+    evidence_messages = list(messages)
+    result.diagnostics["surface"] = surface
     if not bool(getattr(config, "personification_memory_context_enabled", True)):
         result.status = "disabled"
         return result
@@ -100,7 +104,7 @@ async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
     current_platform = str(identity.get("platform") or getattr(event, "platform", "") or "onebot")
     current_bot_id = str(identity.get("bot_id") or getattr(bot, "self_id", "") or "")
     group_id = str(getattr(event, "group_id", "") or "")
-    if group_id and current_bot_id:
+    if group_id and current_bot_id and surface == "chat":
         from ..utils import get_recent_group_msgs, get_group_msg_by_message_id
         from .history_config import effective_history_message_limit, effective_history_days
         from .message_provenance import is_personification_reply_record
@@ -125,11 +129,15 @@ async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
         if policy is not None:
             group_history, _ = await policy.filter_context_messages(group_history, bot_self_id=str(getattr(bot, "self_id", "")))
         known = {str(m.get("message_id")) for m in messages if m.get("message_id")}
-        extras = [{**m, "role": "assistant" if is_personification_reply_record(m, current_bot_id) and str(m.get("user_id") or "") == current_bot_id else "user", "timestamp": m.get("time", 0)}
+        extras = [{**m, "id": "group:" + str(m.get("message_id") or ""), "_evidence_table": "group_messages", "role": "assistant" if is_personification_reply_record(m, current_bot_id) and str(m.get("user_id") or "") == current_bot_id else "user", "timestamp": m.get("time", 0)}
                   for m in group_history if not m.get("message_id") or str(m["message_id"]) not in known]
         # The current user request stays last. All historical sources remain labelled.
         historical = sorted(extras + messages[:-1], key=lambda m: float(m.get("timestamp", m.get("time", 0)) or 0))
         result.history = project_history(historical + messages[-1:], timezone)
+        target_id = str(getattr(event, "user_id", "") or "")
+        selected = [m for m in historical if str(m.get("user_id") or "") == target_id
+                    or (quoted_id and str(m.get("message_id") or "") == quoted_id)]
+        evidence_messages = selected[-23:] + messages[-1:]
     if not bool(getattr(config, "personification_memory_enabled", True)):
         result.status = "disabled"
         return result
@@ -141,13 +149,27 @@ async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
     identity = current_llm_context()
     scope = dict(user_id=str(getattr(event, "user_id", "") or ""),
                  group_id=str(getattr(event, "group_id", "") or ""),
-                 platform=str(identity.get("platform") or "onebot"),
+                 platform=current_platform,
                  bot_id=str(identity.get("bot_id") or getattr(bot, "self_id", "") or ""))
     # Identity comes only from the current transport, never retrieved text.
-    if not scope["user_id"] or not scope["bot_id"]:
+    if (not scope["user_id"] and not scope["group_id"]) or not scope["bot_id"]:
         result.status = "scope_filtered"
         return result
-    query = render_history(messages[-8:], timezone)[-6000:]
+    try:
+        profiles = getattr(runtime, "scoped_profile_service", None)
+        if profiles is not None and scope["user_id"] and "qzone" not in surface:
+            document = profiles.get_scoped_document_v3(**scope)
+            if document:
+                result.profiles = [{"document": document.get("document", {}), "trust": "untrusted_data_only", "usage": "reference_only"}]
+        shared_reader = getattr(profiles, "get_shared_claims", None)
+        if callable(shared_reader) and scope["user_id"]:
+            shared = shared_reader(platform=scope["platform"], bot_id=scope["bot_id"], user_id=scope["user_id"])
+            if shared:
+                result.profiles.append({"claims": shared, "trust": "untrusted_data_only", "usage": "reference_only"})
+    except Exception as exc:
+        result.diagnostics["profile_status"] = "failed"
+        result.diagnostics["profile_error_type"] = type(exc).__name__
+    query = render_history(evidence_messages[-8:], timezone)[-6000:]
     caller = getattr(runtime, "lite_tool_caller", None) or getattr(runtime, "agent_tool_caller", None)
     limit = max(1, min(64, int(getattr(config, "personification_memory_auto_recall_candidate_limit", 32))))
     maximum = max(0, min(32, int(getattr(config, "personification_memory_auto_recall_inject_limit", 12))))
@@ -156,22 +178,47 @@ async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
 
     async def run() -> None:
         kwargs = dict(query=query, scope="auto", **scope, limit=limit, mode="auto",
-                      context_type="group" if scope["group_id"] else "private")
+                      context_type="group" if scope["group_id"] or "qzone" in surface else "private")
         recall = getattr(store, "arecall_memories", None)
-        candidates = (await recall(**kwargs) if callable(recall)
-                      else await asyncio.to_thread(store.recall_memories, **kwargs))
+        from .memory_query import MemoryQuery, plan_memory_query
+        planned = MemoryQuery(queries=[query])
+        if bool(getattr(config, "personification_memory_query_planning_enabled", True)):
+            planned = await plan_memory_query(query, result.states, caller, timeout=min(1.5, timeout * .3), turn_plan=turn_plan)
+        result.diagnostics["query_planning"] = planned.status
+        candidate_map = {}
+        expressions = list(planned.queries)
+        # Event ids only refer to already scoped states. Their locally stored
+        # statements enrich lexical retrieval without accepting model SQL/ids.
+        related = [str(state.get("statement") or "")[:300] for state in result.states
+                   if str(state.get("state_id") or "") in planned.event_ids]
+        if related and expressions:
+            expressions[-1] = (expressions[-1] + " " + " ".join(related))[:900]
+        result.diagnostics["event_query_count"] = len(related)
+        for expression in expressions:
+            found = (await recall(**{**kwargs, "query": expression}) if callable(recall)
+                     else await asyncio.to_thread(store.recall_memories, **{**kwargs, "query": expression}))
+            for item in found:
+                if "qzone" in surface and (item.get("permission_type") != "public_preference" or item.get("visibility") != "public"):
+                    continue
+                timestamp = float(item.get("time_created") or 0)
+                if planned.after and timestamp < planned.after or planned.before and timestamp > planned.before:
+                    continue
+                candidate_map.setdefault(str(item.get("memory_id")), item)
+        candidates = list(candidate_map.values())[:limit]
         from .memory_recall_gate import gate_memory_candidates
         def diagnostic(code: str, detail: dict) -> None:
             result.diagnostics[code] = result.diagnostics.get(code, 0) + 1
         result.memories = await gate_memory_candidates(
             candidates=candidates, query=query, turn_plan=turn_plan, tool_caller=caller,
-            maximum=maximum, minimum_score=0.0, timeout_seconds=timeout,
-            on_diagnostic=diagnostic, private_owner_id=scope["user_id"] if not scope["group_id"] else "",
+            maximum=maximum, minimum_score=0.0, timeout_seconds=max(.1, timeout - (time.monotonic() - started) - .05),
+            on_diagnostic=diagnostic, private_owner_id=scope["user_id"] if not scope["group_id"] and "qzone" not in surface else "",
         )
         result.status = "injected" if result.memories else "no_hit"
         result.diagnostics["candidate_count"] = len(candidates)
         if result.diagnostics.get("memory_semantic_gate_timeout"):
             result.status = "timeout"
+        elif result.diagnostics.get("memory_semantic_gate_rejected"):
+            result.status = "semantic_failed"
         elif result.diagnostics.get("memory_scope_filtered") and not result.memories:
             result.status = "scope_filtered"
         status_reader = getattr(store, "embedding_status", None)
@@ -181,7 +228,7 @@ async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
     async def refresh_states() -> None:
         from .temporal_memory import update_current_states
         try:
-            result.states = await update_current_states(scope=scope, messages=messages[-24:], caller=caller,
+            result.states = await update_current_states(scope=scope, messages=evidence_messages[-24:], caller=caller,
                                                        timezone=timezone, timeout=timeout)
             result.diagnostics["state_status"] = "ready"
         except asyncio.TimeoutError:
@@ -201,8 +248,8 @@ async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
 
     try:
         from .temporal_memory import load_current_states
-        result.states = load_current_states(scope)
-        await asyncio.gather(recall_with_deadline(), refresh_states())
+        result.states = load_current_states(scope) if "qzone" not in surface else []
+        await asyncio.gather(recall_with_deadline(), refresh_states() if refresh else asyncio.sleep(0))
     except asyncio.TimeoutError:
         result.status = "timeout"
     except Exception as exc:

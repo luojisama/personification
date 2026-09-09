@@ -724,6 +724,9 @@ def select_profile_evidence(
     db_path: str | Path | None = None,
     before_limit: int = MAX_EVIDENCE_SIDE,
     after_limit: int = MAX_EVIDENCE_SIDE,
+    *,
+    platform: str = "",
+    bot_id: str = "",
 ) -> ProfileEvidenceWindow:
     """Select related human messages around one safe group-message anchor."""
     row_id = _non_negative_int(anchor_row_id, 0)
@@ -734,11 +737,14 @@ def select_profile_evidence(
     path = Path(db_path) if db_path is not None else Path(get_db_path())
 
     with _readonly_connection(path) as connection:
+        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(group_messages)")}
+        platform_column = "platform" if "platform" in columns else "''"
+        bot_column = "bot_id" if "bot_id" in columns else "''"
         anchor = connection.execute(
-            """
+            f"""
             SELECT id, group_id, user_id, content, is_bot, reply_to_msg_id,
                    reply_to_user_id, mentioned_ids, message_id, thread_id,
-                   source_kind, timestamp
+                   source_kind, {platform_column} AS platform, {bot_column} AS bot_id, timestamp
             FROM group_messages
             WHERE id=?
             """,
@@ -749,6 +755,11 @@ def select_profile_evidence(
         source_kind = str(anchor["source_kind"] or "").strip().lower()
         if int(anchor["is_bot"] or 0) != 0 or source_kind != "user":
             raise ProfileEvidenceError("anchor must be a human user group message")
+        platform_s, bot_s = str(platform or "").strip(), str(bot_id or "").strip()
+        if platform_s and str(anchor["platform"] or "").strip() != platform_s:
+            raise ProfileEvidenceError("anchor platform scope mismatch")
+        if bot_s and str(anchor["bot_id"] or "").strip() != bot_s:
+            raise ProfileEvidenceError("anchor bot scope mismatch")
         try:
             group_id = _normalize_identifier(anchor["group_id"], "group_id")
             anchor_user_id = _normalize_identifier(anchor["user_id"], "user_id")
@@ -756,11 +767,11 @@ def select_profile_evidence(
             raise ProfileEvidenceError(str(exc)) from exc
 
         rows = connection.execute(
-            """
-            WITH neighborhood(id) AS (
+            f"""
+            WITH scoped_messages AS (SELECT * FROM group_messages WHERE (?='' OR {platform_column}=?) AND (?='' OR {bot_column}=?)), neighborhood(id) AS (
                 SELECT id FROM (
                     SELECT id
-                    FROM group_messages
+                    FROM scoped_messages
                     WHERE TRIM(group_id)=? AND id<?
                       AND timestamp BETWEEN ? AND ?
                     ORDER BY id DESC
@@ -769,7 +780,7 @@ def select_profile_evidence(
                 UNION
                 SELECT id FROM (
                     SELECT id
-                    FROM group_messages
+                    FROM scoped_messages
                     WHERE TRIM(group_id)=? AND id>?
                       AND timestamp BETWEEN ? AND ?
                     ORDER BY id ASC
@@ -777,7 +788,7 @@ def select_profile_evidence(
                 )
             ), direct_reply(id) AS (
                 SELECT id
-                FROM group_messages
+                FROM scoped_messages
                 WHERE TRIM(group_id)=? AND id<>?
                   AND timestamp BETWEEN ? AND ?
                   AND (
@@ -798,7 +809,7 @@ def select_profile_evidence(
             SELECT id, group_id, user_id, content, is_bot, reply_to_msg_id,
                    reply_to_user_id, mentioned_ids, message_id, thread_id,
                    source_kind, timestamp
-            FROM group_messages
+            FROM scoped_messages
             WHERE TRIM(group_id)=? AND id<>? AND is_bot=0
               AND LOWER(TRIM(source_kind))='user'
               AND id IN (
@@ -809,6 +820,7 @@ def select_profile_evidence(
             ORDER BY timestamp ASC, id ASC
             """,
             (
+                platform_s, platform_s, bot_s, bot_s,
                 group_id,
                 row_id,
                 _finite_float(anchor["timestamp"], 0.0) - MAX_EVIDENCE_TIME_DISTANCE_SECONDS,

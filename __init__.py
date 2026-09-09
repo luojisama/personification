@@ -391,6 +391,28 @@ async def _init_personification_persona_store() -> None:
 
 
 @get_driver().on_startup
+async def _resume_scoped_profile_jobs() -> None:
+    """Resume only durable profile scheduling metadata after the runtime exists."""
+    bundle = _require_runtime_bundle()
+    private = getattr(bundle, "private_profile_refresh", None)
+    if private is not None:
+        try:
+            private.resume_pending()
+        except Exception as exc:
+            logger.warning(f"[private_profile] resume failed type={type(exc).__name__}")
+    service = getattr(bundle, "scoped_profile_service", None)
+    resume = getattr(service, "resume_pending", None)
+    if not callable(resume):
+        return
+    try:
+        resumed = int(resume())
+        if resumed:
+            logger.info(f"[scoped_profile] resumed pending scopes={resumed}")
+    except Exception as exc:
+        logger.warning(f"[scoped_profile] resume failed type={type(exc).__name__}")
+
+
+@get_driver().on_startup
 async def _apply_personification_image_host_allowlist() -> None:
     try:
         from .handlers.reply_pipeline.pipeline_sticker import set_image_host_allowlist
@@ -739,6 +761,17 @@ async def _init_personification_sticker_labeler() -> None:
         logger=logger,
         concurrency=max(1, int(getattr(plugin_config, "personification_labeler_concurrency", 3))),
     )
+    # Resume only explicitly queued visual-relabel jobs.  The durable job
+    # controller owns batching; watchdog startup scans remain separate.
+    try:
+        from .core.sticker_relabel_jobs import resume_pending
+        if sticker_runtime is not None:
+            resume_pending(
+                sticker_dir=sticker_dir, runtime=sticker_runtime, logger=logger,
+                concurrency=max(1, int(getattr(plugin_config, "personification_labeler_concurrency", 3))),
+            )
+    except Exception as exc:
+        logger.warning(f"[sticker relabel] resume failed type={type(exc).__name__}")
     if getattr(plugin_config, "personification_labeler_enabled", True):
         route_summary = resolve_global_fallback_provider(plugin_config, logger, warn=True)
         if sticker_runtime is not None:
@@ -824,6 +857,9 @@ async def _setup_social_intelligence() -> None:
 async def _close_personification_runtime() -> None:
     global _sticker_labeler_observer, _knowledge_build_task, runtime_bundle
     if runtime_bundle is not None:
+        private_profile_refresh = getattr(runtime_bundle, "private_profile_refresh", None)
+        if private_profile_refresh is not None:
+            await private_profile_refresh.close()
         scoped_profile_service = getattr(runtime_bundle, "scoped_profile_service", None)
         if scoped_profile_service is not None:
             try:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import re
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .db import connect_sync, get_db_path
+from .data_store import get_data_store
 from .memory_store import LocalProfileRevisionConflict, ProfileGenerationConflict
 from .scoped_profile import (
     GROUP_CONTEXTUAL_KEYS,
@@ -52,6 +54,7 @@ _SCOPED_PROFILE_SYSTEM_PROMPT = """你是群内差异画像分析器，只输出
 {"claims":[{"key":"communication_style","value":"在本群常用短句接梗",
 "confidence":0.8,"evidence_anchor_row_ids":[123]}]}
 """
+_SCHEDULE_NAMESPACE = "scoped_profile_schedule_v1"
 
 
 @dataclass(frozen=True)
@@ -151,8 +154,11 @@ class ScopedProfileService:
         tool_caller: Any,
         logger: Any,
         enabled: Callable[[], bool] | None = None,
-        auto_threshold: int = 4,
+        auto_threshold: int = 20,
         settle_after_group_rows: int = 5,
+        quiet_period_seconds: float = 600.0,
+        scope_cooldown_seconds: float = 600.0,
+        daily_api_budget: int = 100,
         max_concurrency: int = 4,
         max_pending_scopes: int = 128,
         db_path: Any = None,
@@ -164,24 +170,227 @@ class ScopedProfileService:
         self._enabled = enabled or (lambda: True)
         self.auto_threshold = max(1, int(auto_threshold))
         self.settle_after_group_rows = max(0, int(settle_after_group_rows))
+        # A positive default bounds background API spend; a deployment may set
+        # zero only when an outer provider budget is the authoritative limit.
+        self.quiet_period_seconds = max(0.0, float(quiet_period_seconds))
+        self.scope_cooldown_seconds = max(0.0, float(scope_cooldown_seconds))
+        self.daily_api_budget = max(0, int(daily_api_budget))
         self.db_path = db_path or get_db_path()
         self._clock = clock
-        self._tasks: dict[tuple[str, str], asyncio.Task[ScopedProfileRefreshResult]] = {}
-        self._dirty_scopes: dict[tuple[str, str], int] = {}
+        self._tasks: dict[tuple[str, str, str, str], asyncio.Task[ScopedProfileRefreshResult]] = {}
+        self._dirty_scopes: dict[tuple[str, str, str, str], int] = {}
+        self._observed: dict[tuple[str, str, str, str], tuple[int, float]] = {}
+        self._delayed: dict[tuple[str, str, str, str], asyncio.Task[None]] = {}
+        self._last_started: dict[tuple[str, str, str, str], float] = {}
+        self._running_counts: dict[tuple[str, str, str, str], int] = {}
+        self._daily_calls: dict[int, int] = {}
         self._semaphore = asyncio.Semaphore(max(1, int(max_concurrency)))
         self._max_pending_scopes = max(1, int(max_pending_scopes))
         self._closed = False
+        self._load_pending_schedule()
 
-    def observe_group_message(self, group_id: Any, user_id: Any) -> None:
+    @staticmethod
+    def _ensure_v3_table(conn: Any) -> None:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS scoped_profile_documents_v3 (
+                platform TEXT NOT NULL, bot_id TEXT NOT NULL, group_id TEXT NOT NULL,
+                user_id TEXT NOT NULL, document_json TEXT NOT NULL, profile_text TEXT NOT NULL DEFAULT '',
+                revision INTEGER NOT NULL DEFAULT 0, updated_at REAL NOT NULL,
+                PRIMARY KEY(platform, bot_id, group_id, user_id)
+            )"""
+        )
+        conn.execute("""CREATE TABLE IF NOT EXISTS scoped_profile_history_v3 (
+            platform TEXT NOT NULL, bot_id TEXT NOT NULL, group_id TEXT NOT NULL,
+            user_id TEXT NOT NULL, revision INTEGER NOT NULL, document_json TEXT NOT NULL,
+            updated_at REAL NOT NULL, PRIMARY KEY(platform,bot_id,group_id,user_id,revision))""")
+
+    def get_scoped_document_v3(
+        self, *, platform: Any, bot_id: Any, group_id: Any, user_id: Any
+    ) -> dict[str, Any] | None:
+        """Read a per-Bot document.  Empty/unknown identity never falls back to legacy."""
+        identity = (str(platform or "").strip(), str(bot_id or "").strip())
+        gid, uid = str(group_id or "").strip(), _normalize_scope_id(user_id, kind="user")
+        if not all(identity) or "unknown" in identity:
+            return None
+        with connect_sync(self.db_path) as conn:
+            self._ensure_v3_table(conn)
+            row = conn.execute(
+                "SELECT document_json, profile_text, revision, updated_at FROM scoped_profile_documents_v3 "
+                "WHERE platform=? AND bot_id=? AND group_id=? AND user_id=?", (*identity, gid, uid)
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            document = json.loads(str(row["document_json"] or "{}"))
+        except (TypeError, ValueError):
+            return None
+        return {"document": document, "profile_text": str(row["profile_text"] or ""), "revision": int(row["revision"] or 0), "updated_at": float(row["updated_at"] or 0)}
+
+    def put_scoped_document_v3(
+        self, *, platform: Any, bot_id: Any, group_id: Any, user_id: Any,
+        document: dict[str, Any], profile_text: str = "", expected_revision: int | None = None,
+        expected_generation: int | None = None,
+    ) -> dict[str, Any]:
+        """CAS write used by the background worker; never writes the legacy local table."""
+        platform_s, bot_s = str(platform or "").strip(), str(bot_id or "").strip()
+        # v3 uses an empty group id for source-restricted private documents;
+        # it is never a legacy/global fallback key.
+        gid = "" if str(group_id or "").strip() == "" else _normalize_scope_id(group_id, kind="group")
+        uid = _normalize_scope_id(user_id, kind="user")
+        if not platform_s or not bot_s or "unknown" in {platform_s, bot_s}:
+            raise ValueError("platform and bot_id are required for v3 scoped profile")
+        now = float(self._clock())
+        with self.profile_service.memory_store.maintenance_lock, connect_sync(self.db_path) as conn:
+            if expected_generation is not None and expected_generation != self.profile_service.memory_store.get_profile_generation():
+                raise ProfileGenerationConflict(expected_generation=expected_generation, current_generation=self.profile_service.memory_store.get_profile_generation())
+            self._ensure_v3_table(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT revision, document_json, updated_at FROM scoped_profile_documents_v3 WHERE platform=? AND bot_id=? AND group_id=? AND user_id=?", (platform_s, bot_s, gid, uid)).fetchone()
+            current = int(row["revision"] or 0) if row else 0
+            if expected_revision is not None and current != int(expected_revision):
+                conn.rollback()
+                raise LocalProfileRevisionConflict(
+                    expected_revision=int(expected_revision), current_revision=current
+                )
+            if row:
+                conn.execute("INSERT OR IGNORE INTO scoped_profile_history_v3 VALUES(?,?,?,?,?,?,?)",
+                             (platform_s, bot_s, gid, uid, current, row["document_json"], row["updated_at"]))
+            revision = current + 1
+            document = {**document, "revision": revision}
+            body = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            conn.execute("INSERT INTO scoped_profile_documents_v3(platform,bot_id,group_id,user_id,document_json,profile_text,revision,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(platform,bot_id,group_id,user_id) DO UPDATE SET document_json=excluded.document_json,profile_text=excluded.profile_text,revision=excluded.revision,updated_at=excluded.updated_at", (platform_s, bot_s, gid, uid, body, str(profile_text or ""), revision, now))
+            conn.commit()
+        return {"document": document, "profile_text": str(profile_text or ""), "revision": revision, "updated_at": now}
+
+    @staticmethod
+    def _ensure_share_table(conn: Any) -> None:
+        conn.execute("""CREATE TABLE IF NOT EXISTS scoped_profile_shares_v1 (
+            platform TEXT NOT NULL, bot_id TEXT NOT NULL, group_id TEXT NOT NULL,
+            user_id TEXT NOT NULL, claim_key TEXT NOT NULL, claim_hash TEXT NOT NULL,
+            approved_by TEXT NOT NULL, approved_at REAL NOT NULL,
+            PRIMARY KEY(platform,bot_id,group_id,user_id,claim_key))""")
+
+    def set_claim_sharing(self, *, platform: str, bot_id: str, group_id: str, user_id: str,
+                          claim_key: str, revision: int, enabled: bool, approved_by: str) -> None:
+        """Administrator-only grant for one reviewed claim, never an LLM permission."""
+        with self.profile_service.memory_store.maintenance_lock, connect_sync(self.db_path) as conn:
+            self._ensure_share_table(conn)
+            document = self.get_scoped_document_v3(platform=platform, bot_id=bot_id, group_id=group_id, user_id=user_id)
+            if not document or document["revision"] != revision:
+                raise ValueError("stale_profile_revision")
+            claim = next((c for c in document["document"].get("claims", []) if c.get("key") == claim_key), None)
+            if not isinstance(claim, dict) or not approved_by:
+                raise ValueError("claim_not_found")
+            conn.execute("DELETE FROM scoped_profile_shares_v1 WHERE platform=? AND bot_id=? AND group_id=? AND user_id=? AND claim_key=?",
+                         (platform, bot_id, group_id, user_id, claim_key))
+            if enabled:
+                digest = hashlib.sha256(json.dumps(claim, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+                conn.execute("INSERT INTO scoped_profile_shares_v1 VALUES(?,?,?,?,?,?,?,?)",
+                             (platform, bot_id, group_id, user_id, claim_key, digest, approved_by, self._clock()))
+            conn.commit()
+
+    def get_shared_claims(self, *, platform: str, bot_id: str, user_id: str) -> list[dict]:
+        if not platform or not bot_id or not user_id:
+            return []
+        with connect_sync(self.db_path) as conn:
+            self._ensure_v3_table(conn)
+            self._ensure_share_table(conn)
+            rows = conn.execute("""SELECT s.claim_key,s.claim_hash,s.group_id,d.document_json FROM scoped_profile_shares_v1 s
+                JOIN scoped_profile_documents_v3 d USING(platform,bot_id,group_id,user_id)
+                WHERE s.platform=? AND s.bot_id=? AND s.user_id=? ORDER BY s.approved_at DESC LIMIT 24""",
+                (platform, bot_id, user_id)).fetchall()
+        result = []
+        for row in rows:
+            document = json.loads(row["document_json"])
+            for claim in document.get("claims", []):
+                digest = hashlib.sha256(json.dumps(claim, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+                if claim.get("key") == row["claim_key"] and digest == row["claim_hash"]:
+                    result.append({"key": claim["key"], "value": claim.get("value"), "confidence": claim.get("confidence"),
+                                   "visibility": "shared_by_explicit_permission", "source_group_id": row["group_id"]})
+        return result
+
+    def _load_pending_schedule(self) -> None:
+        """Restore only opaque scope counters; evidence never enters this sidecar."""
+        try:
+            payload = get_data_store().load_sync(_SCHEDULE_NAMESPACE)
+        except Exception:
+            return
+        rows = payload.get("scopes", {}) if isinstance(payload, dict) else {}
+        if not isinstance(rows, dict):
+            return
+        for raw_key, row in rows.items():
+            if not isinstance(row, dict) or not isinstance(raw_key, str):
+                continue
+            parts = raw_key.split(":", 3)
+            if len(parts) != 4:
+                continue
+            try:
+                key = (
+                    _normalize_scope_id(parts[0], kind="group"), _normalize_scope_id(parts[1], kind="user"),
+                    str(parts[2]).strip(), str(parts[3]).strip(),
+                )
+                count = max(0, int(row.get("count", 0) or 0))
+                first_seen = float(row.get("last_seen", row.get("first_seen", 0)) or 0)
+                last_started = float(row.get("last_started", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if count > 0 and first_seen > 0:
+                self._observed[key] = (count, first_seen)
+            if last_started > 0:
+                self._last_started[key] = last_started
+        daily = payload.get("daily_calls", {}) if isinstance(payload, dict) else {}
+        if isinstance(daily, dict):
+            for day, count in daily.items():
+                try:
+                    self._daily_calls[int(day)] = max(0, int(count))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+
+    def _persist_pending_schedule(self) -> None:
+        rows = {
+            f"{group_id}:{user_id}:{platform}:{bot_id}": {
+                "count": count,
+                "last_seen": first_seen,
+                "last_started": self._last_started.get((group_id, user_id, platform, bot_id), 0.0),
+            }
+            for (group_id, user_id, platform, bot_id), (count, first_seen) in self._observed.items()
+        }
+        try:
+            get_data_store().mutate_sync(
+                _SCHEDULE_NAMESPACE,
+                lambda _current: {"version": 2, "scopes": rows, "daily_calls": self._daily_calls, "updated_at": float(self._clock())},
+            )
+        except Exception as exc:
+            self.logger.warning(f"[scoped_profile] schedule persistence failed type={type(exc).__name__}")
+
+    def resume_pending(self) -> int:
+        """Resume persisted quiet/count work after startup; safe to call repeatedly."""
+        if self._closed:
+            return 0
+        resumed = 0
+        for key in tuple(self._observed):
+            self._start_observed_refresh(key)
+            resumed += 1
+        return resumed
+
+    def observe_group_message(self, group_id: Any, user_id: Any, *, platform: Any = "", bot_id: Any = "") -> None:
         if self._closed or not self._enabled() or self.tool_caller is None:
             return
         try:
             key = (
                 _normalize_scope_id(group_id, kind="group"),
                 _normalize_scope_id(user_id, kind="user"),
+                str(platform or "").strip(), str(bot_id or "").strip(),
             )
         except ValueError:
             return
+        now = float(self._clock())
+        count, _last_seen = self._observed.get(key, (0, now))
+        count += 1
+        # Debounce from the latest evidence, not the first message in an
+        # indefinitely busy conversation.
+        self._observed[key] = (count, now)
+        self._persist_pending_schedule()
         active = self._tasks.get(key)
         if active is not None and not active.done():
             self._dirty_scopes[key] = self.profile_service.memory_store.get_profile_generation()
@@ -189,13 +398,31 @@ class ScopedProfileService:
         if len(self._tasks) >= self._max_pending_scopes:
             self.logger.warning("[scoped_profile] pending scope limit reached")
             return
+        last_started = self._last_started.get(key, 0.0)
+        cooldown_remaining = self.scope_cooldown_seconds - (now - last_started)
+        due_now = count >= self.auto_threshold and cooldown_remaining <= 0
+        if not due_now:
+            delay = max(
+                0.0,
+                cooldown_remaining,
+                self.quiet_period_seconds - (now - self._observed[key][1]),
+            )
+            self._schedule_delayed_refresh(key, delay)
+            return
         try:
             task = asyncio.create_task(
-                self.refresh_group_profile(group_id=key[0], user_id=key[1], force=False)
+                # A quiet scope has intentionally accumulated for the full
+                # debounce period, so it is eligible even below the count
+                # threshold.  Evidence selection and all OCC guards remain
+                # identical to an administrator-triggered refresh.
+                self.refresh_group_profile(group_id=key[0], user_id=key[1], platform=key[2], bot_id=key[3], force=True)
             )
         except RuntimeError:
             return
         self._tasks[key] = task
+        self._last_started[key] = now
+        self._running_counts[key] = count
+        self._persist_pending_schedule()
 
         def _discard(completed: asyncio.Task[ScopedProfileRefreshResult]) -> None:
             if self._tasks.get(key) is completed:
@@ -208,7 +435,75 @@ class ScopedProfileService:
                 self.logger.warning(
                     f"[scoped_profile] task failed type={type(error).__name__}"
                 )
-            self._schedule_dirty_scope(key)
+            self._finish_observed_refresh(key, completed)
+
+        task.add_done_callback(_discard)
+
+    def _schedule_delayed_refresh(self, key: tuple[str, str, str, str], delay: float) -> None:
+        """Coalesce quiet-period work; this only schedules, it never sends QQ."""
+        existing = self._delayed.get(key)
+        if existing is not None and not existing.done():
+            return
+
+        async def _later() -> None:
+            try:
+                await asyncio.sleep(max(0.0, delay))
+                if not self._closed:
+                    # Drop our own completed timer before rescheduling; a new
+                    # quiet/cooldown delay must not be swallowed by self.
+                    if self._delayed.get(key) is task:
+                        self._delayed.pop(key, None)
+                    # The timer is not another human message.  Reusing
+                    # observe_group_message here would inflate the threshold
+                    # on every quiet wake-up.
+                    self._start_observed_refresh(key)
+            except asyncio.CancelledError:
+                raise
+            finally:
+                if self._delayed.get(key) is task:
+                    self._delayed.pop(key, None)
+
+        try:
+            task = asyncio.create_task(_later())
+        except RuntimeError:
+            return
+        self._delayed[key] = task
+
+    def _start_observed_refresh(self, key: tuple[str, str, str, str]) -> None:
+        if self._closed or not self._enabled() or self.tool_caller is None:
+            return
+        active = self._tasks.get(key)
+        if active is not None and not active.done():
+            return
+        now = float(self._clock())
+        count, last_seen = self._observed.get(key, (0, now))
+        if not count:
+            return
+        quiet_remaining = self.quiet_period_seconds - (now - last_seen)
+        if quiet_remaining > 0:
+            self._schedule_delayed_refresh(key, quiet_remaining)
+            return
+        remaining = self.scope_cooldown_seconds - (now - self._last_started.get(key, 0.0))
+        if remaining > 0:
+            self._schedule_delayed_refresh(key, remaining)
+            return
+        if len(self._tasks) >= self._max_pending_scopes:
+            return
+        try:
+            task = asyncio.create_task(
+                self.refresh_group_profile(group_id=key[0], user_id=key[1], platform=key[2], bot_id=key[3], force=True)
+            )
+        except RuntimeError:
+            return
+        self._tasks[key] = task
+        self._last_started[key] = now
+        self._running_counts[key] = count
+        self._persist_pending_schedule()
+
+        def _discard(completed: asyncio.Task[ScopedProfileRefreshResult]) -> None:
+            if self._tasks.get(key) is completed:
+                self._tasks.pop(key, None)
+            self._finish_observed_refresh(key, completed)
 
         task.add_done_callback(_discard)
 
@@ -225,7 +520,13 @@ class ScopedProfileService:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
-        self._dirty_scopes.clear()
+        delayed = [task for task in self._delayed.values() if not task.done()]
+        for task in delayed:
+            task.cancel()
+        if delayed:
+            await asyncio.gather(*delayed, return_exceptions=True)
+        self._delayed.clear()
+        self._persist_pending_schedule()
 
     async def cancel_user_tasks(self, user_id: Any) -> int:
         """Cancel pending scoped-profile work for one user before destructive purge."""
@@ -250,9 +551,56 @@ class ScopedProfileService:
             )
         for key in [key for key in self._dirty_scopes if key[1] == uid]:
             self._dirty_scopes.pop(key, None)
+        for key in [key for key in self._observed if key[1] == uid]:
+            self._observed.pop(key, None)
+        for key, task in list(self._delayed.items()):
+            if key[1] == uid:
+                task.cancel()
+                self._delayed.pop(key, None)
+        self._persist_pending_schedule()
         return len(selected)
 
-    def _schedule_dirty_scope(self, key: tuple[str, str]) -> None:
+    async def cancel_all_tasks(self) -> int:
+        """Drop every queued scoped refresh without closing the service.
+
+        Destructive profile maintenance uses this before advancing the shared
+        profile generation.  ``close`` cannot be reused because the runtime
+        must continue accepting newly observed messages after the wipe.
+        """
+        current = asyncio.current_task()
+        tasks = [
+            task for task in [*self._tasks.values(), *self._delayed.values()]
+            if not task.done() and task is not current
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+        self._delayed.clear()
+        self._observed.clear()
+        self._dirty_scopes.clear()
+        self._running_counts.clear()
+        self._persist_pending_schedule()
+        return len(tasks)
+
+    def diagnostics(self) -> dict[str, Any]:
+        """Safe aggregate scheduling state for the management surface."""
+        today = int(float(self._clock()) // 86400)
+        return {
+            "auto_threshold": self.auto_threshold,
+            "quiet_period_seconds": self.quiet_period_seconds,
+            "scope_cooldown_seconds": self.scope_cooldown_seconds,
+            "daily_api_budget": self.daily_api_budget,
+            "daily_api_calls": self._daily_calls.get(today, 0),
+            "pending_scopes": len(self._tasks),
+            "quiet_scopes": len(self._delayed),
+            "persisted_scope_count": len(self._observed),
+            "scope_key": "group_id:user_id:platform:bot_id",
+            "scope_isolation_note": "有身份的任务使用 v3 四元 scope 文档；旧消息/旧画像保持兼容隔离，不会升级为公开画像。",
+        }
+
+    def _schedule_dirty_scope(self, key: tuple[str, str, str, str]) -> None:
         observed_generation = self._dirty_scopes.pop(key, None)
         if observed_generation is None:
             return
@@ -263,7 +611,29 @@ class ScopedProfileService:
             and self._enabled()
             and self.tool_caller is not None
         ):
-            self.observe_group_message(*key)
+            # Messages are already counted in _observed; scheduling through
+            # observe_group_message would manufacture an extra message.
+            self._start_observed_refresh(key)
+
+    def _finish_observed_refresh(self, key: tuple[str, str, str, str], completed: asyncio.Task) -> None:
+        """Retain messages that arrived while a refresh was running."""
+        started_count = self._running_counts.pop(key, 0)
+        current = self._observed.get(key)
+        try:
+            outcome = completed.result()
+            succeeded = getattr(outcome, "status", "") in {"ok", "saved", "success", "succeeded"}
+        except (asyncio.CancelledError, Exception):
+            succeeded = False
+        if succeeded and current is not None:
+            remaining = max(0, current[0] - started_count)
+            if remaining:
+                self._observed[key] = (remaining, current[1])
+            else:
+                self._observed.pop(key, None)
+        self._persist_pending_schedule()
+        self._schedule_dirty_scope(key)
+        if key in self._observed and not self._closed:
+            self._schedule_delayed_refresh(key, max(30, self.scope_cooldown_seconds))
 
     def _candidate_anchor_ids_sync(
         self,
@@ -272,6 +642,8 @@ class ScopedProfileService:
         user_id: str,
         after_row_id: int,
         force: bool,
+        platform: str = "",
+        bot_id: str = "",
     ) -> list[int]:
         settle_count = 0 if force else self.settle_after_group_rows
         order = "DESC" if force else "ASC"
@@ -282,6 +654,7 @@ class ScopedProfileService:
                 FROM group_messages AS candidate
                 WHERE candidate.group_id=? AND candidate.user_id=?
                   AND candidate.id>? AND candidate.is_bot=0
+                  AND (?='' OR (candidate.platform=? AND candidate.bot_id=?))
                   AND LOWER(TRIM(candidate.source_kind))='user'
                   AND (
                     SELECT COUNT(1)
@@ -291,7 +664,7 @@ class ScopedProfileService:
                 ORDER BY candidate.id {order}
                 LIMIT 8
                 """,
-                (group_id, user_id, max(0, int(after_row_id)), settle_count),
+                (group_id, user_id, max(0, int(after_row_id)), platform, platform, bot_id, settle_count),
             ).fetchall()
         return sorted(int(row["id"]) for row in rows)
 
@@ -300,15 +673,26 @@ class ScopedProfileService:
         *,
         group_id: str,
         user_id: str,
+        platform: str = "",
+        bot_id: str = "",
     ) -> tuple[dict[str, Any], dict[str, Any], int, str]:
-        core = self.profile_service.get_core_profile(user_id)
+        scoped = bool(platform and bot_id and platform != "unknown" and bot_id != "unknown")
+        core = None if scoped else self.profile_service.get_core_profile(user_id)
         core_json = dict(core.profile_json if core is not None else {})
         embedded_global = core_json.get("scoped_profile")
         global_document = build_global_profile_document(
             embedded_global if isinstance(embedded_global, dict) else core_json
         )
-        local = self.profile_service.get_local_profile(group_id=group_id, user_id=user_id)
-        local_json = dict(local.profile_json if local is not None else {})
+        v3 = self.get_scoped_document_v3(
+            platform=platform, bot_id=bot_id, group_id=group_id, user_id=user_id
+        ) if platform and bot_id and platform != "unknown" and bot_id != "unknown" else None
+        local = None if scoped else self.profile_service.get_local_profile(group_id=group_id, user_id=user_id)
+        if v3 is not None:
+            local_json = dict(v3.get("document") or {})
+            legacy_text = str(v3.get("profile_text") or "")
+        else:
+            local_json = dict(local.profile_json if local is not None else {})
+            legacy_text = str(local.profile_text if local is not None else "")
         if local_json.get("schema_version") == 2:
             group_document = normalize_profile_document(local_json)
             scope = group_document.get("scope", {})
@@ -319,7 +703,7 @@ class ScopedProfileService:
                 raise ValueError("stored local profile scope mismatch")
         else:
             legacy_claims = []
-            legacy_text = str(local.profile_text if local is not None else "").strip()
+            legacy_text = legacy_text.strip()
             if legacy_text:
                 legacy_claims.append(
                     {
@@ -335,7 +719,7 @@ class ScopedProfileService:
                 global_document=global_document,
             )
         revision = int(group_document.get("revision", 0) or 0)
-        legacy_profile_text = str(local.profile_text if local is not None else "")
+        legacy_profile_text = legacy_text
         return global_document, group_document, revision, legacy_profile_text
 
     async def _generate_claims(
@@ -354,6 +738,12 @@ class ScopedProfileService:
             sort_keys=True,
             separators=(",", ":"),
         )
+        day = int(float(self._clock()) // 86400)
+        if self.daily_api_budget and self._daily_calls.get(day, 0) >= self.daily_api_budget:
+            return None
+        # Reserve before yielding; failed calls and concurrent scopes count too.
+        self._daily_calls = {day: self._daily_calls.get(day, 0) + 1}
+        self._persist_pending_schedule()
         try:
             response = await asyncio.wait_for(
                 self.tool_caller.chat_with_tools(
@@ -451,6 +841,8 @@ class ScopedProfileService:
         *,
         group_id: Any,
         user_id: Any,
+        platform: Any = "",
+        bot_id: Any = "",
         force: bool = False,
     ) -> ScopedProfileRefreshResult:
         try:
@@ -460,7 +852,8 @@ class ScopedProfileService:
             return ScopedProfileRefreshResult("skipped", "invalid_scope", "", "")
         if self._closed or not self._enabled() or self.tool_caller is None:
             return ScopedProfileRefreshResult("skipped", "disabled", gid, uid)
-        key = (gid, uid)
+        platform_s, bot_s = str(platform or "").strip(), str(bot_id or "").strip()
+        key = (gid, uid, platform_s, bot_s)
         current_task = asyncio.current_task()
         active = self._tasks.get(key)
         owns_registry = False
@@ -474,6 +867,8 @@ class ScopedProfileService:
                 return await self._refresh_group_profile(
                     group_id=gid,
                     user_id=uid,
+                    platform=platform_s,
+                    bot_id=bot_s,
                     force=force,
                 )
         finally:
@@ -487,6 +882,8 @@ class ScopedProfileService:
         group_id: str,
         user_id: str,
         force: bool,
+        platform: str = "",
+        bot_id: str = "",
     ) -> ScopedProfileRefreshResult:
         gid = group_id
         uid = user_id
@@ -497,6 +894,8 @@ class ScopedProfileService:
                 self._current_documents,
                 group_id=gid,
                 user_id=uid,
+                platform=platform,
+                bot_id=bot_id,
             )
         except ValueError:
             return ScopedProfileRefreshResult("failed", "invalid_stored_scope", gid, uid)
@@ -506,6 +905,8 @@ class ScopedProfileService:
             self._candidate_anchor_ids_sync,
             group_id=gid,
             user_id=uid,
+            platform=platform,
+            bot_id=bot_id,
             after_row_id=0 if force else watermark,
             force=force,
         )
@@ -529,6 +930,8 @@ class ScopedProfileService:
                     select_profile_evidence,
                     anchor_id,
                     self.db_path,
+                    platform=platform,
+                    bot_id=bot_id,
                 )
             except Exception:
                 continue
@@ -581,14 +984,20 @@ class ScopedProfileService:
         )
         next_text = render_group_profile_text(next_document)
         try:
-            saved = await self._run_atomic_write(
-                group_id=gid,
-                user_id=uid,
-                patcher=lambda _current: dict(next_document),
-                profile_text=next_text,
-                expected_revision=current_revision,
-                expected_generation=profile_generation,
-            )
+            if platform and bot_id and platform != "unknown" and bot_id != "unknown":
+                v3_saved = await asyncio.to_thread(
+                    self.put_scoped_document_v3, platform=platform, bot_id=bot_id,
+                    group_id=gid, user_id=uid, document=next_document,
+                    profile_text=next_text, expected_revision=current_revision,
+                    expected_generation=profile_generation,
+                )
+                saved = {"profile_json": v3_saved["document"], **v3_saved}
+            else:
+                saved = await self._run_atomic_write(
+                    group_id=gid, user_id=uid, patcher=lambda _current: dict(next_document),
+                    profile_text=next_text, expected_revision=current_revision,
+                    expected_generation=profile_generation,
+                )
         except (LocalProfileRevisionConflict, ProfileGenerationConflict) as exc:
             return ScopedProfileRefreshResult(
                 "skipped", getattr(exc, "code", "stale_revision"), gid, uid, revision=current_revision
@@ -604,11 +1013,13 @@ class ScopedProfileService:
             self._candidate_anchor_ids_sync,
             group_id=gid,
             user_id=uid,
+            platform=platform,
+            bot_id=bot_id,
             after_row_id=next_watermark,
             force=False,
         )
         if len(remaining_anchor_ids) >= self.auto_threshold:
-            self._dirty_scopes[(gid, uid)] = profile_generation
+            self._dirty_scopes[(gid, uid, platform, bot_id)] = profile_generation
         return ScopedProfileRefreshResult(
             "succeeded",
             "ok",

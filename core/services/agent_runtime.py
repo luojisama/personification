@@ -64,6 +64,9 @@ def build_agent_tool_registry(
     qq_outbound_ledger: Any = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
+    if memory_store is not None:
+        from ..surface_memory import build_surface_memory_provider
+        registry.memory_context_provider = build_surface_memory_provider(config=plugin_config, store=memory_store, caller=tool_caller)
     skills_root_raw = getattr(plugin_config, "personification_skills_path", None)
     skills_root = Path(skills_root_raw) if skills_root_raw else None
     use_skillpacks = bool(getattr(plugin_config, "personification_use_skillpacks", False))
@@ -602,7 +605,8 @@ def _build_search_conversation_history_tool(memory_store: Any, plugin_config: An
             return _json.dumps({"query": str(query or ""), "messages": [], "note": "无法确定当前会话范围"}, ensure_ascii=False)
         try:
             from .. import session_store
-            from ..embedding_index import normalize_text, tokenize
+            from ..embedding_index import normalize_text
+            from ..text_memory_index import tokens as tokenize
             session_id = (session_store.build_group_session_id(scope.group_id) if scope.group_id
                           else session_store.build_private_session_id(scope.user_id))
             rows = await asyncio.to_thread(
@@ -617,7 +621,8 @@ def _build_search_conversation_history_tool(memory_store: Any, plugin_config: An
         except Exception as exc:
             logger.debug(f"[search_conversation_history] query failed: {exc}")
             rows = []
-        from ..embedding_index import normalize_text, tokenize
+        from ..embedding_index import normalize_text
+        from ..text_memory_index import tokens as tokenize
         tokens = set(tokenize(normalize_text(query)))
         scored: list[tuple[int, dict[str, Any]]] = []
         for row in rows:

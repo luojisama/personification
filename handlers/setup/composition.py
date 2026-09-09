@@ -334,6 +334,10 @@ def setup_all_matchers(*, deps: MatcherSetupDeps) -> Dict[str, Any]:
             if getattr(deps.runtime_bundle, "scoped_profile_service", None) is not None
             else None
         ),
+        create_private_profile_task=(
+            deps.runtime_bundle.private_profile_refresh.observe_private_message
+            if getattr(deps.runtime_bundle, "private_profile_refresh", None) is not None else None
+        ),
         favorability_observer=getattr(
             getattr(deps.runtime_bundle, "favorability_service", None),
             "observer",

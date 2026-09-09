@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import io
 import random
 import time
@@ -32,17 +33,20 @@ from ...core.sticker_library import (
     analyze_sticker_image,
     compute_file_hash,
     get_persona_adaptation,
+    get_visual_label,
     image_bytes_to_data_url,
     judge_sticker_against_library,
     list_local_sticker_files,
     load_sticker_metadata,
     normalize_sticker_entry,
     put_persona_adaptation,
+    put_visual_label,
     recall_similar_stickers,
     render_sticker_semantic_summary,
     resolve_sticker_dir,
     save_collected_sticker,
     save_sticker_metadata,
+    visual_label_cache_key,
 )
 from ...core.sticker_feedback import load_sticker_feedback
 from ...core.visual_capabilities import VISUAL_ROUTE_REPLY_PLAIN
@@ -413,9 +417,6 @@ async def auto_collect_stickers(
                 record_counter("sticker.collect_library_full", reason="hard_limit")
                 runtime.logger.warning(f"拟人插件：表情包库已达硬上限 {hard_limit} 张，停止收集。")
                 return
-            if not _can_collect_after_cooldown(group_id, user_id, cooldown_seconds):
-                record_counter("sticker.collect_skipped", reason="cooldown")
-                continue
             # Preserve a legacy explicit disable; semantic choice is model-led.
             if sample_rate <= 0.0:
                 record_counter("sticker.collect_skipped", reason="sampling_disabled")
@@ -437,11 +438,49 @@ async def auto_collect_stickers(
                 await save_sticker_metadata(sticker_dir, metadata)
                 record_counter("sticker.collect_skipped", reason="persona_cached_decision")
                 continue
-            result = await analyze_sticker_image(
-                runtime=runtime,
-                image_refs=[candidate.data_url],
-                fallback_vision_caller=runtime.vision_caller,
+            # A changed persona is a distinct review scope.  Re-evaluate the
+            # same immutable sticker for it even while the ordinary collection
+            # cooldown is active; otherwise a core-persona update would retain
+            # the prior role's judgement until an arbitrary later message.
+            seen_under_any_persona = any(
+                isinstance(value, dict) and str(value.get("content_hash") or "") == content_hash
+                for value in dict(metadata.get("_meta", {}) or {}).get("persona_adaptations", {}).values()
             )
+            if not seen_under_any_persona and not _can_collect_after_cooldown(group_id, user_id, cooldown_seconds):
+                record_counter("sticker.collect_skipped", reason="cooldown")
+                continue
+            # Visual understanding is keyed by immutable image bytes plus the
+            # model/prompt contract.  Persona review below is deliberately not
+            # part of this cache.
+            vision_model = str(getattr(runtime.plugin_config, "personification_vision_model", "") or "default")
+            visual_key = visual_label_cache_key(content_hash, vision_model)
+            cached_visual = get_visual_label(metadata, visual_key)
+            if cached_visual is not None:
+                from ...core.sticker_library import normalize_sticker_vision_result
+                result = normalize_sticker_vision_result(json.dumps(cached_visual, ensure_ascii=False))
+            else:
+                result = await analyze_sticker_image(
+                    runtime=runtime,
+                    image_refs=[candidate.data_url],
+                    fallback_vision_caller=runtime.vision_caller,
+                )
+                put_visual_label(metadata, visual_key, {
+                    "description": result.description, "summary": result.summary,
+                    "ocr_text": result.ocr_text, "mood_tags": result.mood_tags,
+                    "scene_tags": result.scene_tags, "proactive_send": result.proactive_send,
+                    "should_collect": result.should_collect, "collect_reason": result.collect_reason,
+                    "collect_confidence": result.collect_confidence, "is_sticker": result.is_sticker,
+                    "style": result.style, "subject_action": result.subject_action,
+                    "animation_progression": result.animation_progression,
+                    "literal_emotion": result.literal_emotion, "social_intent": result.social_intent,
+                    "suitable_contexts": result.suitable_contexts,
+                    "unsuitable_contexts": result.unsuitable_contexts,
+                    "visual_confidence": result.visual_confidence,
+                    "vision_prompt_version": "visual-semantics-v1",
+                })
+                # Preserve uncertain labels for an explicit/on-demand recheck;
+                # never delete a source file merely because vision was unsure.
+                await save_sticker_metadata(sticker_dir, metadata)
             record_counter("sticker.collect_attempt", style=result.style)
             if not result.is_sticker or result.style == "unknown" or not result.summary:
                 if result.style == "meme" and meme_policy == "reject":
@@ -538,6 +577,14 @@ async def auto_collect_stickers(
                     "use_hint": result.use_hint,
                     "avoid_hint": result.avoid_hint,
                     "style": result.style,
+                    "subject_action": result.subject_action,
+                    "animation_progression": result.animation_progression,
+                    "literal_emotion": result.literal_emotion,
+                    "social_intent": result.social_intent,
+                    "suitable_contexts": result.suitable_contexts,
+                    "unsuitable_contexts": result.unsuitable_contexts,
+                    "visual_confidence": result.visual_confidence,
+                    "vision_prompt_version": "visual-semantics-v1",
                 },
                 file_name=saved_path.stem,
                 vision_route=result.vision_route,
@@ -1085,11 +1132,22 @@ async def maybe_choose_reply_sticker(
     is_random_chat: bool,
     is_group_idle_active: bool,
     force_mode: str | None,
+    expression_mode: str = "auto",
     strip_injected_visual_summary: Callable[[str], str],
 ) -> tuple[Any | None, str]:
     sticker_segment = None
     sticker_name = ""
     should_get_sticker = False
+    selected_mode = str(expression_mode or "auto").strip().lower()
+    if selected_mode not in {"auto", "text", "emoji", "qq_face", "sticker"}:
+        selected_mode = "auto"
+    # A TurnPlan decides one primary expression surface.  Literal expression
+    # markers already present in a reviewed reply are left untouched below:
+    # they are the only compatibility route where an explicit combination may
+    # remain, rather than an automatic second selection.
+    if selected_mode in {"text", "emoji", "qq_face"}:
+        record_counter("reply_sticker.skipped_total", reason="expression_mode")
+        return None, ""
     if not bool(getattr(semantic_frame, "sticker_appropriate", True)):
         record_counter("reply_sticker.skipped_total", reason="semantic_gate")
         return None, ""
@@ -1118,7 +1176,9 @@ async def maybe_choose_reply_sticker(
                 sticker_state["last_sent"] = sticker_now
         elif force_mode == "text_only":
             should_get_sticker = False
-        elif not sticker_in_cooldown and random.random() < runtime.plugin_config.personification_sticker_probability:
+        # The semantic frame is the single LLM expression decision for this
+        # turn.  Do not add a second random gate after it says a sticker fits.
+        elif not sticker_in_cooldown:
             should_get_sticker = True
             if not is_private_session:
                 sticker_state["last_sent"] = sticker_now

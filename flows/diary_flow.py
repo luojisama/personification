@@ -1848,6 +1848,7 @@ async def _generate_once(
     attempt_key: str = "generation",
     attempt_label: str = "生成草稿",
     allow_legacy_post: bool = False,
+    memory_scope: dict[str, str] | None = None,
 ) -> str:
     # 在格式 guard 之外再注入人设快照，强化发空间时的角色一致性。
     system_text = ensure_prompt_injection_guard(
@@ -1906,6 +1907,7 @@ async def _generate_once(
                 # 与群聊同等：走完整 Agent 管线，而不是轻量工具循环。
                 return await run_text_agent(
                     messages=messages,
+                    memory_scope=memory_scope,
                     plugin_config=plugin_config,
                     logger=logger,
                     tool_caller=tool_caller,
@@ -2304,6 +2306,7 @@ async def generate_ai_diary(
         raw_rich_result = await _generate_once(
             system_prompt,
             rich_prompt,
+            memory_scope={"platform": "onebot", "bot_id": str(getattr(bot, "self_id", "") or ""), "user_id": str(getattr(bot, "self_id", "") or ""), "group_id": ""},
             plugin_config=plugin_config,
             call_ai_api=call_ai_api,
             use_builtin_search=True,
@@ -2393,6 +2396,7 @@ async def generate_ai_diary(
     raw_result = await _generate_once(
         system_prompt,
         basic_prompt,
+        memory_scope={"platform": "onebot", "bot_id": str(getattr(bot, "self_id", "") or ""), "user_id": str(getattr(bot, "self_id", "") or ""), "group_id": ""},
         plugin_config=plugin_config,
         call_ai_api=call_ai_api,
         use_builtin_search=True,

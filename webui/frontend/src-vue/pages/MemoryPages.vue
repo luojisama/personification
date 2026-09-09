@@ -342,6 +342,17 @@
             <div><dt>诊断代码</dt><dd><code>{{ embeddingDiagnosticCode }}</code></dd></div>
           </dl>
         </section>
+        <section class="memory-embedding-status" aria-labelledby="text-index-status-title">
+          <h3 id="text-index-status-title">算法检索文本索引</h3>
+          <QueryBoundary :pending="textIndexQuery.isPending.value" :error="textIndexQuery.error.value">
+            <dl class="detail-list" v-if="textIndexQuery.data.value">
+              <div><dt>检索模式</dt><dd><code>{{ textAt(textIndexQuery.data.value, 'mode') }}</code></dd></div>
+              <div><dt>索引版本</dt><dd><code>{{ textAt(textIndexQuery.data.value, 'version') }}</code></dd></div>
+              <div><dt>覆盖率</dt><dd>{{ textAt(textIndexQuery.data.value, 'indexed') }} / {{ textAt(textIndexQuery.data.value, 'total') }}</dd></div>
+              <div><dt>待建立</dt><dd>{{ textAt(textIndexQuery.data.value, 'pending') }}</dd></div>
+            </dl>
+          </QueryBoundary>
+        </section>
 
         <div v-if="rebuildFeedback" class="rebuild-banner" :class="{ 'banner-success': rebuildSuccess }">
           <p>{{ rebuildFeedback }}</p>
@@ -499,6 +510,7 @@ const businessQuery = useQuery<RecordObj>({
 });
 
 const businessRecord = computed(() => asRecord(businessQuery.data.value));
+const textIndexQuery = useQuery<RecordObj>({ queryKey: ["memory-text-index"], queryFn: ({ signal }) => resources.memoryTextIndex(signal), enabled: computed(() => currentSection.value === "vector-index") });
 const embeddingRecord = computed(() => asRecord(businessRecord.value.embedding));
 const embeddingState = computed(() => textAt(embeddingRecord.value, "state") || "unknown");
 const embeddingConnectivity = computed(() => textAt(embeddingRecord.value, "connectivity_state") || "unknown");

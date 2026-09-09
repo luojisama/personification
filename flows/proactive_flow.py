@@ -29,6 +29,13 @@ from ..core.qq_expression_library import (
     render_qq_expression_message,
 )
 from ..core.qq_outbound import build_outbound_context
+from ..core.qq_outbound import parse_onebot_message_id
+from ..core.social_decision import (
+    SocialDecision,
+    claim_social_decision,
+    parse_social_decision,
+    settle_social_decision,
+)
 from ..core.expression_preparation import prepare_local_expression
 from ..core.time_ctx import inject_current_time_context
 from ..skills.skillpacks.datetime_tool.scripts.impl import get_current_datetime_info
@@ -65,7 +72,10 @@ async def _dispatch_proactive_outbound(
     send: Callable[[], Awaitable[Any]],
 ) -> Any:
     if qq_outbound_ledger is None:
-        return await send()
+        result = await send()
+        if parse_onebot_message_id(result) is None:
+            raise ProactiveOutboundOutcomeUnknown("OneBot message_id is missing")
+        return result
     receipt = await qq_outbound_ledger.dispatch(outbound_context, content, send)
     if receipt.status != "sent":
         raise ProactiveOutboundOutcomeUnknown("qq outbound message_id is missing")
@@ -103,11 +113,11 @@ PROACTIVE_DECISION_PROMPT = """[角色设定]
 1. 你有没有想主动联系某人的欲望？
 2. 如果有，选择最合适的人，写出你想说的话
 
-如果想联系，输出（严格按此格式，一行）：
-SEND|{{user_id}}|{{消息内容}}
+严格输出一个 JSON 对象，不带 Markdown 或解释。``send`` 必须是 JSON 布尔值：
+{{"send":true,"action":"contact","target_id":"候选 user_id","content":"消息内容","motivation":"具体动机摘要","source_event_ids":[],"expression":"text|emoji|qq_face|sticker","next_consider_at":0}}
 
-如果不想联系，输出（严格按此格式，一行）：
-SKIP|{{原因（给自己的备注，如"现在没什么想说的"）}}
+若不联系：
+{{"send":false,"action":"silent","target_id":"","content":"","motivation":"给自己的简短原因","source_event_ids":[],"expression":"text","next_consider_at":0}}
 
 消息内容要求：
 - 8-42 字，宁可更短；像真人随手发，不是工整结尾
@@ -401,6 +411,8 @@ def _build_candidates(
         favorability = float(user_data.get("favorability", 0.0) or 0.0)
 
         user_state = _normalize_user_state(now, proactive_state.get(str(user_id), {}))
+        if float(user_state.get("next_consider_at", 0) or 0) > now_ts:
+            continue
         if _has_unanswered_proactive_message(user_state):
             continue
         last_interaction = float(user_state.get("last_interaction", 0) or 0)
@@ -459,6 +471,8 @@ def _build_fallback_candidates(
 
     for user_id, profile in friend_profiles.items():
         user_state = _normalize_user_state(now, proactive_state.get(str(user_id), {}))
+        if float(user_state.get("next_consider_at", 0) or 0) > now_ts:
+            continue
         if _has_unanswered_proactive_message(user_state):
             continue
         last_interaction = float(user_state.get("last_interaction", 0) or 0)
@@ -565,6 +579,19 @@ def _parse_decision(result: str) -> tuple[str, str, str]:
     if text.startswith("SKIP|"):
         return "SKIP", "", text.split("|", 1)[1].strip()
     return "SKIP", "", text
+
+
+def _parse_proactive_social_decision(result: str) -> SocialDecision | None:
+    """Only structured, typed LLM intent is eligible for a proactive send."""
+    candidate = _strip_xml_message_content(strip_response_control_markers(str(result or "")))
+    # No inbound event exists in this scheduler turn: model-created IDs are
+    # rejected and source-less operations receive target cooldown protection.
+    decision = parse_social_decision(candidate, max_content_chars=120, allowed_source_event_ids=set())
+    if decision is None:
+        return None
+    if decision.action == "contact" and decision.target_id:
+        return decision
+    return decision if not decision.should_send else None
 
 
 def _strip_xml_message_content(text: str) -> str:
@@ -681,6 +708,7 @@ async def _decide_idle_output_mode(
     group_style: str,
     logger: Any,
     group_id: str,
+    bot_id: str = "",
 ) -> tuple[str, str]:
     """J4 phase-1: 用 LLM 决定群水群输出模式 (text/sticker/combo) 和情绪标签。
     返回 (mode, mood_hint)；任何失败都 fallback 到 ('text', '')。
@@ -718,6 +746,7 @@ async def _decide_idle_output_mode(
                     trigger_reason="proactive_group_idle_mode",
                     chat_intent_hint="proactive_group_idle_mode",
                     structured_output=True,
+                    memory_scope={"platform": "onebot", "bot_id": str(bot_id or ""), "user_id": "", "group_id": str(group_id or "")},
                 )
             except Exception as exc:
                 logger.debug(f"[group_idle] mode Agent decision failed: {exc}")
@@ -1154,6 +1183,7 @@ async def run_proactive_messaging(
                     trigger_reason="proactive_private",
                     chat_intent_hint="proactive_private",
                     structured_output=True,
+                    memory_scope={"platform": "onebot", "bot_id": str(getattr(bot, "self_id", "") or ""), "user_id": "", "group_id": ""},
                 )
             except Exception as exc:
                 logger.warning(f"[proactive] full Agent decision failed, skip direct-model fallback: {exc}")
@@ -1166,17 +1196,29 @@ async def run_proactive_messaging(
                 reset_llm_context(_purpose_token)
             except Exception:
                 pass
-    action, target_user_id, payload = _parse_decision(decision or "")
-    payload = _strip_xml_message_content(payload)
-    if action != "SEND" or not target_user_id or not payload:
+    social_decision = _parse_proactive_social_decision(decision or "")
+    if social_decision is None:
         save_proactive_state(proactive_state)
         _diag.record(
             scope="private",
             outcome=_diag.SKIP_LLM_DECIDED,
-            target=target_user_id,
-            detail={"action": action, "raw_decision_len": len(str(decision or ""))},
+            detail={"reason": "invalid_social_decision", "raw_decision_len": len(str(decision or ""))},
         )
         return False
+    if not social_decision.should_send:
+        if target_user_id := str(social_decision.target_id or "").strip():
+            deferred = _normalize_user_state(now, proactive_state.get(target_user_id, {}))
+            deferred["next_consider_at"] = social_decision.next_consider_at
+            proactive_state[target_user_id] = deferred
+        save_proactive_state(proactive_state)
+        _diag.record(
+            scope="private", outcome=_diag.SKIP_LLM_DECIDED,
+            detail={"reason": social_decision.motivation[:120], "action": social_decision.action},
+            next_eligible_at=social_decision.next_consider_at or None,
+        )
+        return False
+    target_user_id = social_decision.target_id
+    payload = _strip_xml_message_content(social_decision.content)
 
     target = next((item for item in candidates if item["user_id"] == target_user_id), None)
     if target is None:
@@ -1189,24 +1231,12 @@ async def run_proactive_messaging(
         save_proactive_state(proactive_state)
         return False
 
-    proactive_probability = float(
-        max(0.0, min(1.0, getattr(plugin_config, "personification_proactive_probability", 0.15)))
-    )
-    if random.random() > proactive_probability:
-        save_proactive_state(proactive_state)
-        _diag.record(
-            scope="private",
-            outcome=_diag.SKIP_PROBABILITY,
-            target=target_user_id,
-            detail={"probability": proactive_probability},
-        )
-        return False
-
     payload = await _review_proactive_text(
         caller=call_ai_api, text=payload, core_persona=system_prompt,
         context="主动私聊", is_private=True,
     )
     if not payload:
+        settle_social_decision(social_decision, status="failed", scope=str(getattr(bot, "self_id", "") or ""))
         return False
     payload = guard_visible_text(
         payload,
@@ -1216,6 +1246,13 @@ async def run_proactive_messaging(
     )
     if not payload:
         save_proactive_state(proactive_state)
+        settle_social_decision(social_decision, status="failed", scope=str(getattr(bot, "self_id", "") or ""))
+        return False
+    decision_scope = f"onebot:{str(getattr(bot, 'self_id', '') or '')}"
+    if not claim_social_decision(social_decision, channel="proactive_private", scope=decision_scope, now=now_ts):
+        save_proactive_state(proactive_state)
+        _diag.record(scope="private", outcome=_diag.SKIP_LLM_DECIDED, target=target_user_id,
+                     detail={"reason": "duplicate_or_unknown_motivation"})
         return False
     outbound_context = None
     if qq_outbound_ledger is not None:
@@ -1237,8 +1274,13 @@ async def run_proactive_messaging(
         logger.warning(
             f"[proactive] 用户 {target_user_id} 发送结果未知，禁止自动重发且不提交成功状态"
         )
+        settle_social_decision(social_decision, status="unknown", scope=decision_scope)
         save_proactive_state(proactive_state)
         return False
+    except Exception:
+        settle_social_decision(social_decision, status="unknown", scope=decision_scope)
+        raise
+    settle_social_decision(social_decision, status="sent", scope=decision_scope)
     _diag.record(
         scope="private",
         outcome=_diag.OUTCOME_SENT,
@@ -1479,6 +1521,7 @@ async def run_group_idle_topic(
                             trigger_reason="proactive_group_idle",
                             chat_intent_hint="proactive_group_idle",
                             structured_output=False,
+                            memory_scope={"platform": "onebot", "bot_id": str(getattr(bot, "self_id", "") or ""), "user_id": "", "group_id": str(group_id or "")},
                         )
                     except Exception as exc:
                         logger.warning(
@@ -1547,6 +1590,7 @@ async def run_group_idle_topic(
                     group_style=group_style,
                     logger=logger,
                     group_id=group_id,
+                    bot_id=str(getattr(bot, "self_id", "") or ""),
                 )
 
             topic = await _review_proactive_text(
@@ -1562,6 +1606,25 @@ async def run_group_idle_topic(
                 allow_direct_media=False,
             )
             if not topic:
+                continue
+            # A cold-start interjection may only claim actual non-bot messages
+            # observed in this group; never accept model-invented provenance.
+            source_ids = tuple(
+                str(msg.get("message_id", "") or "").strip()
+                for msg in recent_msgs
+                if isinstance(msg, dict) and not msg.get("is_bot") and str(msg.get("message_id", "") or "").strip()
+            )[:8]
+            if not source_ids:
+                logger.debug(f"[group_idle] group {group_id} has no attributable source event, skip")
+                continue
+            idle_decision = SocialDecision(
+                action="join", target_id=group_id, content=topic,
+                motivation="group idle topic", source_event_ids=source_ids,
+                expression=chosen_mode if chosen_mode in {"text", "qq_face", "sticker"} else "text",
+            )
+            decision_scope = f"onebot:{str(getattr(bot, 'self_id', '') or '')}"
+            if not claim_social_decision(idle_decision, channel="proactive_group_idle", scope=decision_scope, now=now_ts):
+                logger.debug(f"[group_idle] duplicate or unknown motivation group={group_id}")
                 continue
 
             try:
@@ -1677,8 +1740,10 @@ async def run_group_idle_topic(
                 logger.info(
                     f"[group_idle] 已向群 {group_name}({group_id}) 发送话题：{topic[:30]}"
                 )
+                settle_social_decision(idle_decision, status="sent", scope=decision_scope)
                 break
             except Exception as e:
+                settle_social_decision(idle_decision, status="unknown", scope=decision_scope)
                 logger.warning(f"[group_idle] send_group_msg failed for group {group_id}: {e}")
                 if qq_outbound_ledger is not None:
                     break

@@ -30,7 +30,7 @@ _GATE_PROMPT = """你是一个主动社交闸门，负责判断 bot 是否应该
 [输出]
 严格输出 JSON：
 {{
-  "allow": true 或 false,
+    "allow": true 或 false（必须是 JSON 布尔值，不能是字符串）,
   "reason": "一句话说明"
 }}
 """
@@ -48,10 +48,11 @@ async def gate_should_send(
     draft: str,
     persona_snippet: str = "",
     now_str: str = "",
+    memory_scope: dict[str, str] | None = None,
 ) -> tuple[bool, str | None, str]:
-    """二次判断；失败默认 allow。兼容返回三元组，但第二项始终为 None。"""
+    """二次判断；失败严格拒绝。兼容返回三元组，但第二项始终为 None。"""
     if not tool_caller:
-        return True, None, "no tool_caller, skip gate"
+        return False, None, "no tool_caller"
     prompt = _GATE_PROMPT.format(
         scenario=scenario,
         draft=draft,
@@ -74,6 +75,7 @@ async def gate_should_send(
                 trigger_reason=f"social_gate_{scenario}",
                 chat_intent_hint="social_gate",
                 structured_output=True,
+                memory_scope=dict(memory_scope or {}),
             )
         else:
             response = await tool_caller.chat_with_tools(
@@ -83,14 +85,16 @@ async def gate_should_send(
             )
             text = str(getattr(response, "content", "") or "").strip()
     except Exception as exc:
-        logger.debug(f"[social_gate] LLM call failed, default allow: {exc}")
-        return True, None, f"gate llm failed: {exc}"
+        logger.debug(f"[social_gate] LLM call failed, reject: {exc}")
+        return False, None, "gate llm failed"
     if not text:
-        return True, None, "gate empty response, default allow"
+        return False, None, "gate empty response"
     parsed = _parse_gate_json(text)
     if parsed is None:
-        return True, None, f"gate non-json, default allow; raw={text[:80]}"
-    allow = bool(parsed.get("allow", True))
+        return False, None, "gate non-json"
+    allow = parsed.get("allow")
+    if type(allow) is not bool:
+        return False, None, "gate allow is not boolean"
     reason = str(parsed.get("reason", "") or "").strip()
     return allow, None, reason
 

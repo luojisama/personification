@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ast
 import json
+import sqlite3
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -138,6 +139,102 @@ def _insert(
         )
         conn.commit()
         return int(cursor.lastrowid)
+
+
+def test_scoped_profile_defaults_are_conservative_and_diagnostics_hide_evidence(tmp_path) -> None:  # noqa: ANN001
+    _db_path, _store, _profiles, service, _logger = _runtime(tmp_path)
+    # The test fixture intentionally overrides its threshold for existing
+    # generation tests; the production constructor defaults must remain the
+    # long-running, non-chatty policy.
+    default = scoped_service.ScopedProfileService(
+        profile_service=service.profile_service,
+        tool_caller=service.tool_caller,
+        logger=service.logger,
+        db_path=service.db_path,
+    )
+    state = default.diagnostics()
+    assert state["auto_threshold"] == 20
+    assert state["quiet_period_seconds"] == 600.0
+    assert state["scope_cooldown_seconds"] == 600.0
+    assert "evidence" not in repr(state).lower()
+
+
+def test_scoped_profile_daily_budget_fails_closed(tmp_path) -> None:  # noqa: ANN001
+    db_path, _store, _profiles, service, _logger = _runtime(tmp_path)
+    service.daily_api_budget = 1
+    _insert(db_path, user_id="10001", content="第一条", message_id="one", timestamp=1)
+    first = asyncio.run(service.refresh_group_profile(group_id="20001", user_id="10001", force=True))
+    assert first.status == "succeeded"
+    _insert(db_path, user_id="10001", content="第二条", message_id="two", timestamp=2)
+    second = asyncio.run(service.refresh_group_profile(group_id="20001", user_id="10001", force=True))
+    assert second.status == "failed"
+    assert second.code == "generation_failed"
+
+
+def test_observed_refresh_rechecks_latest_quiet_deadline(tmp_path) -> None:  # noqa: ANN001
+    async def _run() -> None:
+        _db_path, _store, _profiles, service, _logger = _runtime(tmp_path)
+        now = [100.0]
+        service._clock = lambda: now[0]
+        service.quiet_period_seconds = 10.0
+        service.scope_cooldown_seconds = 0.0
+        key = ("20001", "10001", "onebot", "90001")
+        calls: list[tuple[str, str, str, str]] = []
+
+        async def _refresh(**kwargs):  # noqa: ANN003, ANN202
+            calls.append((kwargs["group_id"], kwargs["user_id"], kwargs["platform"], kwargs["bot_id"]))
+            return scoped_service.ScopedProfileRefreshResult("skipped", "test", "20001", "10001")
+
+        service.refresh_group_profile = _refresh  # type: ignore[method-assign]
+        # A wake-up which was scheduled for an earlier message must consult
+        # the latest message timestamp and keep waiting, rather than refresh.
+        service._observed[key] = (3, 95.0)
+        service._start_observed_refresh(key)
+        assert calls == []
+        assert key in service._delayed
+        service._delayed[key].cancel()
+        await asyncio.gather(service._delayed[key], return_exceptions=True)
+        service._delayed.clear()
+
+        now[0] = 106.0
+        service._observed[key] = (3, 95.0)
+        service._start_observed_refresh(key)
+        await asyncio.sleep(0)
+        assert calls == [("20001", "10001", "onebot", "90001")]
+        await service.close()
+
+    asyncio.run(_run())
+
+
+def test_delayed_timer_can_schedule_its_follow_up_after_waking(tmp_path) -> None:  # noqa: ANN001
+    async def _run() -> None:
+        _db_path, _store, _profiles, service, _logger = _runtime(tmp_path)
+        service._clock = lambda: 0.0
+        service.quiet_period_seconds = 10.0
+        key = ("20001", "10001", "onebot", "90001")
+        service._observed[key] = (1, 0.0)
+        # Exercise the timer callback itself.  It must clear its own entry
+        # before calling _start_observed_refresh, otherwise its replacement
+        # quiet timer is suppressed as an already-existing task.
+        service._schedule_delayed_refresh(key, 0.0)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert key in service._delayed
+        assert not service._delayed[key].done()
+        await service.close()
+
+    asyncio.run(_run())
+
+
+def test_v3_scoped_document_requires_full_bot_identity_and_isolated(tmp_path) -> None:  # noqa: ANN001
+    _db_path, _store, _profiles, service, _logger = _runtime(tmp_path)
+    document = {"schema_version": 3, "scope": {"kind": "group", "group_id": "20001"}}
+    with pytest.raises(ValueError):
+        service.put_scoped_document_v3(platform="unknown", bot_id="100", group_id="20001", user_id="10001", document=document)
+    saved = service.put_scoped_document_v3(platform="qq", bot_id="100", group_id="20001", user_id="10001", document=document)
+    assert saved["revision"] == 1
+    assert service.get_scoped_document_v3(platform="qq", bot_id="101", group_id="20001", user_id="10001") is None
+    assert service.get_scoped_document_v3(platform="qq", bot_id="100", group_id="20001", user_id="10001")["document"] == {**document, "revision": 1}
 
 
 def test_scoped_generation_persists_only_contextual_claims_and_hashed_refs(tmp_path) -> None:  # noqa: ANN001
@@ -436,8 +533,8 @@ def test_global_persona_generation_keeps_messages_arriving_after_snapshot(tmp_pa
     assert store._load_history("10001") == ["arrived after snapshot"]  # noqa: SLF001
 
 
-def test_persona_clear_all_removes_authoritative_core_and_group_profiles(tmp_path) -> None:  # noqa: ANN001
-    _db_path, _store, profiles, _service, _logger = _runtime(tmp_path)
+def test_persona_clear_all_removes_authoritative_core_group_and_v3_profiles(tmp_path) -> None:  # noqa: ANN001
+    _db_path, _store, profiles, service, _logger = _runtime(tmp_path)
     profiles.upsert_core_profile(
         user_id="10001",
         profile_text="global",
@@ -456,13 +553,30 @@ def test_persona_clear_all_removes_authoritative_core_and_group_profiles(tmp_pat
         logger=_Logger(),
         profile_service=profiles,
     )
+    store.bind_profile_refreshers(service)
+    document = scoped_profile.build_group_profile_document(
+        "20001",
+        claims=[{"key": "content_pref", "value": "short replies", "confidence": 0.9}],
+    )
+    saved = service.put_scoped_document_v3(
+        platform="onebot", bot_id="bot-a", group_id="20001", user_id="10001",
+        document=document, profile_text="v3 profile",
+    )
+    service.set_claim_sharing(
+        platform="onebot", bot_id="bot-a", group_id="20001", user_id="10001",
+        claim_key="content_pref", revision=saved["revision"], enabled=True, approved_by="admin",
+    )
 
     result = asyncio.run(store.clear_all())
 
     assert result["core_profiles"] == 1
     assert result["local_profiles"] == 1
+    assert result["scoped_documents"] == 1
+    assert result["scoped_shares"] == 1
     assert profiles.get_core_profile("10001") is None
     assert profiles.get_local_profile(group_id="20001", user_id="10001") is None
+    assert service.get_scoped_document_v3(platform="onebot", bot_id="bot-a", group_id="20001", user_id="10001") is None
+    assert service.get_shared_claims(platform="onebot", bot_id="bot-a", user_id="10001") == []
 
 
 def test_persona_clear_fences_cancelled_to_thread_save(tmp_path) -> None:  # noqa: ANN001
@@ -522,7 +636,12 @@ def test_scoped_refresh_is_fenced_by_profile_clear(tmp_path) -> None:  # noqa: A
             return await super().chat_with_tools(messages, tools, use_builtin_search)
 
     caller = _DelayedCaller()
-    db_path, store, profiles, service, _logger = _runtime(tmp_path, caller=caller)
+    db_path, _memory, profiles, service, _logger = _runtime(tmp_path, caller=caller)
+    persona_store = persona_service.PersonaStore(
+        data_dir=tmp_path, tool_caller=object(), history_max=5, logger=_Logger(),
+        profile_service=profiles,
+    )
+    persona_store.bind_profile_refreshers(service)
     _insert(
         db_path,
         user_id="10001",
@@ -536,15 +655,15 @@ def test_scoped_refresh_is_fenced_by_profile_clear(tmp_path) -> None:  # noqa: A
             service.refresh_group_profile(group_id="20001", user_id="10001", force=True)
         )
         await asyncio.wait_for(caller.started.wait(), timeout=1.0)
-        await asyncio.to_thread(store.clear_all_profiles)
+        await persona_store.clear_all()
         caller.release.set()
-        return await task
+        return (await asyncio.gather(task, return_exceptions=True))[0]
 
     result = asyncio.run(_run())
 
-    assert result.status == "skipped"
-    assert result.code == "profile_generation_changed"
+    assert isinstance(result, asyncio.CancelledError) or result.code == "profile_generation_changed"
     assert profiles.get_local_profile(group_id="20001", user_id="10001") is None
+    assert service.get_scoped_document_v3(platform="onebot", bot_id="", group_id="20001", user_id="10001") is None
 
 
 def test_scoped_model_output_cannot_persist_verbatim_evidence(tmp_path) -> None:  # noqa: ANN001
@@ -910,3 +1029,21 @@ def test_scoped_profile_runtime_wiring_uses_record_matcher_and_dynamic_switch() 
     assert "enabled_getter=persona_enabled" in runtime_source
     assert 'if getattr(plugin_config, "personification_persona_enabled", True):' not in runtime_source
     assert 'getattr(ctx.plugin_config, "personification_persona_enabled", True)' in hook_source
+
+
+def test_explicit_claim_share_is_bot_scoped_and_invalidated_by_correction(tmp_path):
+    db_path, _store, _profiles, service, _logger = _runtime(tmp_path)
+    scope = dict(platform="onebot", bot_id="b", group_id="", user_id="10001")
+    document = {"claims": [{"key":"drink", "value":"tea", "confidence":.9}]}
+    service.put_scoped_document_v3(**scope, document=document)
+    assert service.get_shared_claims(platform="onebot", bot_id="b", user_id="10001") == []
+    service.set_claim_sharing(**scope, claim_key="drink", revision=1, enabled=True, approved_by="admin")
+    shared = service.get_shared_claims(platform="onebot", bot_id="b", user_id="10001")
+    assert shared[0]["value"] == "tea"
+    assert service.get_shared_claims(platform="onebot", bot_id="other", user_id="10001") == []
+    assert service.get_shared_claims(platform="onebot", bot_id="b", user_id="other") == []
+    service.put_scoped_document_v3(**scope, document={"claims":[{"key":"drink", "value":"coffee", "confidence":.9}]}, expected_revision=1)
+    assert service.get_shared_claims(platform="onebot", bot_id="b", user_id="10001") == []
+    with sqlite3.connect(db_path) as conn:
+        old = conn.execute("SELECT document_json FROM scoped_profile_history_v3 WHERE revision=1").fetchone()
+    assert json.loads(old[0])["claims"][0]["value"] == "tea"

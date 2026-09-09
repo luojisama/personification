@@ -146,6 +146,13 @@ class StickerLabeler:
                     "avoid_hint": result.avoid_hint,
                     "style": result.style,
                     "vision_route": result.vision_route,
+                    "subject_action": result.subject_action,
+                    "animation_progression": result.animation_progression,
+                    "literal_emotion": result.literal_emotion,
+                    "social_intent": result.social_intent,
+                    "suitable_contexts": result.suitable_contexts,
+                    "unsuitable_contexts": result.unsuitable_contexts,
+                    "visual_confidence": result.visual_confidence,
                 },
                 model_name="",
                 vision_route=result.vision_route,
@@ -221,6 +228,8 @@ class StickerLabeler:
         *,
         force: bool = True,
         keyword: str = "",
+        only_needs_visual_relabel: bool = False,
+        max_items: int = 0,
     ) -> dict[str, Any]:
         if vision_caller is None:
             return {"total": 0, "success": 0, "failed": 0, "matched": []}
@@ -235,7 +244,11 @@ class StickerLabeler:
                 continue
             if not force and _has_complete_label_fields(metadata.get(file.name)):
                 continue
+            if only_needs_visual_relabel and not bool((metadata.get(file.name) or {}).get("needs_visual_relabel")):
+                continue
             pending.append(file)
+        if max_items > 0:
+            pending = pending[:max_items]
 
         total = len(pending)
         success = 0
@@ -248,6 +261,7 @@ class StickerLabeler:
             async with semaphore:
                 try:
                     entry = await self.label_file(file, vision_caller)
+                    entry.pop("needs_visual_relabel", None)
                     metadata[file.name] = entry
                     success += 1
                     self.logger.info(
@@ -270,6 +284,7 @@ class StickerLabeler:
             "failed": failed,
             "matched": [file.name for file in pending],
             "failed_files": failed_files,
+            "remaining": sum(1 for file in files if bool((metadata.get(file.name) or {}).get("needs_visual_relabel"))),
         }
 
     async def handle_created(self, file_path: Path, vision_caller: Optional[Any]) -> None:

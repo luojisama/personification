@@ -50,7 +50,7 @@ def test_fuse_recall_candidates_uses_rrf_and_merges_reasons() -> None:
     assert any(reason.startswith("RRF混合召回") for reason in fused[0].match_reasons)
 
 
-def test_memory_store_writes_vector_chunks_for_rag_recall(tmp_path) -> None:
+def test_memory_store_default_uses_text_index_without_hash_vectors(tmp_path) -> None:
     data_store = load_personification_module("plugin.personification.core.data_store")
     cfg = SimpleNamespace(
         personification_data_dir=str(tmp_path),
@@ -83,10 +83,11 @@ def test_memory_store_writes_vector_chunks_for_rag_recall(tmp_path) -> None:
         row = conn.execute(
             "SELECT COUNT(1) AS cnt FROM memory_vector_chunks WHERE memory_id='rag-memory'"
         ).fetchone()
-    assert int(row["cnt"]) >= 1
+    assert int(row["cnt"]) == 0
 
     results = store.recall_memories(query="月面基地模型 银色轨道车", user_id="u1", context_type="private", limit=5)
 
     assert any(item.get("memory_id") == "rag-memory" for item in results)
     hit = next(item for item in results if item.get("memory_id") == "rag-memory")
-    assert "vector" in str(hit.get("search_source", ""))
+    assert "vector" not in str(hit.get("search_source", ""))
+    assert store.text_index_status()["indexed"] == 1

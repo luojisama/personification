@@ -19,7 +19,8 @@
   ],
   "relation_warmth": {
     只更新本次对话涉及的人，其他人原样保留
-  }
+  },
+  "current_activity": {"activity": "角色此刻在做的轻量事情", "source": "simulated", "started_at": "YYYY-MM-DD HH:MM:SS", "expires_at": "YYYY-MM-DD HH:MM:SS"}
 }}
 
 注意：
@@ -27,3 +28,4 @@
 - 对话愉快时 mood 可变积极，被催促或冷场时变平淡
 - pending_thoughts 使用对象数组，每项至少有 thought 字段；不要无限累积，超过5条时删除最旧的
 - 只输出 JSON，不要解释，不要 markdown
+- current_activity 仅用于角色模拟，source 必须是 simulated；没有充分的本次对话依据时不要新增。不能把工具调用、用户经历或共同事件写成活动；过期活动直接设为 null，不要补写完成经历。

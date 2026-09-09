@@ -79,6 +79,17 @@
         </div>
       </Panel>
 
+      <Panel eyebrow="PERSONA / VISUAL RELABEL" title="低置信视觉重标">
+        <p class="field-hint">只处理标记为需要视觉复核的素材；暂停会在当前有界批次结束后生效，重启后会从持久作业继续。</p>
+        <div class="inline-controls">
+          <TextField v-model="visualRelabelBatch" label="每批数量（1-20）" inputmode="numeric" />
+          <button type="button" class="button button-secondary" :disabled="visualRelabelStart.isPending.value" @click="startVisualRelabel">开始重标</button>
+          <button v-if="visualRelabelJobId" type="button" class="button button-secondary" @click="pauseVisualRelabel">暂停</button>
+          <button v-if="visualRelabelJobId" type="button" class="button button-primary" @click="resumeVisualRelabel">继续</button>
+        </div>
+        <dl v-if="visualRelabelQuery.data.value" class="count-ledger"><div><dt>状态</dt><dd>{{ textAt(visualRelabelQuery.data.value, 'status') }}</dd></div><div><dt>已处理</dt><dd>{{ textAt(visualRelabelQuery.data.value, 'processed') }}</dd></div><div><dt>剩余</dt><dd>{{ textAt(visualRelabelQuery.data.value, 'remaining') }}</dd></div><div><dt>失败数</dt><dd>{{ textAt(visualRelabelQuery.data.value, 'failed') }}</dd></div><div><dt>失败类型</dt><dd>{{ textAt(visualRelabelQuery.data.value, 'last_error') }}</dd></div></dl>
+      </Panel>
+
       <!-- 表情包目录检索与展示 -->
       <Panel eyebrow="PERSONA / STICKER CATALOG" title="表情包目录">
         <template #actions>
@@ -252,6 +263,64 @@
         description="构建任务、候选、历史和模板操作保持 revision 与服务端结构化校验，不再展示接口字段转储。"
       />
 
+      <Panel eyebrow="PERSONA / DYNAMIC PROFILE" title="动态画像与检索状态">
+        <QueryBoundary :pending="profileJobsQuery.isPending.value" :error="profileJobsQuery.error.value">
+          <dl v-if="profileJobsQuery.data.value" class="count-ledger">
+            <div><dt>批处理阈值</dt><dd>{{ textAt(profileJobsQuery.data.value, 'auto_threshold') }} 条有效消息</dd></div>
+            <div><dt>静默等待</dt><dd>{{ textAt(profileJobsQuery.data.value, 'quiet_period_seconds') }} 秒</dd></div>
+            <div><dt>scope 冷却</dt><dd>{{ textAt(profileJobsQuery.data.value, 'scope_cooldown_seconds') }} 秒</dd></div>
+            <div><dt>今日 API</dt><dd>{{ textAt(profileJobsQuery.data.value, 'daily_api_calls') }} / {{ textAt(profileJobsQuery.data.value, 'daily_api_budget') }}</dd></div>
+            <div><dt>待处理范围</dt><dd>{{ textAt(profileJobsQuery.data.value, 'persisted_scope_count') }}</dd></div>
+            <div><dt>隔离键</dt><dd><code>{{ textAt(profileJobsQuery.data.value, 'scope_key') }}</code></dd></div>
+          </dl>
+          <p class="field-hint">{{ textAt(profileJobsQuery.data.value, 'scope_isolation_note') || '调度状态暂不可用。' }}</p>
+        </QueryBoundary>
+      </Panel>
+
+      <Panel eyebrow="PROFILE / SCOPED V3" title="场景画像与共享许可">
+        <p class="field-hint">私聊画像默认仅限私聊；群聊画像仅限当前群。开启某条偏好后，其他场景只会读取这条稳定偏好，不会共享聊天原文、事件摘要或当前情绪。</p>
+        <form class="builder-task-form" @submit.prevent="loadScopedProfileDocument">
+          <div class="inline-controls filter-control-row">
+            <TextField v-model="scopedProfileScope.platform" label="平台" placeholder="onebot" />
+            <TextField v-model="scopedProfileScope.bot_id" label="Bot ID" placeholder="Bot QQ / 身份" />
+            <TextField v-model="scopedProfileScope.user_id" label="用户 ID" placeholder="目标用户 QQ" />
+            <TextField v-model="scopedProfileScope.group_id" label="群 ID（私聊留空）" placeholder="私聊留空" />
+            <button type="submit" class="button button-secondary" :disabled="!scopedProfileReady || scopedProfileQuery.isFetching.value">
+              {{ scopedProfileQuery.isFetching.value ? "读取中…" : "读取 v3 画像" }}
+            </button>
+          </div>
+        </form>
+        <p v-if="!scopedProfileRequested" class="field-hint">填写平台、Bot 与用户后读取。空群 ID 表示该 Bot 下的私聊来源，不会被解释为“所有群”。</p>
+        <p v-if="scopedProfileConflict" class="field-error-msg" role="alert">{{ scopedProfileConflict }}</p>
+        <QueryBoundary v-if="scopedProfileRequested && scopedProfileReady" :pending="scopedProfileQuery.isPending.value" :error="scopedProfileQuery.error.value">
+          <div v-if="!scopedDocument" class="query-empty">这个四元作用域还没有 v3 画像文档；没有回退读取旧画像。</div>
+          <template v-else>
+            <dl class="count-ledger">
+              <div><dt>文档修订</dt><dd><code>{{ textAt(scopedDocument, 'revision') }}</code></dd></div>
+              <div><dt>更新时间</dt><dd>{{ formatDateTime(scopedDocument.updated_at as string | number) }}</dd></div>
+              <div><dt>claim 数量</dt><dd>{{ scopedClaims.length }}</dd></div>
+              <div><dt>当前来源</dt><dd>{{ scopedProfileScope.group_id.trim() ? `群 ${scopedProfileScope.group_id.trim()}` : "私聊（默认 private）" }}</dd></div>
+            </dl>
+            <div v-if="scopedClaims.length === 0" class="query-empty">文档暂时没有可审查的稳定 claim。</div>
+            <table v-else class="business-table" aria-label="作用域画像 claim 共享设置">
+              <thead><tr><th>claim</th><th>当前值</th><th>置信度 / 可见范围</th><th>跨场景使用</th></tr></thead>
+              <tbody>
+                <tr v-for="claim in scopedClaims" :key="String(claim.key)">
+                  <td><code>{{ claim.key || "—" }}</code></td>
+                  <td>{{ claim.value || "—" }}</td>
+                  <td>{{ claim.confidence ?? "—" }} / {{ claim.visibility || (scopedProfileScope.group_id.trim() ? "group" : "private") }}</td>
+                  <td>
+                    <button type="button" class="button button-xs" :class="scopedSharedClaimKeys.has(String(claim.key)) ? 'button-danger' : 'button-primary'" :disabled="scopedProfileShare.isPending.value || !String(claim.key || '')" @click="toggleScopedClaimSharing(String(claim.key || ''), !scopedSharedClaimKeys.has(String(claim.key)))">
+                      {{ scopedSharedClaimKeys.has(String(claim.key)) ? "取消共享" : "允许共享偏好" }}
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </template>
+        </QueryBoundary>
+      </Panel>
+
       <!-- 创建任务面板 -->
       <Panel
         v-if="currentSection === 'tasks' || currentSection === 'candidate' || currentSection === 'all'"
@@ -381,6 +450,15 @@
               <dd>{{ detailQuery.data.value.edited_by || "—" }}</dd>
             </div>
           </dl>
+          <section v-if="layersQuery.data.value" class="persona-layer-grid">
+            <article><h4>稳定核心</h4><pre>{{ JSON.stringify(layersQuery.data.value.core, null, 2) }}</pre></article>
+            <article><h4>缓慢变化</h4><pre>{{ JSON.stringify(layersQuery.data.value.dynamic, null, 2) }}</pre></article>
+            <article><h4>当前状态</h4><p>{{ textAt(layersQuery.data.value.current, 'message') }}</p></article>
+          </section>
+          <button v-if="historyRecords.length > 1" type="button" class="button button-secondary button-xs" @click="diffRecordId = String(historyRecords.find((item) => String(item.record_id) !== selectedRecordId)?.record_id || '')">与上一版本比较</button>
+          <button type="button" class="button button-secondary button-xs" :disabled="previewMutation.isPending.value" @click="previewMutation.mutate(selectedRecordId)">{{ previewMutation.isPending.value ? '正在生成六场景预览…' : '生成六场景 API 预览' }}</button>
+          <pre v-if="diffQuery.data.value" class="prompt-preview">{{ diffLines || '两个版本没有文本差异。' }}</pre>
+          <div v-if="previewMutation.data.value" class="persona-layer-grid"><article v-for="sample in previewSamples" :key="sample.scene"><h4>{{ sample.scene }}</h4><p>{{ sample.text }}</p></article></div>
         </QueryBoundary>
       </Panel>
     </template>
@@ -393,6 +471,7 @@ import { useRoute, useRouter } from "vue-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 
 import { resources } from "@/api/resources";
+import { ApiError } from "@/api/client";
 import type { StickerListItem } from "@/api/types";
 import { formatDateTime, formatInteger } from "@/lib/format";
 import PageHeader from "@vue-app/components/PageHeader.vue";
@@ -415,6 +494,81 @@ const pageMode = computed(() => {
 });
 
 const currentSection = computed(() => String(route.params.section || "all"));
+const textAt = (value: unknown, key: string) => {
+  const raw = value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined;
+  return raw === undefined || raw === null || raw === "" ? "—" : String(raw);
+};
+
+const profileJobsQuery = useQuery({
+  queryKey: ["profile-job-diagnostics"],
+  queryFn: ({ signal }) => resources.profileJobDiagnostics(signal),
+  enabled: computed(() => pageMode.value === "builder"),
+  refetchInterval: 30_000,
+});
+
+const scopedProfileScope = reactive({ platform: "onebot", bot_id: "", user_id: "", group_id: "" });
+const scopedProfileRequested = ref(false);
+const scopedProfileConflict = ref("");
+const scopedProfileReady = computed(() => Boolean(
+  scopedProfileScope.platform.trim() && scopedProfileScope.bot_id.trim() && scopedProfileScope.user_id.trim(),
+));
+const scopedProfileQuery = useQuery({
+  queryKey: computed(() => [
+    "scoped-profile-document",
+    scopedProfileScope.platform.trim(), scopedProfileScope.bot_id.trim(),
+    scopedProfileScope.user_id.trim(), scopedProfileScope.group_id.trim(),
+  ]),
+  queryFn: ({ signal }) => resources.scopedProfileDocument({
+    platform: scopedProfileScope.platform.trim(), bot_id: scopedProfileScope.bot_id.trim(),
+    user_id: scopedProfileScope.user_id.trim(), group_id: scopedProfileScope.group_id.trim(),
+  }, signal),
+  enabled: computed(() => pageMode.value === "builder" && scopedProfileRequested.value && scopedProfileReady.value),
+});
+const scopedDocument = computed<Record<string, unknown> | null>(() => {
+  const raw = scopedProfileQuery.data.value?.document;
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+});
+const scopedClaims = computed<Array<Record<string, unknown>>>(() => {
+  const raw = scopedDocument.value?.document;
+  const document = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  return Array.isArray(document.claims) ? document.claims.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
+});
+const scopedSharedClaimKeys = computed(() => new Set(
+  (Array.isArray(scopedProfileQuery.data.value?.shared_claims) ? scopedProfileQuery.data.value?.shared_claims : [])
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    .filter((item) => String(item.source_group_id ?? "") === scopedProfileScope.group_id.trim())
+    .map((item) => String(item.key ?? ""))
+    .filter(Boolean),
+));
+const scopedProfileShare = useMutation({
+  mutationFn: (payload: { claim_key: string; enabled: boolean }) => resources.setScopedProfileSharing({
+    platform: scopedProfileScope.platform.trim(), bot_id: scopedProfileScope.bot_id.trim(),
+    user_id: scopedProfileScope.user_id.trim(), group_id: scopedProfileScope.group_id.trim(),
+    claim_key: payload.claim_key, revision: Number(scopedDocument.value?.revision ?? -1), enabled: payload.enabled,
+  }),
+  onSuccess: async () => {
+    scopedProfileConflict.value = "";
+    await scopedProfileQuery.refetch();
+  },
+  onError: async (error: Error) => {
+    scopedProfileConflict.value = error instanceof ApiError && error.status === 409
+      ? "画像在操作前已更新；已刷新当前文档，请确认后再提交。"
+      : error.message || "共享设置未保存。";
+    await scopedProfileQuery.refetch();
+  },
+});
+function loadScopedProfileDocument() {
+  scopedProfileConflict.value = "";
+  scopedProfileRequested.value = true;
+  if (scopedProfileReady.value) void scopedProfileQuery.refetch();
+}
+function toggleScopedClaimSharing(claimKey: string, enabled: boolean) {
+  if (!scopedDocument.value || !claimKey || scopedProfileShare.isPending.value) return;
+  const action = enabled ? "允许此偏好跨场景使用" : "取消此偏好的跨场景使用";
+  if (window.confirm(`确认${action}？不会共享私聊或群聊原文。`)) {
+    scopedProfileShare.mutate({ claim_key: claimKey, enabled });
+  }
+}
 
 function setSection(section: string) {
   router.push({ name: route.name || "persona-preview", params: { ...route.params, section } });
@@ -426,6 +580,15 @@ const stickerSearch = ref("");
 const selectedUploadFile = ref<File | null>(null);
 const uploadDescription = ref("");
 const uploadError = ref("");
+const visualRelabelJobId = ref("");
+const visualRelabelBatch = ref("5");
+const visualRelabelStart = useMutation({ mutationFn: () => resources.startVisualRelabel(Math.max(1, Math.min(20, Number(visualRelabelBatch.value) || 5))), onSuccess: (job) => { visualRelabelJobId.value = String(job.job_id || ""); } });
+const visualRelabelQuery = useQuery({ queryKey: computed(() => ["visual-relabel", visualRelabelJobId.value]), queryFn: ({ signal }) => resources.visualRelabelJob(visualRelabelJobId.value, signal), enabled: computed(() => Boolean(visualRelabelJobId.value) && pageMode.value === "stickers"), refetchInterval: 1500 });
+const visualRelabelPause = useMutation({ mutationFn: () => resources.pauseVisualRelabel(visualRelabelJobId.value), onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["visual-relabel", visualRelabelJobId.value] }) });
+const visualRelabelResume = useMutation({ mutationFn: () => resources.resumeVisualRelabel(visualRelabelJobId.value), onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["visual-relabel", visualRelabelJobId.value] }) });
+function startVisualRelabel() { visualRelabelStart.mutate(); }
+function pauseVisualRelabel() { if (visualRelabelJobId.value) visualRelabelPause.mutate(); }
+function resumeVisualRelabel() { if (visualRelabelJobId.value) visualRelabelResume.mutate(); }
 const fileInputRef = ref<HTMLInputElement | null>(null);
 
 const stickersQuery = useQuery({
@@ -590,6 +753,7 @@ const previewSources = computed(() => {
 const workTitle = ref("");
 const characterName = ref("");
 const selectedRecordId = ref("");
+const diffRecordId = ref("");
 
 const historyQuery = useQuery({
   queryKey: ["persona-builder-history"],
@@ -601,6 +765,27 @@ const detailQuery = useQuery({
   queryKey: computed(() => ["persona-builder-detail", selectedRecordId.value]),
   queryFn: ({ signal }) => resources.personaBuilderGet(`history/${encodeURIComponent(selectedRecordId.value)}`, signal),
   enabled: computed(() => pageMode.value === "builder" && Boolean(selectedRecordId.value)),
+});
+const layersQuery = useQuery({
+  queryKey: computed(() => ["persona-builder-layers", selectedRecordId.value]),
+  queryFn: ({ signal }) => resources.personaBuilderGet(`history/${encodeURIComponent(selectedRecordId.value)}/layers`, signal),
+  enabled: computed(() => pageMode.value === "builder" && Boolean(selectedRecordId.value)),
+});
+const diffQuery = useQuery({
+  queryKey: computed(() => ["persona-builder-diff", selectedRecordId.value, diffRecordId.value]),
+  queryFn: ({ signal }) => resources.personaBuilderGet(`history/${encodeURIComponent(selectedRecordId.value)}/diff/${encodeURIComponent(diffRecordId.value)}`, signal),
+  enabled: computed(() => pageMode.value === "builder" && Boolean(selectedRecordId.value) && Boolean(diffRecordId.value)),
+});
+const diffLines = computed(() => {
+  const raw = diffQuery.data.value?.unified_diff;
+  return Array.isArray(raw) ? raw.map((item) => String(item)).join("\n") : "";
+});
+const previewMutation = useMutation({
+  mutationFn: (recordId: string) => resources.personaBuilderPost(`history/${encodeURIComponent(recordId)}/preview`, {}),
+});
+const previewSamples = computed(() => {
+  const raw = previewMutation.data.value?.samples;
+  return Array.isArray(raw) ? raw.filter((item): item is { scene: string; text: string } => Boolean(item) && typeof item === "object").map((item) => ({ scene: String((item as Record<string, unknown>).scene || "场景"), text: String((item as Record<string, unknown>).text || "") })) : [];
 });
 
 const historyRecords = computed(() => {

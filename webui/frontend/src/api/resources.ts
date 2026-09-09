@@ -161,6 +161,20 @@ export function sanitizeTracePage(raw: unknown): Page<TraceListItem> {
 }
 
 export const resources = {
+  profileJobDiagnostics(signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get("/personas/profile-jobs/diagnostics", undefined, signal);
+  },
+  scopedProfileDocument(scope: { platform: string; bot_id: string; user_id: string; group_id: string }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return api.get("/personas/scoped-document", scope, signal);
+  },
+  setScopedProfileSharing(payload: { platform: string; bot_id: string; user_id: string; group_id: string; claim_key: string; revision: number; enabled: boolean }): Promise<Record<string, unknown>> {
+    return api.post("/personas/scoped-sharing", payload);
+  },
+  memoryTextIndex(signal?: AbortSignal): Promise<Record<string, unknown>> { return api.get("/memory/text-index", undefined, signal); },
+  startVisualRelabel(batch_size: number): Promise<Record<string, unknown>> { return api.post("/stickers/visual-relabel/jobs", { batch_size }); },
+  visualRelabelJob(jobId: string, signal?: AbortSignal): Promise<Record<string, unknown>> { return api.get(`/stickers/visual-relabel/jobs/${encodeURIComponent(jobId)}`, undefined, signal); },
+  pauseVisualRelabel(jobId: string): Promise<Record<string, unknown>> { return api.post(`/stickers/visual-relabel/jobs/${encodeURIComponent(jobId)}/pause`, {}); },
+  resumeVisualRelabel(jobId: string): Promise<Record<string, unknown>> { return api.post(`/stickers/visual-relabel/jobs/${encodeURIComponent(jobId)}/resume`, {}); },
   adminIdentity(signal?: AbortSignal): Promise<{ qq: string; device_id: string; label: string; identity_source: "SUPERUSER" | "plugin_admin" }> {
     return api.get("/admin-identity", undefined, signal);
   },

@@ -54,19 +54,29 @@ def _deps(monkeypatch, observed: list[list[dict]]):  # noqa: ANN001
         personification_final_dialogue_gate_enabled=False,
         personification_image_input_mode="direct",
         personification_humanize_typing_enabled=False,
+        # This bridge test asserts the normal provider/final-review/send path.
+        # Self-continuity has its own integration coverage and may perform an
+        # additional asynchronous review, which makes a 50ms bridge handoff
+        # assertion a scheduler race rather than a Satori delivery check.
+        personification_self_continuity_enabled=False,
     )
+    # The integration contract is text + a direct inbound image.  Keep an
+    # impossible library path as a second isolation boundary for any future
+    # default change, but expression selection itself is constrained by the
+    # structured TurnPlan below rather than a probability knob.
+    config.personification_sticker_path = "__satori_test_no_stickers__"
     logs: list[str] = []
     logger = SimpleNamespace(debug=lambda *a, **_k: logs.append(" ".join(map(str, a))), info=lambda *a, **_k: logs.append(" ".join(map(str, a))),
                              warning=lambda *a, **_k: logs.append(" ".join(map(str, a))), error=lambda *a, **_k: logs.append(" ".join(map(str, a))))
     semantic = planner.turn_plan_to_semantic_frame(planner.TurnPlan(
         reply_action="reply", speech_act="answer", research_need="none", output_mode="text",
-        tool_intent=[], ambiguity_level="low", message_target="bot",
+        tool_intent=[], ambiguity_level="low", message_target="bot", expression_mode="text",
     ))
     prepared = SimpleNamespace(recent_bot_replies=[], data_dir=None, inner_state={}, emotion_state={},
         semantic_frame=semantic, intent_decision=SimpleNamespace(ambiguity_level="low", recommend_silence=False),
         message_intent="chat", arbitration="reply", emotion_block="")
 
-    async def provider(messages):  # noqa: ANN001
+    async def provider(messages, **_kwargs):  # noqa: ANN001
         observed.append(messages)
         # The first call is the normal reply Provider; the second is the
         # independent shared final-review call made by this real pipeline.
@@ -85,6 +95,9 @@ def _deps(monkeypatch, observed: list[list[dict]]):  # noqa: ANN001
     monkeypatch.setattr(processor, "media_summary_timeout_seconds", lambda *_a, **_k: 0.0)
     monkeypatch.setattr(processor, "prepare_meme_turn_context", lambda **_k: {})
     monkeypatch.setattr(processor, "format_meme_turn_prompt", lambda _value: "")
+    async def unexpected_expression(**_kwargs):  # noqa: ANN003
+        raise AssertionError("text TurnPlan must not prepare a local expression")
+    monkeypatch.setattr(processor, "prepare_local_expression", unexpected_expression)
     async def inject_downloaded_image(segment, *, image_urls, transport_aliases, **_kwargs):  # noqa: ANN001
         # Downloading is the sole external boundary.  Keep the normal
         # processor's current-image loop, media projection and Provider wire
@@ -145,9 +158,13 @@ def test_satori_private_text_and_multimedia_reach_real_processor_provider_and_se
 
     async def rule(_event, _state): return True
     states: list[dict] = []
+    processed = asyncio.Event()
     async def real_processor(bot, event, state, deps):  # noqa: ANN001
-        await processor.process_response_logic(bot, event, state, deps)
-        states.append(dict(state))
+        try:
+            await processor.process_response_logic(bot, event, state, deps)
+        finally:
+            states.append(dict(state))
+            processed.set()
     async def immediate_timer(*args, **kwargs):  # noqa: ANN002, ANN003
         kwargs["delay"] = 0.0
         await reply_buffer.run_buffer_timer(*args, **kwargs)
@@ -159,7 +176,10 @@ def test_satori_private_text_and_multimedia_reach_real_processor_provider_and_se
             private_message_event_cls=PrivateMessageEvent, poke_event_cls=deps.types.poke_event_cls, logger=logger,
             plugin_config=config, run_buffer_timer=immediate_timer,
         )
-        await asyncio.sleep(0.05)
+        # The bridge schedules the buffer worker.  Wait for that concrete
+        # processor completion rather than guessing that a scheduler turn
+        # fits in 50ms on every host.
+        await asyncio.wait_for(processed.wait(), timeout=2.0)
     asyncio.run(run())
     assert len(observed) >= 2, (len(observed), logs, states)
     image_parts = [

@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
+from ...core.social_decision import SocialDecision, claim_social_decision, settle_social_decision
 
 
 @dataclass
@@ -38,6 +39,7 @@ async def dispatch_social_outbound(
     surface: str,
     content: Any,
     user_target: str = "",
+    social_decision: SocialDecision | None = None,
 ) -> bool:
     """Dispatch one social message and report only strict OneBot confirmation."""
     target = str(conversation_id or "").strip()
@@ -49,9 +51,19 @@ async def dispatch_social_outbound(
     else:
         send = lambda: bot.send_private_msg(user_id=int(target), message=content)
         event = SimpleNamespace(user_id=target)
+    scope = f"onebot:{str(getattr(bot, 'self_id', '') or '')}"
+    if social_decision is not None and not claim_social_decision(
+        social_decision, channel=surface, scope=scope
+    ):
+        return False
     if ctx.qq_outbound_ledger is None:
-        await send()
-        return True
+        # A transport return is not a receipt.  The no-ledger path still needs
+        # a real OneBot message id before callers may record social success.
+        from ...core.qq_outbound import parse_onebot_message_id
+        confirmed = parse_onebot_message_id(await send()) is not None
+        if social_decision is not None:
+            settle_social_decision(social_decision, status="sent" if confirmed else "unknown", scope=scope)
+        return confirmed
 
     from ...core.qq_outbound import build_outbound_context
 
@@ -61,8 +73,16 @@ async def dispatch_social_outbound(
         surface=surface,
         user_target=user_target or (target if conversation_kind == "private" else ""),
     )
-    receipt = await ctx.qq_outbound_ledger.dispatch(outbound_context, content, send)
-    return receipt.status == "sent"
+    try:
+        receipt = await ctx.qq_outbound_ledger.dispatch(outbound_context, content, send)
+    except Exception:
+        if social_decision is not None:
+            settle_social_decision(social_decision, status="unknown", scope=scope)
+        raise
+    confirmed = receipt.status == "sent"
+    if social_decision is not None:
+        settle_social_decision(social_decision, status="sent" if confirmed else "unknown", scope=scope)
+    return confirmed
 
 
 async def run_social_text_agent(
@@ -72,6 +92,7 @@ async def run_social_text_agent(
     trigger_reason: str,
     chat_intent_hint: str = "",
     use_builtin_search_hint: bool = False,
+    memory_scope: dict[str, str] | None = None,
 ) -> str:
     """Run social-intelligence text generation through the full Agent path."""
     if ctx.tool_caller is None or ctx.tool_registry is None:
@@ -115,6 +136,7 @@ async def run_social_text_agent(
         chat_intent_hint=chat_intent_hint or trigger_reason,
         surface=surface,
         output_kind=OutputKind.PERSONA_TEXT,
+        memory_scope=dict(memory_scope or {}),
     )
 
 

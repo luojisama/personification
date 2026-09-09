@@ -37,6 +37,7 @@ class _FailingRemote(_RemoteOnlyFake):
 def _store(tmp_path):
     data_store = load_personification_module("plugin.personification.core.data_store")
     cfg = SimpleNamespace(
+        personification_memory_retrieval_mode="hybrid_api",
         personification_data_dir=str(tmp_path),
         personification_memory_enabled=True,
         personification_memory_palace_enabled=True,

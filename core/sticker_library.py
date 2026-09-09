@@ -21,7 +21,8 @@ from .sticker_semantics import ALLOWED_STICKER_MOOD_TAGS, ALLOWED_STICKER_SCENE_
 
 
 DEFAULT_STICKER_DIR = Path("data/stickers")
-STICKER_SCHEMA_VERSION = 3
+STICKER_SCHEMA_VERSION = 4
+STICKER_VISION_PROMPT_VERSION = "visual-semantics-v2"
 SUPPORTED_STICKER_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 RESOLVABLE_STICKER_SUFFIXES = SUPPORTED_STICKER_SUFFIXES | {".gif"}
 ALLOWED_MOOD_TAGS = set(ALLOWED_STICKER_MOOD_TAGS)
@@ -34,6 +35,13 @@ STICKER_VISION_PROMPT = """你是表情包语义分析器。请完整理解这�
   "summary": "25字内概括这张图最核心的意思",
   "description": "20-60字，说明主体、动作、表情、画面关系和文字信息",
   "ocr_text": "图中文字，没有就填空字符串",
+  "subject_action": "主体是谁以及正在做什么；看不清填空字符串",
+  "animation_progression": "GIF按时间顺序的动作变化；静态图填空字符串",
+  "literal_emotion": "画面字面情绪；不确定填空字符串",
+  "social_intent": "此刻用它实际想完成的交际动作；不确定填空字符串",
+  "suitable_contexts": ["适用语境"],
+  "unsuitable_contexts": ["不适用语境"],
+  "visual_confidence": 0.0,
   "use_hint": "适合在什么场景发，15-40字",
   "avoid_hint": "明显不适合在哪些场景发，15-40字",
   "mood_tags": ["情绪标签"],
@@ -49,7 +57,7 @@ STICKER_VISION_PROMPT = """你是表情包语义分析器。请完整理解这�
 要求：
 1. 必须结合画面主体、动作/表情、人物关系、图中文字一起理解；ocr_text 要尽量抄准图中文字，不确定也要保守摘录。
 1b. description 必须写出“谁/什么主体 + 正在做什么动作 + 表情/情绪 + 文字和动作合起来造成的表达效果”。
-1c. 如果这是 GIF 关键帧拼图，请按时间顺序理解动作变化，不要当作多张无关图片；description/use_hint 要体现短动画的动作递进和最终想表达的效果。
+1c. 如果这是 GIF 关键帧拼图，按帧号与时间比较每帧内主体相对边框的位置、姿态和文字变化；拼图中格子本身的左右排列不是运动方向。能确定时在 animation_progression 明确描述起点到终点及方向；只有确有往返变化才称抖动或循环，不把单向位移概括成循环。看不清具体变化则明确不确定。Frame 和毫秒标记是分析辅助，不属于表情的可见文字；OCR 只抄原图文字，不复制帧标签。
 2. mood_tags 只允许从以下标签里选 1-4 个：搞笑、开心、感动、尴尬、无语、惊讶、委屈、生气、害羞、得意、困惑、赞同、拒绝、期待、失落、撒娇、淡定、震惊。
 3. scene_tags 只允许从以下标签里选 1-4 个：回应笑点、接梗、表达赞同、化解尴尬、自嘲、反驳、表达惊讶、安慰对方、撒娇、表示无奈、冷场时、表达期待、庆祝、拒绝请求、结束对话、打招呼、表达关心、吐槽、卖萌、表达疑惑。
 4. should_collect 为 true 只在这张图语义明确、可复用、不是普通照片时给出。
@@ -129,6 +137,13 @@ class StickerVisionResult:
     style: str = "anime"
     vision_route: str = ""
     collect_confidence: float = 0.0
+    subject_action: str = ""
+    animation_progression: str = ""
+    literal_emotion: str = ""
+    social_intent: str = ""
+    suitable_contexts: list[str] = dataclasses.field(default_factory=list)
+    unsuitable_contexts: list[str] = dataclasses.field(default_factory=list)
+    visual_confidence: float = 0.0
 
 
 def resolve_sticker_dir(raw_path: str | Path | None, *, create: bool = False) -> Path:
@@ -250,8 +265,34 @@ def normalize_sticker_entry(
         "vision_route": str(value.get("vision_route", "") or vision_route).strip(),
         "labeled_at": str(value.get("labeled_at", "") or time.strftime("%Y-%m-%d %H:%M")).strip(),
         "model": str(value.get("model", "") or model_name).strip(),
+        # Visual evidence is immutable evidence, not a persona judgement.  Keep
+        # it separate so a role change never causes a textual re-interpretation.
+        "subject_action": _compact_visual_text(value.get("subject_action"), 180),
+        "animation_progression": _compact_visual_text(value.get("animation_progression"), 180),
+        "literal_emotion": _compact_visual_text(value.get("literal_emotion"), 80),
+        "social_intent": _compact_visual_text(value.get("social_intent"), 120),
+        "suitable_contexts": _normalize_visual_contexts(value.get("suitable_contexts")),
+        "unsuitable_contexts": _normalize_visual_contexts(value.get("unsuitable_contexts")),
+        "visual_confidence": _bounded_confidence(value.get("visual_confidence")),
+        "vision_prompt_version": str(value.get("vision_prompt_version", "") or "").strip()[:80],
     }
     return entry
+
+
+def _compact_visual_text(value: Any, limit: int) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())[:limit].strip()
+
+
+def _normalize_visual_contexts(value: Any) -> list[str]:
+    values = value if isinstance(value, list) else ([value] if value else [])
+    return [text for item in values if (text := _compact_visual_text(item, 80))][:4]
+
+
+def _bounded_confidence(value: Any) -> float:
+    try:
+        return round(max(0.0, min(1.0, float(value))), 3)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def normalize_sticker_metadata(data: Any, *, files: Iterable[Path] | None = None) -> dict[str, Any]:
@@ -279,12 +320,22 @@ def normalize_sticker_metadata(data: Any, *, files: Iterable[Path] | None = None
         "folder_hash": folder_hash or compute_folder_hash(normalized_files),
         "schema_version": STICKER_SCHEMA_VERSION,
         "persona_adaptations": {},
+        "visual_labels": {},
     }
     cache = meta_value.get("persona_adaptations")
     if isinstance(cache, dict):
         for key, value in list(cache.items())[-2400:]:
             if isinstance(value, dict):
                 put_persona_adaptation(metadata, str(key), value)
+    visual_cache = meta_value.get("visual_labels")
+    if isinstance(visual_cache, dict):
+        # The visual cache intentionally contains visual facts only.  Persona
+        # adaptation remains in its separate cache above.
+        metadata["_meta"]["visual_labels"] = {
+            str(key)[:180]: dict(value)
+            for key, value in list(visual_cache.items())[-2400:]
+            if isinstance(value, dict) and re.fullmatch(r"[0-9a-f]{32,64}:[^:]{1,80}:[^:]{1,80}", str(key))
+        }
     return metadata
 
 
@@ -323,6 +374,57 @@ def put_persona_adaptation(metadata: dict[str, Any], key: str, value: dict[str, 
         }
         while len(cache) > 2400:
             cache.pop(next(iter(cache)))
+
+
+def visual_label_cache_key(content_hash: str, vision_model: str, prompt_version: str = STICKER_VISION_PROMPT_VERSION) -> str:
+    """Stable cache identity for image understanding, independent of persona."""
+    digest = str(content_hash or "").strip().lower()
+    model = re.sub(r"[^A-Za-z0-9._-]", "_", str(vision_model or "unknown").strip())[:80] or "unknown"
+    version = re.sub(r"[^A-Za-z0-9._-]", "_", str(prompt_version or STICKER_VISION_PROMPT_VERSION).strip())[:80]
+    return f"{digest}:{model}:{version}" if re.fullmatch(r"[0-9a-f]{32,64}", digest) else ""
+
+
+def get_visual_label(metadata: dict[str, Any], key: str) -> dict[str, Any] | None:
+    cache = dict(metadata.get("_meta", {}) or {}).get("visual_labels", {})
+    value = cache.get(str(key)) if isinstance(cache, dict) else None
+    return dict(value) if isinstance(value, dict) else None
+
+
+def put_visual_label(metadata: dict[str, Any], key: str, value: dict[str, Any]) -> None:
+    if not visual_label_cache_key(*str(key).split(":", 2)) == str(key):
+        return
+    cache = metadata.setdefault("_meta", {}).setdefault("visual_labels", {})
+    if not isinstance(cache, dict):
+        return
+    cache.pop(str(key), None)
+    # Keep the original model result fields (including should_collect) rather
+    # than routing it through the library-entry normalizer, which intentionally
+    # drops collection policy fields.
+    cache[str(key)] = {
+        "summary": _compact_visual_text(value.get("summary"), 80),
+        "description": _compact_visual_text(value.get("description"), 240),
+        "ocr_text": _compact_visual_text(value.get("ocr_text"), 240),
+        "use_hint": _compact_visual_text(value.get("use_hint"), 240),
+        "avoid_hint": _compact_visual_text(value.get("avoid_hint"), 240),
+        "mood_tags": [tag for tag in list(value.get("mood_tags") or []) if tag in ALLOWED_MOOD_TAGS][:4],
+        "scene_tags": [tag for tag in list(value.get("scene_tags") or []) if tag in ALLOWED_SCENE_TAGS][:4],
+        "proactive_send": bool(value.get("proactive_send", False)),
+        "should_collect": bool(value.get("should_collect", False)),
+        "collect_reason": _compact_visual_text(value.get("collect_reason"), 80),
+        "collect_confidence": _bounded_confidence(value.get("collect_confidence")),
+        "is_sticker": bool(value.get("is_sticker", False)),
+        "style": _compact_visual_text(value.get("style"), 20),
+        "subject_action": _compact_visual_text(value.get("subject_action"), 180),
+        "animation_progression": _compact_visual_text(value.get("animation_progression"), 180),
+        "literal_emotion": _compact_visual_text(value.get("literal_emotion"), 80),
+        "social_intent": _compact_visual_text(value.get("social_intent"), 120),
+        "suitable_contexts": _normalize_visual_contexts(value.get("suitable_contexts")),
+        "unsuitable_contexts": _normalize_visual_contexts(value.get("unsuitable_contexts")),
+        "visual_confidence": _bounded_confidence(value.get("visual_confidence")),
+        "vision_prompt_version": _compact_visual_text(value.get("vision_prompt_version"), 80),
+    }
+    while len(cache) > 2400:
+        cache.pop(next(iter(cache)))
 
 
 def load_sticker_metadata(sticker_dir: str | Path | None) -> dict[str, Any]:
@@ -449,7 +551,7 @@ def normalize_sticker_vision_result(raw: Any, *, vision_route: str = "", meme_po
             summary="", description="图片内容不清晰", ocr_text="", use_hint="", avoid_hint="",
             mood_tags=[], scene_tags=[], proactive_send=False, should_collect=False,
             collect_reason="视觉证据不完整", is_sticker=False, style="unknown",
-            vision_route=str(vision_route or ""), collect_confidence=0.0,
+            vision_route=str(vision_route or ""), collect_confidence=0.0, visual_confidence=0.0,
         )
     summary = str(data.get("summary", "") or "").strip()
     description = str(data.get("description", "") or summary or "图片内容不清晰").strip() or "图片内容不清晰"
@@ -476,6 +578,7 @@ def normalize_sticker_vision_result(raw: Any, *, vision_route: str = "", meme_po
     except (TypeError, ValueError):
         collect_confidence = 0.0
     collect_confidence = max(0.0, min(1.0, collect_confidence))
+    visual_confidence = _bounded_confidence(data.get("visual_confidence"))
     result = StickerVisionResult(
         summary=summary,
         description=description,
@@ -491,6 +594,13 @@ def normalize_sticker_vision_result(raw: Any, *, vision_route: str = "", meme_po
         style=style,
         vision_route=str(vision_route or data.get("vision_route", "") or "").strip(),
         collect_confidence=collect_confidence,
+        subject_action=_compact_visual_text(data.get("subject_action"), 180),
+        animation_progression=_compact_visual_text(data.get("animation_progression"), 180),
+        literal_emotion=_compact_visual_text(data.get("literal_emotion"), 80),
+        social_intent=_compact_visual_text(data.get("social_intent"), 120),
+        suitable_contexts=_normalize_visual_contexts(data.get("suitable_contexts")),
+        unsuitable_contexts=_normalize_visual_contexts(data.get("unsuitable_contexts")),
+        visual_confidence=visual_confidence,
     )
     if result.style != "anime":
         if meme_policy == "reject":
@@ -683,6 +793,13 @@ async def _refine_sticker_with_research(
         "collect_reason": initial.collect_reason,
         "is_sticker": initial.is_sticker,
         "style": initial.style,
+        "subject_action": initial.subject_action,
+        "animation_progression": initial.animation_progression,
+        "literal_emotion": initial.literal_emotion,
+        "social_intent": initial.social_intent,
+        "suitable_contexts": initial.suitable_contexts,
+        "unsuitable_contexts": initial.unsuitable_contexts,
+        "visual_confidence": initial.visual_confidence,
     }
     prompt = (
         STICKER_RESEARCH_REFINE_PROMPT
@@ -903,6 +1020,14 @@ def normalize_label_result(
             "use_hint": normalized.use_hint,
             "avoid_hint": normalized.avoid_hint,
             "style": normalized.style,
+            "subject_action": normalized.subject_action,
+            "animation_progression": normalized.animation_progression,
+            "literal_emotion": normalized.literal_emotion,
+            "social_intent": normalized.social_intent,
+            "suitable_contexts": normalized.suitable_contexts,
+            "unsuitable_contexts": normalized.unsuitable_contexts,
+            "visual_confidence": normalized.visual_confidence,
+            "vision_prompt_version": STICKER_VISION_PROMPT_VERSION,
         },
         model_name=model_name,
         vision_route=normalized.vision_route,
@@ -929,6 +1054,7 @@ __all__ = [
     "compute_folder_hash",
     "find_sticker_by_hash",
     "get_persona_adaptation",
+    "get_visual_label",
     "image_bytes_to_data_url",
     "image_file_to_data_url",
     "judge_sticker_against_library",
@@ -939,6 +1065,7 @@ __all__ = [
     "normalize_sticker_metadata",
     "normalize_sticker_vision_result",
     "put_persona_adaptation",
+    "put_visual_label",
     "recall_similar_stickers",
     "render_sticker_semantic_summary",
     "resolve_sticker_dir",
@@ -947,5 +1074,6 @@ __all__ = [
     "save_sticker_metadata",
     "save_sticker_metadata_sync",
     "sticker_metadata_path",
+    "visual_label_cache_key",
     "validated_expression_image",
 ]

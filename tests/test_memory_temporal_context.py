@@ -164,3 +164,35 @@ def test_state_api_cancels_only_bound_pending_topic(monkeypatch, tmp_path):
     asyncio.run(temporal.update_current_states(scope=scope, messages=[{"id": 1, "role": "user", "content": "取消", "timestamp": 1}],
                 caller=SimpleNamespace(chat_with_tools=call), timezone="Asia/Shanghai", timeout=1))
     assert cancelled == ["bound"]
+
+
+def test_state_update_rejects_evidence_deleted_just_before_commit(monkeypatch, tmp_path):
+    connect = wire(monkeypatch, tmp_path)
+    pending = load_personification_module("plugin.personification.flows.social_intelligence.pending_topics")
+    scope = dict(platform="onebot", bot_id="b", user_id="u", group_id="")
+    monkeypatch.setattr(pending, "list_pending_topics", lambda: [{**scope, "topic_id": "bound"}])
+    cancelled = []
+    monkeypatch.setattr(pending, "mark_skipped", cancelled.append)
+    with connect() as conn:
+        conn.execute("INSERT INTO session_messages VALUES (1,'private_u','user','取消出行',0,1,'{}')")
+        conn.commit()
+
+    async def call(**_kwargs):
+        # This runs after the model has seen the evidence, immediately before
+        # update_current_states attempts its atomic validation-and-commit.
+        with connect() as conn:
+            conn.execute("DELETE FROM session_messages WHERE id=1")
+            conn.commit()
+        return SimpleNamespace(content=json.dumps({
+            "updates": [{"statement": "出行取消", "status": "cancelled", "source_ids": [1]}],
+            "cancel_pending": [{"topic_id": "bound", "source_ids": [1]}],
+        }))
+
+    result = asyncio.run(temporal.update_current_states(
+        scope=scope,
+        messages=[{"id": 1, "role": "user", "content": "取消出行", "timestamp": 1}],
+        caller=SimpleNamespace(chat_with_tools=call), timezone="Asia/Shanghai", timeout=1,
+    ))
+    assert result == []
+    assert temporal.load_current_states(scope) == []
+    assert cancelled == []

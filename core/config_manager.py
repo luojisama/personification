@@ -276,6 +276,15 @@ class ConfigManager:
             payload[field_name] = getattr(self.plugin_config, field_name, None)
             imported_fields.append(field_name)
 
+        mode_field = "personification_memory_retrieval_mode"
+        if mode_field not in payload and mode_field not in pre_load_explicit:
+            # Preserve an existing explicitly usable API deployment. New/invalid
+            # hash configurations use the complete algorithm path by default.
+            if (payload.get("personification_real_embedding_enabled") is True
+                and payload.get("personification_embedding_provider") in {"openai", "gemini"}
+                and str(payload.get("personification_embedding_model") or "").strip()):
+                payload[mode_field] = "hybrid_api"
+                imported_fields.append(mode_field)
         if imported_fields or removed_fields:
             try:
                 _write_payload_atomic(self.path, payload)

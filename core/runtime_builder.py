@@ -136,6 +136,8 @@ from .plugin_runtime_logs import wrap_logger as wrap_plugin_logger
 from .proactive_store import load_proactive_state, save_proactive_state, update_private_interaction_time
 from .profile_service import ProfileService
 from .scoped_profile_service import ScopedProfileService
+from .private_profile_refresh import PrivateProfileRefresh
+from .surface_memory import build_surface_memory_provider
 from .policy_classifier import PolicyClassifier
 from .qzone_service import build_qzone_services, build_qzone_social_service
 from .qq_user_policy import QQUserPolicyGate
@@ -480,22 +482,19 @@ def build_plugin_runtime(
         tool_caller=persona_tool_caller,
         logger=logger,
         enabled=persona_enabled,
-        auto_threshold=max(
-            2,
-            min(
-                8,
-                int(
-                    getattr(
-                        plugin_config,
-                        "personification_persona_history_max",
-                        DEFAULT_PERSONA_HISTORY_MAX,
-                    )
-                    or DEFAULT_PERSONA_HISTORY_MAX
-                )
-                // 3,
-            ),
-        ),
+        auto_threshold=int(getattr(plugin_config, "personification_profile_batch_messages", 20) or 20),
+        quiet_period_seconds=float(getattr(plugin_config, "personification_profile_quiet_seconds", 600) or 600),
+        scope_cooldown_seconds=max(0, float(getattr(plugin_config, "personification_profile_scope_cooldown_seconds", 600))),
+        daily_api_budget=max(0, int(getattr(plugin_config, "personification_profile_daily_api_budget", 100))),
     )
+    private_profile_refresh = PrivateProfileRefresh(
+        scoped_profile_service, persona_tool_caller, logger,
+        threshold=int(getattr(plugin_config, "personification_profile_batch_messages", 20) or 20),
+        quiet_seconds=int(getattr(plugin_config, "personification_profile_quiet_seconds", 600) or 600),
+        daily_budget=max(0, int(getattr(plugin_config, "personification_profile_daily_api_budget", 100))),
+        cooldown=max(0, int(getattr(plugin_config, "personification_profile_scope_cooldown_seconds", 600))),
+    )
+    persona_store.bind_profile_refreshers(scoped_profile_service, private_profile_refresh)
     tool_registry, inner_state_updater, agent_tool_caller, lite_tool_caller = build_agent_runtime_deps(
         plugin_config=plugin_config,
         logger=logger,
@@ -537,6 +536,10 @@ def build_plugin_runtime(
         legacy_block_checker=_legacy_policy_blocked,
     )
     qzone_social_service.user_policy_authorizer = qq_user_policy_gate.current_authorization
+    if tool_registry is not None:
+        tool_registry.memory_context_provider = build_surface_memory_provider(config=plugin_config,
+            store=memory_store, caller=lite_tool_caller or agent_tool_caller,
+            policy=qq_user_policy_gate, profiles=scoped_profile_service)
     tts_service = TtsService(
         plugin_config=plugin_config,
         logger=logger,
@@ -737,6 +740,7 @@ def build_plugin_runtime(
             knowledge_store=knowledge_store,
             memory_store=memory_store,
             profile_service=profile_service,
+            scoped_profile_service=scoped_profile_service,
             memory_curator=memory_curator,
             background_intelligence=background_intelligence,
             user_policy_gate=qq_user_policy_gate,
@@ -825,6 +829,8 @@ def build_plugin_runtime(
             for tool in extension_tools:
                 if candidate_registry.get(tool.name) is None:
                     candidate_registry.register(tool)
+            candidate_registry.memory_context_provider = build_surface_memory_provider(config=plugin_config,
+                store=memory_store, caller=new_agent_tool_caller, policy=qq_user_policy_gate, profiles=scoped_profile_service)
         yaml_response_processor = build_yaml_response_processor(
             get_current_time=get_current_local_time,
             format_time_context=format_time_context,
@@ -894,6 +900,7 @@ def build_plugin_runtime(
                 persona_store.tool_caller = refreshed_persona_caller
                 if scoped_profile_service is not None:
                     scoped_profile_service.tool_caller = refreshed_persona_caller
+                private_profile_refresh.caller = refreshed_persona_caller
             except Exception as exc:
                 logger.warning(f"personification: rebuild persona tool caller failed: {exc}")
         logger.info("personification: runtime services reloaded from current config")
@@ -947,6 +954,7 @@ def build_plugin_runtime(
         memory_store=memory_store,
         profile_service=profile_service,
         scoped_profile_service=scoped_profile_service,
+        private_profile_refresh=private_profile_refresh,
         memory_curator=memory_curator,
         memory_decay_scheduler=memory_decay_scheduler,
         background_intelligence=background_intelligence,

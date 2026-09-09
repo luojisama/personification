@@ -252,6 +252,12 @@ class Config(BaseModel):
     personification_persona_prompt_max_chars: int = 120
     personification_memory_enabled: bool = True
     personification_memory_palace_enabled: bool = True
+    personification_memory_retrieval_mode: str = "algorithm_llm"
+    personification_profile_batch_messages: int = 20
+    personification_profile_quiet_seconds: float = 600
+    personification_profile_scope_cooldown_seconds: float = 600
+    personification_profile_daily_api_budget: int = 100
+    personification_memory_query_planning_enabled: bool = True
     personification_real_embedding_enabled: bool = False
     personification_embedding_provider: str = "hash_bow"
     personification_embedding_model: str = ""

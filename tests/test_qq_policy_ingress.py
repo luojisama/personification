@@ -128,7 +128,7 @@ def test_record_handler_schedules_scoped_profile_after_allowed_group_write() -> 
             logger=SimpleNamespace(info=lambda *_args, **_kwargs: None),
             create_background_task=lambda _group_id: touched.append("style"),
             create_summary_task=lambda group_id: touched.append(("summary", group_id)),
-            create_scoped_profile_task=lambda group_id, user_id: touched.append(
+            create_scoped_profile_task=lambda group_id, user_id, **identity: touched.append(
                 ("scoped", group_id, user_id)
             ),
             user_policy_gate=gate,

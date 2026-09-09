@@ -4,6 +4,7 @@ import asyncio
 import sqlite3
 import json
 import pytest
+import threading
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -66,6 +67,13 @@ def _patch_common(monkeypatch) -> None:  # noqa: ANN001
     )
     schedule = load_personification_module("plugin.personification.schedule")
     utils = load_personification_module("plugin.personification.utils")
+    data_store = load_personification_module("plugin.personification.core.data_store")
+    class _SocialStore:
+        def __init__(self): self.data = {}; self.lock = threading.Lock()
+        def mutate_sync(self, name, mutator):  # noqa: ANN001
+            with self.lock:
+                self.data[name] = mutator(self.data.get(name, {}))
+                return self.data[name]
     monkeypatch.setattr(diagnostics, "record", lambda **_kwargs: None)
     monkeypatch.setattr(schedule, "is_group_active_hour", lambda *_args: True)
     monkeypatch.setattr(utils, "get_group_config", lambda _group_id: {"sticker_enabled": True})
@@ -73,6 +81,8 @@ def _patch_common(monkeypatch) -> None:  # noqa: ANN001
     monkeypatch.setattr(proactive_flow, "get_group_topic_summary", lambda _group_id: "")
     monkeypatch.setattr(proactive_flow.random, "random", lambda: 0.0)
     monkeypatch.setattr(proactive_flow.random, "uniform", lambda *_args: 0.0)
+    social_store = _SocialStore()
+    monkeypatch.setattr(data_store, "get_data_store", lambda: social_store)
 
 
 def _patch_sticker(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
@@ -169,7 +179,11 @@ def test_private_proactive_send_records_ledger_receipt(
     async def _call_ai(_messages, **_kwargs):  # noqa: ANN001, ANN202
         if "persona_verdict" in str(_messages):
             return json.dumps({"action": "accept", "persona_verdict": "consistent"})
-        return "SEND|10001|suddenly remembered that episode"
+        return json.dumps({
+            "send": True, "action": "contact", "target_id": "10001",
+            "content": "suddenly remembered that episode", "motivation": "a shared episode",
+            "source_event_ids": [], "expression": "text", "next_consider_at": 0,
+        })
 
     result = asyncio.run(
         proactive_flow.run_proactive_messaging(
@@ -358,7 +372,9 @@ def _run_group_idle(
             plugin_config=config,
             get_bots=lambda: {str(bot.self_id): bot},
             get_whitelisted_groups=lambda: groups,
-            get_recent_group_msgs=lambda _group_id, limit: [],
+            get_recent_group_msgs=lambda _group_id, limit: [
+                {"message_id": f"source-{_group_id}", "content": "earlier topic", "is_bot": False, "time": 1}
+            ],
             get_group_style=lambda _group_id: "casual",
             load_proactive_state=lambda: proactive_state,
             save_proactive_state=lambda state: proactive_state.update(state),

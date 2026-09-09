@@ -2731,7 +2731,9 @@ async def process_yaml_response_logic(
             regenerated_text = str(regenerated or "").strip()
             if regenerated_text and not looks_like_explanatory_output(regenerated_text):
                 assistant_text = sanitized_regenerated = sanitize_history_text(regenerated_text)
-                parsed = {"messages": [{"text": sanitized_regenerated, "sticker": ""}], "think": "", "status": "", "action": ""}
+                parsed = _project_parsed_messages_to_canonical_text(
+                    parsed, sanitized_regenerated
+                )
         except Exception as e:
             logger.debug(f"[yaml_response_handler] banter regenerate skipped: {e}")
 
@@ -2775,7 +2777,12 @@ async def process_yaml_response_logic(
             rewrite_reply=_rewrite_for_repeat,
         )
         if assistant_text:
-            parsed = {"messages": [{"text": assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
+            # A repeat-cluster rewrite changes only the reviewed visible text.
+            # Preserve already structured sticker/image requests so their
+            # independent authorization still reaches the final media gate.
+            parsed = _project_parsed_messages_to_canonical_text(
+                parsed, assistant_text
+            )
 
     care_review_required = bool(
         getattr(semantic_frame, "requires_emotional_care", False)
@@ -3056,6 +3063,18 @@ async def process_yaml_response_logic(
     except Exception:
         pass
 
+    expression_mode = str(getattr(turn_plan, "expression_mode", "auto") or "auto").strip().lower()
+    if expression_mode not in {"auto", "text", "emoji", "qq_face", "sticker"}:
+        expression_mode = "auto"
+    # Preserve pre-TurnPlan callers that represented QQ faces only through
+    # the semantic intent, but make the resolved mode available to both
+    # native-face and local-sticker execution below.
+    explicit_local_sticker = any(
+        isinstance(item, dict) and str(item.get("sticker", "") or "").strip()
+        for item in list(parsed.get("messages") or [])
+    )
+    if expression_mode == "auto" and message_intent == "expression" and not explicit_local_sticker:
+        expression_mode = "qq_face"
     qq_auto_marker = maybe_choose_auto_qq_expression_marker(
         plugin_config=plugin_config,
         semantic_frame=semantic_frame,
@@ -3066,6 +3085,7 @@ async def process_yaml_response_logic(
         user_id=user_id,
         is_private=is_private_session,
         is_random_chat=is_random_chat,
+        expression_mode=expression_mode,
         has_rich_sticker=bool(stickers_sent),
     )
     if qq_auto_marker:
@@ -3130,18 +3150,31 @@ async def process_yaml_response_logic(
     chosen_sticker_paths: list[Path | None] = []
     if (
         parsed["messages"]
-        and bool(getattr(semantic_frame, "sticker_appropriate", True))
+        # A structured YAML ``sticker`` field is an explicit model proposal.
+        # Planner suitability is a useful guard for automatic selection, but
+        # must not silently erase that proposal merely because a fallback
+        # semantic frame did not infer sticker_appropriate.  Explicit output
+        # modes (text/emoji/qq_face) remain blocked by expression_mode below.
+        and (
+            bool(getattr(semantic_frame, "sticker_appropriate", True))
+            or explicit_local_sticker
+        )
+        and expression_mode in {"auto", "sticker"}
         and not contains_qq_expression_marker(assistant_text)
         and group_config.get("sticker_enabled", True)
         and sticker_dir.exists()
         and sticker_dir.is_dir()
     ):
         feedback_state = await load_sticker_feedback()
+        local_sticker_selected = False
         for msg in parsed["messages"]:
             requested_sticker = str(msg.get("sticker", "") or "").strip()
-            should_try_sticker = bool(requested_sticker)
-            if not should_try_sticker and random.random() < float(getattr(plugin_config, "personification_sticker_probability", 0.0) or 0.0):
-                should_try_sticker = True
+            # The planner selects a local surface with expression_mode=sticker.
+            # auto only honors an explicitly structured YAML sticker field;
+            # no independent probability draw is allowed after planning.
+            should_try_sticker = not local_sticker_selected and (
+                bool(requested_sticker) or expression_mode == "sticker"
+            )
             if not should_try_sticker:
                 chosen_sticker_paths.append(None)
                 continue
@@ -3159,6 +3192,7 @@ async def process_yaml_response_logic(
                 feedback_state=feedback_state,
             )
             chosen_sticker_paths.append(chosen_sticker)
+            local_sticker_selected = local_sticker_selected or chosen_sticker is not None
         stickers_sent = [path.stem for path in chosen_sticker_paths if path is not None]
     elif parsed["messages"]:
         chosen_sticker_paths = [None for _ in parsed["messages"]]

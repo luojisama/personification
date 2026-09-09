@@ -14,6 +14,9 @@ DEFAULT_STATE = {
     "pending_thoughts": [],
     "relation_warmth": {},
     "updated_at": "",
+    # A lightweight role-only activity.  It is expressly not evidence that a
+    # real tool call, a user event, or a shared experience happened.
+    "current_activity": None,
 }
 
 _MOOD_LABELS = ("平静", "开心", "疲惫", "困倦", "烦躁", "低落", "期待", "紧张", "放松", "无语", "好奇")
@@ -152,7 +155,38 @@ def normalize_inner_state(state: dict | None) -> dict:
             continue
     normalized["relation_warmth"] = clipped_relation
     normalized["updated_at"] = str(normalized.get("updated_at") or "")
+    normalized["current_activity"] = _normalize_current_activity(normalized.get("current_activity"))
     return normalized
+
+
+def _normalize_current_activity(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    activity = _compact_text(value.get("activity") or value.get("text"), limit=120)
+    if not activity:
+        return None
+    # Only the simulated source is accepted from the LLM path.  This prevents
+    # a model/tool failure from becoming a fabricated real-world history.
+    if str(value.get("source") or "simulated").strip() != "simulated":
+        return None
+    started_at = _compact_text(value.get("started_at"), limit=32)
+    expires_at = _compact_text(value.get("expires_at"), limit=32)
+    return {"activity": activity, "source": "simulated", "started_at": started_at, "expires_at": expires_at}
+
+
+def _advance_expired_activity(state: dict[str, Any], now: datetime) -> None:
+    activity = state.get("current_activity")
+    if not isinstance(activity, dict):
+        return
+    raw_expiry = str(activity.get("expires_at") or "").strip()
+    try:
+        expires = datetime.strptime(raw_expiry, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return
+    if expires <= now:
+        # Expiry only clears the current role state; it must not manufacture a
+        # diary entry claiming the activity completed.
+        state["current_activity"] = None
 
 
 async def load_inner_state(data_dir: Path) -> dict:
@@ -160,7 +194,9 @@ async def load_inner_state(data_dir: Path) -> dict:
     loaded = await _get_data_store().load(_STORE_NAME)
     if not isinstance(loaded, dict):
         return copy.deepcopy(DEFAULT_STATE)
-    return normalize_inner_state(loaded)
+    projected = normalize_inner_state(loaded)
+    _advance_expired_activity(projected, datetime.now())
+    return projected
 
 
 async def save_inner_state(data_dir: Path, state: dict) -> None:
@@ -204,6 +240,8 @@ def _merge_state(current_state: Dict[str, Any], new_state: Dict[str, Any]) -> Di
 
     for key, value in incoming_patch.items():
         merged[key] = value
+
+    _advance_expired_activity(merged, now)
 
     hour = now.hour
     if hour >= 23 or hour < 6:

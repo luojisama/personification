@@ -138,6 +138,7 @@ async def run_text_agent(
     output_kind: OutputKind | str | None = None,
     structured_output: bool = False,
     tool_profile: str = TEXT_AGENT_TOOL_PROFILE_DEFAULT,
+    memory_scope: dict[str, str] | None = None,
 ) -> str:
     """Run the complete Agent loop for flows that only need a text result.
 
@@ -175,6 +176,14 @@ async def run_text_agent(
         return ""
 
     agent_messages = renderer.prepare_messages(messages)
+    memory_provider = getattr(registry, "memory_context_provider", None)
+    if callable(memory_provider) and memory_scope is not None:
+        try:
+            memory = await memory_provider(messages=messages, scope=memory_scope, surface=surface_name)
+            if memory:
+                agent_messages.insert(max(0, len(agent_messages)-1), memory if isinstance(memory, dict) else {"role": "user", "content": memory})
+        except Exception as exc:
+            logger.warning(f"[agent_bridge] memory context unavailable: {type(exc).__name__}")
     if use_builtin_search_hint:
         agent_messages.append(
             {
@@ -194,27 +203,42 @@ async def run_text_agent(
         )
 
     executor = TextAgentExecutor(logger=logger)
-    result = await run_agent(
-        messages=agent_messages,
-        registry=clone_tool_registry(registry, tool_profile=tool_profile),
-        tool_caller=tool_caller,
-        executor=executor,
-        plugin_config=plugin_config,
-        logger=logger,
-        max_steps=max_steps,
-        query_rewrite_context=QueryRewriteContext(trigger_reason=trigger_reason),
-        is_group=(
-            True
-            if registered_spec.persona_scope.value == "group_social"
-            else None
-            if registered_spec.persona_scope.value == "chat"
-            else False
-        ),
-        surface="" if surface_name == "agent_bridge" else surface_name,
-        finalize_quality=renderer.finalize_quality,
-        structured_output=resolved_output_kind is OutputKind.STRUCTURED_DECISION,
-        allow_builtin_search=tool_profile == TEXT_AGENT_TOOL_PROFILE_DEFAULT,
-    )
+    # Bind the locally supplied namespace throughout tools and final review,
+    # not only while the history provider runs.
+    from .llm_context import current_llm_context, set_llm_context, reset_llm_context
+    context_token = None
+    if memory_scope is not None:
+        inherited = current_llm_context()
+        context_token = set_llm_context(
+            **{key: str(memory_scope.get(key) or "") for key in ("platform", "bot_id", "user_id", "group_id")},
+            purpose=surface_name, retry_policy=str(inherited.get("retry_policy") or ""),
+            deadline_monotonic=inherited.get("deadline_monotonic"),
+        )
+    try:
+        result = await run_agent(
+            messages=agent_messages,
+            registry=clone_tool_registry(registry, tool_profile=tool_profile),
+            tool_caller=tool_caller,
+            executor=executor,
+            plugin_config=plugin_config,
+            logger=logger,
+            max_steps=max_steps,
+            query_rewrite_context=QueryRewriteContext(trigger_reason=trigger_reason),
+            is_group=(
+                True
+                if registered_spec.persona_scope.value == "group_social"
+                else None
+                if registered_spec.persona_scope.value == "chat"
+                else False
+            ),
+            surface="" if surface_name == "agent_bridge" else surface_name,
+            finalize_quality=renderer.finalize_quality,
+            structured_output=resolved_output_kind is OutputKind.STRUCTURED_DECISION,
+            allow_builtin_search=tool_profile == TEXT_AGENT_TOOL_PROFILE_DEFAULT,
+        )
+    finally:
+        if context_token is not None:
+            reset_llm_context(context_token)
     text = str(getattr(result, "text", "") or "")
     if (
         resolved_output_kind in {OutputKind.PERSONA_TEXT, OutputKind.DIRECT_ACTION}

@@ -421,6 +421,19 @@ def build_memory_router(*, runtime) -> APIRouter:
             )
             _raise_operation(500, report)
 
+    @router.get("/text-index")
+    async def text_index_status(_: AdminIdentity = Depends(require_admin)) -> dict:
+        store = _memory_store(runtime)
+        if store is None:
+            return {"available": False, "reason": "memory_store_missing"}
+        reporter = getattr(store, "text_index_status", None)
+        if not callable(reporter):
+            return {"available": False, "reason": "text_index_unsupported"}
+        try:
+            return {"available": True, **dict(reporter())}
+        except Exception:
+            return {"available": False, "reason": "text_index_status_failed"}
+
     @router.post("/vector-index/rebuild")
     async def rebuild_vector_index(
         limit: int = Query(default=0, ge=0, le=10000),

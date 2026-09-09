@@ -63,6 +63,22 @@ def test_merge_state_keeps_mood_short_and_does_not_concatenate(monkeypatch) -> N
     assert merged["pending_thoughts"] == [{"thought": "之后看一下日志"}]
 
 
+def test_inner_state_simulated_activity_expires_without_fabricating_history(monkeypatch) -> None:  # noqa: ANN001
+    class _NoonDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001
+            return cls(2026, 9, 8, 12, 0, 0, tzinfo=tz)
+
+    monkeypatch.setattr(inner_state, "datetime", _NoonDateTime)
+    merged = inner_state._merge_state(
+        {"current_activity": {"activity": "整理表情包", "source": "simulated", "started_at": "2026-09-08 10:00:00", "expires_at": "2026-09-08 11:00:00"}},
+        {},
+    )
+    assert merged["current_activity"] is None
+    assert merged["pending_thoughts"] == []
+    assert inner_state.normalize_inner_state({"current_activity": {"activity": "发过消息", "source": "tool"}})["current_activity"] is None
+
+
 def test_inner_state_llm_update_does_not_block_state_reads(monkeypatch) -> None:  # noqa: ANN001
     class _Store:
         def __init__(self) -> None:
@@ -146,3 +162,16 @@ def test_data_store_mutate_keeps_lock_until_cancelled_worker_finishes(monkeypatc
         assert await asyncio.wait_for(second, timeout=1) == {"value": 2}
 
     asyncio.run(_run())
+
+
+def test_loading_after_offline_period_clears_activity_without_inventing_history(monkeypatch):
+    from pathlib import Path
+    module = load_personification_module("plugin.personification.agent.inner_state")
+    class Store:
+        async def load(self, name):
+            return {"current_activity": {"activity": "看书", "source": "simulated", "expires_at": "2000-01-01 00:00:00"}, "pending_thoughts": []}
+    monkeypatch.setattr(module, "_get_data_store", lambda: Store())
+    state = asyncio.run(module.load_inner_state(Path("unused")))
+    assert state["current_activity"] is None
+    assert not state["pending_thoughts"]
+    assert "history" not in state
