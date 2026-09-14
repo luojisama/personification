@@ -1,0 +1,15 @@
+# .mailmap —— 归一身分：把同一人的历史署名折叠到主身份
+#
+# 格式：Proper Name <proper@email> Commit Name <commit@email>
+# 只写邮箱（省略 Commit Name）表示：该邮箱的所有提交都归到主身份。
+# 本文件只影响展示层（git shortlog / git log / GitHub Contributors），
+# 不改写任何已有提交的 hash，因此可以安全 push。
+
+# ① GitHub 网页端点「Merge pull request」产生的署名（GitHub 匿名邮箱）
+Shirosaki_Shizuku <2534316454@qq.com> <114895516+luojisama@users.noreply.github.com>
+
+# ② 本地提交时 user.name 误写成 GitHub 用户名
+Shirosaki_Shizuku <2534316454@qq.com> luojisama <2534316454@qq.com>
+
+# ③ 服务器/容器里未配 git 身份，以 root 直接提交
+Shirosaki_Shizuku <2534316454@qq.com> root <root@localhost.localdomain>
