@@ -19,11 +19,12 @@ async def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]
         result = {"status": "ungraded", "reason": "missing_artifact_or_case_id"}
     else:
         result = None
-        for line in open(artifact, encoding="utf-8"):
-            row = json.loads(line)
-            if str(row.get("case_id", "") or "") == case_id:
-                result = row
-                break
+        with open(artifact, encoding="utf-8") as stream:
+            for line in stream:
+                row = json.loads(line)
+                if str(row.get("case_id", "") or "") == case_id:
+                    result = row
+                    break
         if result is None:
             result = {"case_id": case_id, "status": "ungraded", "reason": "artifact_case_missing"}
     return {"output": json.dumps(result, ensure_ascii=False), "metadata": {"cost": "unknown", "offline_artifact": True}}

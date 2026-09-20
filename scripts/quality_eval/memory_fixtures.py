@@ -44,7 +44,10 @@ def _case_dir(case: dict[str, Any], config: Any) -> Path:
 
 
 def _config(case: dict[str, Any], config: Any) -> SimpleNamespace:
-    source = vars(config) if hasattr(config, "__dict__") else dict(config or {})
+    # ``vars(config)`` exposes the caller-owned backing dict.  Copy it before
+    # forcing fixture-only values so a later normal/YAML case cannot inherit
+    # this case's isolated data directory or embedding policy.
+    source = dict(vars(config)) if hasattr(config, "__dict__") else dict(config or {})
     # The quality fixture has no remote embedding capability, even if a caller
     # accidentally supplies production-looking settings.
     source.update({
@@ -92,7 +95,10 @@ def _seed_payload(case: dict[str, Any], seed: dict[str, Any], ordinal: int) -> d
         "memory_id": _memory_id(case, ordinal), "memory_type": str(seed.get("memory_type", "semantic") or "semantic"),
         "summary": fact, "user_id": owner, "group_id": group_id,
         "platform": str(seed.get("platform", "onebot") or "onebot"),
-        "bot_id": str(seed.get("bot_id", "quality-bot") or "quality-bot"),
+        # Match _CaptureBot.self_id/_MessageEvent.self_id.  A generic fallback
+        # would make incomplete fixture seeds silently miss identity-scoped
+        # recall instead of exercising the intended case.
+        "bot_id": str(seed.get("bot_id", "quality-eval-bot") or "quality-eval-bot"),
         "permission_type": permission, "group_scope": "isolated" if scope == "group" else "shared",
         "cross_group_allowed": False, "revision": int(seed.get("revision", 1) or 1),
         "source_kind": "quality_fixture", "supports_recall": True,

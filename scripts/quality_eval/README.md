@@ -23,7 +23,9 @@ SQLite 额度全阶段复用同一文件，总限 1500；预扣且失败不退�
 
 ## 当前覆盖限制
 
-80个场景、群私各40，dev60/holdout20，普通/YAML各40。当前处理器适配覆盖纯文字多轮和合成回执。带 seed_memory 或 coverage_requires 的案例暂明确阻断，等待记忆、媒体、工具和社交fixture适配；不能仅凭模型读懂其文字就宣称行为通过。没有真实送达回执的结果一律不标 delivered。
+80个场景、群私各40，dev60/holdout20，普通/YAML各40。当前处理器适配覆盖纯文字多轮、真实隔离 MemoryStore 的预置记忆和合成回执。带 coverage_requires、媒体、工具事件或记忆更新事件的案例仍明确阻断；记忆更新 CAS 的隔离单测不代表完整会话更新链路已覆盖。没有真实送达回执的结果一律不标 delivered。
+
+媒体 fixture 只验证本地文件传输与 owner/media ID 绑定。1×1 PNG 和通用诊断视频、音频没有案例对应内容，始终标为 transport_only / case_media_asset_missing，不可用于媒体回复质量评分；语料中的 summary/transcript 不会提升为可信工具证据。
 
 `grade_run.py` 对已保存的不同版本同案例进行两次反序盲评，沿用相同 budget-db；费用未配置时保持未知。`grading_provider.py` 只将已完成评分的 JSONL 提供给 Promptfoo 导出，不另外调用模型。模型评分是辅助证据，顺序不一致标未评分；真实平局单列。汇总未提供预期案例清单时不能宣布完整覆盖。
 

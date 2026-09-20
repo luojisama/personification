@@ -55,8 +55,12 @@ class _Segment:
 
 
 class _MessageEvent:
-    def __init__(self, *, group_id: str, user_id: str, message_id: str, sender: str, text: str, mention: bool, bot_id: str) -> None:
+    def __init__(self, *, group_id: str, user_id: str, message_id: str, sender: str, text: str, mention: bool, bot_id: str, platform: str) -> None:
         self.group_id, self.user_id, self.message_id = group_id, user_id, message_id
+        # The real recall path scopes records by the incoming event identity,
+        # not the capture bot alone.  Fixtures must model both fields so a
+        # seed cannot silently miss (or widen) its platform/bot boundary.
+        self.self_id, self.platform = bot_id, platform
         self.sender = SimpleNamespace(nickname=sender, card="", role="member")
         self.message = ([ _Segment("at", {"qq": bot_id}) ] if mention else []) + [_Segment("text", {"text": text})]
         self.reply = None
@@ -93,7 +97,7 @@ class _CaptureBot:
 def _event_from(case: dict[str, Any], current: dict[str, Any], bot_id: str, index: int) -> Any:
     if str(current.get("kind", "message")) not in {"message", "mention"}:
         raise ValueError("unsupported_fixture:trigger_kind")
-    common = dict(user_id=str(current.get("user_id", current.get("sender", "user"))), message_id=str(current.get("message_id", f"eval-{case.get('id', 'case')}-{index}")), sender=str(current.get("sender", "user")), text=str(current.get("text", "")), mention=str(current.get("kind")) == "mention", bot_id=bot_id)
+    common = dict(user_id=str(current.get("user_id", current.get("sender", "user"))), message_id=str(current.get("message_id", f"eval-{case.get('id', 'case')}-{index}")), sender=str(current.get("sender", "user")), text=str(current.get("text", "")), mention=str(current.get("kind")) == "mention", bot_id=bot_id, platform="onebot")
     if str(case.get("surface", "group")) == "private":
         return _PrivateEvent(**common)
     return _GroupEvent(group_id=str(current.get("group_id", "quality-group")), **common)
@@ -141,7 +145,13 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
     if isinstance(persona_value, dict):
         prompt = dict(persona_value)
     elif mode == "yaml":
-        prompt = {"system": str(persona_value or ""), "input": "{history_last}"}
+        # This is only the adapter's fallback template.  Production YAML
+        # deliberately flattens rendered history into its input field, and a
+        # template containing any history placeholder opts out of automatic
+        # history insertion.  Include both retained slices so multi-turn
+        # fixtures do not accidentally hide confirmed replies.  User-supplied
+        # persona dicts remain untouched.
+        prompt = {"system": str(persona_value or ""), "input": "{history_new}\n{history_last}"}
     else:
         prompt = str(persona_value or "")
     if not prompt:
@@ -155,6 +165,11 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
     session_data: dict[str, list[dict[str, Any]]] = {}
     confirmed_history: list[dict[str, Any]] = []
     group_window = list((case.get("seed") or {}).get("group_window", [])) if isinstance(case.get("seed"), dict) else []
+    # Production records confirmed bot replies through ``record_group_msg``.
+    # Keep those records pending until the current human event is appended
+    # below, so the next turn sees chronological user -> bot ordering without
+    # exposing an unconfirmed outgoing reply to the same turn.
+    captured_group_replies: list[dict[str, Any]] = []
     receipt = str(case.get("synthetic_receipt", "confirmed") or "confirmed")
     if receipt not in {"confirmed", "unknown", "failed"}:
         raise ValueError("unsupported_fixture:receipt")
@@ -175,6 +190,25 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
         if role == "assistant":
             confirmed_history.append(record)
 
+    def record_group_msg(
+        group_id: str,
+        sender_name: str,
+        content: str,
+        **meta: Any,
+    ) -> None:
+        captured_group_replies.append({
+            "group_id": str(group_id or ""),
+            "message_id": str(meta.get("message_id", "") or ""),
+            "user_id": str(meta.get("user_id", "") or ""),
+            "sender_name": str(sender_name or ""),
+            "text": str(content or ""),
+            "source_kind": str(meta.get("source_kind", "bot_reply") or "bot_reply"),
+            "is_bot": bool(meta.get("is_bot", True)),
+            "reply_to_msg_id": str(meta.get("reply_to_msg_id", "") or ""),
+            "reply_to_user_id": str(meta.get("reply_to_user_id", "") or ""),
+            "mentioned_ids": list(meta.get("mentioned_ids", []) or []),
+        })
+
     async def primary(messages: list[dict[str, Any]], **_kwargs: Any) -> str:
         return await _caller_text(caller, messages)
 
@@ -185,7 +219,7 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
         call_ai_api=primary, lite_call_ai_api=primary, review_call_ai_api=primary, parse_yaml_response=yaml_parse_mod.parse_yaml_response,
         message_segment_cls=_Segment, sanitize_history_text=str, private_session_prefix="private_",
         build_private_session_id=lambda uid: f"private_{uid}", build_group_session_id=str, append_session_message=append,
-        record_group_msg=lambda *_a, **_k: None, logger=logger, user_blacklist={}, tool_registry=registry_mod.ToolRegistry(),
+        record_group_msg=record_group_msg, logger=logger, user_blacklist={}, tool_registry=registry_mod.ToolRegistry(),
         agent_tool_caller=caller, lite_tool_caller=caller, vision_caller=None, tts_service=None,
         memory_curator=None, knowledge_store=None, inner_state_updater=None, favorability_service=None,
         user_policy_gate=None, qq_outbound_ledger=None,
@@ -203,7 +237,7 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
         get_current_time=lambda: datetime(2026, 1, 1, 12, 0, 0), format_time_context=lambda _now: "2026-01-01 12:00",
         schedule_disabled_override_prompt=lambda: "", get_schedule_prompt_injection=lambda: "", build_grounding_context=lambda _q: "",
         update_private_interaction_time=lambda _uid: None, call_ai_api=primary, lite_call_ai_api=primary, review_call_ai_api=primary,
-        save_plugin_runtime_config=None, user_blacklist={}, record_group_msg=lambda *_a, **_k: None,
+        save_plugin_runtime_config=None, user_blacklist={}, record_group_msg=record_group_msg,
         split_text_into_segments=lambda text: [text], message_segment_cls=_Segment, get_sticker_files=lambda: [],
         get_http_client=lambda: _NoNetworkClient(), get_whitelisted_groups=lambda: [], agent_tool_caller=caller,
         lite_tool_caller=caller, tool_registry=registry_mod.ToolRegistry(), memory_store=memory_store)
@@ -241,6 +275,7 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
         turns: list[dict[str, Any]] = []
         for index, event_data in enumerate(events):
             event = _event_from(case, event_data, bot.self_id, index)
+            captured_group_replies.clear()
             before = len(bot.sent)
             state = {"response_deadline": asyncio.get_running_loop().time() + float(config.personification_response_timeout), "disable_network_hooks": True, "is_random_chat": bool(case.get("is_random_chat", False)), "batched_events": [], "turn_media_context": []}
             await processor.process_response_logic(bot, event, state, processor.ReplyProcessorDeps(session=session, persona=persona, runtime=runtime, types=type_deps))
@@ -251,6 +286,10 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
                 break
             if str(case.get("surface", "group")) != "private":
                 group_window.append({"message_id": str(getattr(event, "message_id", "")), "user_id": str(getattr(event, "user_id", "")), "sender_name": str(getattr(getattr(event, "sender", None), "nickname", "")), "text": event.get_plaintext(), "source_kind": "user"})
+                # Only production's confirmed-delivery code calls
+                # ``record_group_msg``.  Preserve that distinction here rather
+                # than reconstructing a bot reply from ``bot.sent``.
+                group_window.extend(captured_group_replies)
     finally:
         if original_window is not None:
             processor.build_group_context_window, processor.get_recent_group_msgs = original_window, original_recent

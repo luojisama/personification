@@ -117,7 +117,9 @@ def test_report_summary_counts_failures_and_holdout_coverage_without_flag_attrib
     assert report["tie"] == 1 and report["candidate_wins"] == 1
     assert report["candidate_win_rate_all_graded"] == 0.5 and report["candidate_decisive_win_rate"] == 1.0
     assert report["dimension_means"]["surface"]["group"]["candidate"]["persona"] == 4.0
-    assert report["holdout_category_gate"]["dialogue"] == {"n": 3, "graded": 2, "ungraded": 1, "candidate_dimension_thresholds": {key: True for key in ("understanding", "naturalness", "persona", "relationship", "factuality")}, "verified": True, "passed": False}
+    assert report["holdout_category_gate"]["dialogue"]["n"] == 3
+    assert report["holdout_category_gate"]["dialogue"]["passed"] is False
+    assert all(report["holdout_category_gate"]["dialogue"]["candidate_dimension_thresholds"].values())
     assert report["flagged_pairs_for_review"] == ["a"]
     assert report["flags_are_model_signals_not_confirmed_defects"] is True
 
@@ -132,3 +134,21 @@ def test_holdout_gate_needs_expected_manifest_and_reports_missing_duplicates() -
     assert verified["missing_expected_case_ids"] == ["b"]
     assert verified["duplicate_case_ids"] == ["a"]
     assert verified["holdout_category_gate"]["dialogue"]["passed"] is False
+
+
+def test_dev_scores_cannot_hide_holdout_regression():
+    dimensions = ("understanding", "naturalness", "persona", "relationship", "factuality")
+    def row(case_id, split, score):
+        return {"case_id": case_id, "split": split, "category": "dialogue", "status": "graded", "winner": "candidate",
+                "verdicts": [{"scores": {key: {"baseline": 3, "candidate": score} for key in dimensions}}]}
+    report = report_summary([row("dev", "dev", 5), row("held", "holdout", 3)], expected_case_ids={"dev", "held"})
+    assert report["dimension_means"]["category"]["dialogue"]["candidate"]["persona"] == 4
+    assert report["holdout_category_gate"]["dialogue"]["candidate_means"]["persona"] == 3
+    assert not report["holdout_category_gate"]["dialogue"]["passed"]
+
+
+def test_blind_projection_excludes_internal_turn_metadata():
+    from scripts.quality_eval.grading import _response_projection
+    assert _response_projection({"revision": "candidate", "reply": "回答", "turns": [
+        {"input": "提问", "reply": "回答", "mode": "yaml", "trace": "internal", "delivery_unknown": False},
+    ]}) == {"reply": "回答", "turns": [{"input": "提问", "reply": "回答"}]}

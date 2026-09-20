@@ -95,6 +95,7 @@ def report_summary(
     scopes: dict[str, dict[str, dict[str, Any]]] = {"surface": {}, "category": {}}
     flagged_pairs: list[str] = []
     holdout: dict[str, dict[str, Any]] = {}
+    holdout_scores: dict[str, dict[str, list[float]]] = {}
     seen_case_ids: dict[str, int] = {}
     for row in results:
         grade = row.get("grading", row) if isinstance(row, dict) else {}
@@ -125,6 +126,14 @@ def report_summary(
         if status != "graded":
             continue
         verdicts = grade.get("verdicts", [])
+        if str(metadata.get("split", "")) == "holdout":
+            category = str(metadata.get("category", "uncategorized"))
+            scores = holdout_scores.setdefault(category, {key: [] for key in DIMENSIONS})
+            for dimension in DIMENSIONS:
+                values = [item.get("scores", {}).get(dimension, {}).get("candidate") for item in verdicts if isinstance(item, dict)]
+                values = [value for value in values if type(value) is int and 1 <= value <= 5]
+                if values:
+                    scores[dimension].append(sum(values) / len(values))
         for dimension_name, dimension_value in (("surface", str(metadata.get("surface", "unknown") or "unknown")), ("category", str(metadata.get("category", "uncategorized") or "uncategorized"))):
             bucket = scopes[dimension_name].setdefault(dimension_value, {"n": 0, "baseline": {key: [] for key in DIMENSIONS}, "candidate": {key: [] for key in DIMENSIONS}})
             bucket["n"] += 1
@@ -151,7 +160,8 @@ def report_summary(
     duplicate_case_ids = sorted(case_id for case_id, count in seen_case_ids.items() if count > 1)
     completeness_verified = expected_case_ids is not None or expected_cases is not None
     for category, gate in holdout.items():
-        candidate_means = dimension_means["category"].get(category, {}).get("candidate", {key: None for key in DIMENSIONS})
+        candidate_means = {key: _mean(holdout_scores.get(category, {}).get(key, [])) for key in DIMENSIONS}
+        gate["candidate_means"] = candidate_means
         gate["candidate_dimension_thresholds"] = {key: candidate_means.get(key) is not None and candidate_means[key] >= 4.0 for key in DIMENSIONS}
         gate["verified"] = completeness_verified
         gate["passed"] = bool(completeness_verified and gate["ungraded"] == 0 and not missing_expected and not duplicate_case_ids and all(gate["candidate_dimension_thresholds"].values()))
@@ -199,7 +209,11 @@ def _response_projection(result: Any) -> dict[str, Any]:
     if not isinstance(result, dict):
         return {"reply": str(result or ""), "turns": []}
     turns = result.get("turns", [])
-    return {"reply": str(result.get("reply", "") or ""), "turns": turns if isinstance(turns, list) else []}
+    visible_turns = [
+        {"input": str(turn.get("input", "") or ""), "reply": str(turn.get("reply", "") or "")}
+        for turn in (turns if isinstance(turns, list) else []) if isinstance(turn, dict)
+    ]
+    return {"reply": str(result.get("reply", "") or ""), "turns": visible_turns}
 
 
 def _prompt(case: Any, ordered: list[tuple[str, Any]]) -> list[dict[str, str]]:
