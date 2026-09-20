@@ -88,6 +88,8 @@ def _sources_are_live(conn: Any, scope: dict, messages: list[dict]) -> bool:
 
 def _commit(scope: dict, updates: list[dict], existing: list[dict], messages: list[dict],
             *, validate_sources: bool = False) -> bool:
+    from .generation_fence import assert_current_generation
+    assert_current_generation()
     # The model may reference only evidence and state IDs from its own input.
     sources = {str(m.get("id")): m for m in messages if m.get("id") is not None
                and m.get("role") in {"user", "assistant"} and not m.get("is_summary")}

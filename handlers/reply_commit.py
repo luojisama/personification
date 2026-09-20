@@ -49,6 +49,8 @@ def reply_lifecycle_snapshot(state: dict[str, Any]) -> dict[str, Any]:
 
 async def acquire_reply_commit(state: dict[str, Any]) -> None:
     """Acquire the per-session delivery gate once for the current turn."""
+    from ..core.generation_fence import assert_current_generation
+    assert_current_generation(state)
     if bool(state.get(_ACQUIRED_KEY)):
         return
     lock = state.get(_LOCK_KEY)
@@ -56,6 +58,11 @@ async def acquire_reply_commit(state: dict[str, Any]) -> None:
         return
     await lock.acquire()
     state[_ACQUIRED_KEY] = True
+    try:
+        assert_current_generation(state)
+    except BaseException:
+        release_reply_commit(state)
+        raise
 
 
 def release_reply_commit(state: dict[str, Any]) -> None:
@@ -67,6 +74,8 @@ def release_reply_commit(state: dict[str, Any]) -> None:
 
 
 def mark_reply_delivery_started(state: dict[str, Any]) -> None:
+    from ..core.generation_fence import assert_current_generation
+    assert_current_generation(state)
     state[_DELIVERY_STARTED_KEY] = True
 
 

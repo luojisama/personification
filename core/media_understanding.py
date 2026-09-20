@@ -156,7 +156,22 @@ def _media_request_timeout(provider: dict[str, Any], default: float = 200.0) -> 
     return max(20.0, min(configured, 600.0))
 
 
-def _primary_provider_candidates(runtime: Any) -> list[dict[str, Any]]:
+def _primary_provider_candidates(runtime: Any, *, purpose: str = "vision") -> list[dict[str, Any]]:
+    from .generation_fence import active_config
+    from .provider_catalog import normalize_purpose_bindings
+
+    live_config = getattr(runtime, "plugin_config", None)
+    config = active_config(live_config)
+    bindings = normalize_purpose_bindings(
+        getattr(config, "personification_model_purpose_bindings", {}) or {}
+    )
+    if bindings.get(str(purpose or "vision").strip().lower()):
+        from .provider_router import get_configured_api_providers
+        return get_configured_api_providers(config, getattr(runtime, "logger", None), purpose=purpose)
+    if config is not live_config:
+        from .provider_router import get_configured_api_providers
+        return _apply_sticker_model_override(runtime, get_configured_api_providers(
+            config, getattr(runtime, "logger", None), purpose=purpose))
     providers: list[dict[str, Any]] = []
     getter = getattr(runtime, "get_configured_api_providers", None)
     if callable(getter):
@@ -179,8 +194,24 @@ def _primary_provider_candidates(runtime: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _has_explicit_visual_binding(runtime: Any, purpose: str) -> bool:
+    """Whether this visual request has an administrator-selected catalog pair.
+
+    A selected pair is an authority boundary: after it rejects or fails, do
+    not silently borrow ``runtime.vision_caller`` from another supplier.  Use
+    the generation snapshot so a WebUI save cannot change a running turn.
+    """
+    from .generation_fence import active_config
+    from .provider_catalog import normalize_purpose_bindings
+
+    config = active_config(getattr(runtime, "plugin_config", None))
+    bindings = getattr(config, "personification_model_purpose_bindings", {}) or {}
+    return bool(normalize_purpose_bindings(bindings).get(str(purpose or "vision").strip().lower()))
+
+
 def _apply_sticker_model_override(runtime: Any, providers: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    plugin_config = getattr(runtime, "plugin_config", None)
+    from .generation_fence import active_config
+    plugin_config = active_config(getattr(runtime, "plugin_config", None))
     if plugin_config is None:
         return providers
     model_override = get_model_override_for_role(plugin_config, MODEL_ROLE_STICKER)
@@ -200,6 +231,10 @@ class _ProviderConfigProxy:
         self._provider = dict(provider or {})
 
     def __getattr__(self, name: str) -> Any:
+        if name == "personification_proxy":
+            return self._provider.get("proxy", "")
+        if name == "personification_provider_timeout":
+            return self._provider.get("timeout", 200)
         if name == "personification_api_type":
             return self._provider.get("api_type", "openai")
         if name == "personification_api_url":
@@ -416,11 +451,14 @@ async def _try_primary_image_routes(
     refs: Sequence[str],
     route_name: str,
     image_detail: str,
+    purpose: str = "vision",
 ) -> str:
-    plugin_config = getattr(runtime, "plugin_config", None)
+    from .generation_fence import active_config, assert_current_generation
+    assert_current_generation()
+    plugin_config = active_config(getattr(runtime, "plugin_config", None))
     if plugin_config is None:
         return ""
-    for provider in _primary_provider_candidates(runtime):
+    for provider in _primary_provider_candidates(runtime, purpose=purpose):
         api_type = str(provider.get("api_type", "") or "")
         model = str(provider.get("model", "") or "")
         provider_name = str(provider.get("name", "") or model or api_type or "primary")
@@ -429,22 +467,24 @@ async def _try_primary_image_routes(
                 runtime,
                 f"[vision] provider={provider_name} is not known to support image input; trying anyway",
             )
+        response = None
+        from .llm_context import reset_llm_context, set_wire_retry_disabled
+        from .provider_catalog import stable_provider_id
+        route_id = stable_provider_id(provider)
+        usage_context = set_wire_retry_disabled(usage_route_id=route_id, usage_provider=api_type)
         try:
+            assert_current_generation()
             caller = _build_tool_caller(_ProviderConfigProxy(plugin_config, provider))
+            from .context_budget import ContextBudget, fit_request_to_budget
+            request_messages = [{"role": "user", "content": build_user_message_content(
+                text=prompt, image_urls=list(refs), image_detail=image_detail)}]
+            if provider.get("context_budget_enabled", True) is not False:
+                request_messages, _budget_detail = fit_request_to_budget(
+                    request_messages, [], ContextBudget.from_route(provider))
             response = await caller.chat_with_tools(
-                messages=[
-                    {
-                        "role": "user",
-                        "content": build_user_message_content(
-                            text=prompt,
-                            image_urls=list(refs),
-                            image_detail=image_detail,
-                        ),
-                    }
-                ],
-                tools=[],
-                use_builtin_search=False,
+                messages=request_messages, tools=[], use_builtin_search=False,
             )
+            assert_current_generation()
         except Exception as exc:
             if not (is_image_input_unsupported_error(exc) or error_indicates_vision_unavailable(exc)):
                 _log_warning(
@@ -452,6 +492,14 @@ async def _try_primary_image_routes(
                     f"[vision] primary image route failed provider={provider_name}: {sanitize_text(exc)}",
                 )
             continue
+        finally:
+            # These direct visual callers bypass the normal routed caller.
+            # Preserve reported usage even for a rejected or superseded result.
+            if response is not None:
+                from .token_ledger import record_response_usage
+                record_response_usage(response, model_fallback=model,
+                                      route_id=route_id, provider=api_type)
+            reset_llm_context(usage_context)
         if bool(getattr(response, "vision_unavailable", False)):
             continue
         content = str(getattr(response, "content", "") or "").strip()
@@ -1688,6 +1736,7 @@ async def analyze_images_with_route_or_fallback(
     route_name: str = VISUAL_ROUTE_AGENT,
     image_detail: str = "low",
     fallback_vision_caller: Any = None,
+    purpose: str = "vision",
 ) -> tuple[str, str]:
     refs = [str(item or "").strip() for item in image_refs if str(item or "").strip()]
     if not refs:
@@ -1699,17 +1748,32 @@ async def analyze_images_with_route_or_fallback(
         refs=refs,
         route_name=route_name,
         image_detail=image_detail,
+        purpose=purpose,
     )
     if primary_result:
         return primary_result, "route_direct"
 
+    # Explicit vision/labeler selections must fail closed.  In particular, a
+    # stale or rejected pair cannot turn into a request to the generic visual
+    # fallback connection merely because that connection remains configured.
+    if _has_explicit_visual_binding(runtime, purpose):
+        return "", "vision_binding_unavailable"
+
     fallback = fallback_vision_caller or getattr(runtime, "vision_caller", None)
+    from .generation_fence import active_config, assert_current_generation
+    live_config = getattr(runtime, "plugin_config", None)
+    config = active_config(live_config)
+    if config is not live_config:
+        from .ai_routes import build_fallback_vision_caller
+        fallback = build_fallback_vision_caller(config, getattr(runtime, "logger", None), purpose=purpose)
     if fallback is None:
         return "", "vision_unavailable"
     outputs: list[str] = []
     for ref in refs:
         try:
+            assert_current_generation()
             output = await fallback.describe(prompt, ref)
+            assert_current_generation()
         except Exception as exc:
             _log_warning(runtime, f"[vision] fallback image route failed: {sanitize_text(exc)}")
             continue

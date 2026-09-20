@@ -204,6 +204,22 @@ def register_reply_matchers(
             timing_resolver=lambda: resolve_reply_buffer_timing(plugin_config),
         )
 
+    def _supplement_settings_snapshot() -> dict[str, Any]:
+        """Capture exactly once at ingress; replacements retain this snapshot."""
+        return {
+            "enabled": bool(getattr(plugin_config, "personification_supplement_enabled", True)),
+            "window_seconds": float(getattr(plugin_config, "personification_supplement_window_seconds", 30) or 30),
+            "group_batch_seconds": float(getattr(plugin_config, "personification_supplement_relation_batch_seconds", .5)),
+            "relation_timeout_seconds": float(getattr(plugin_config, "personification_supplement_relation_timeout_seconds", 2) or 2),
+            "quiet_seconds": float(getattr(plugin_config, "personification_supplement_quiet_seconds", 1)),
+            "max_quiet_seconds": float(getattr(plugin_config, "personification_supplement_max_wait_seconds", 3)),
+        }
+
+    def _route_config_snapshot() -> Any:
+        from ..core.generation_fence import capture_config_snapshot
+        return capture_config_snapshot(plugin_config)
+
+
     @direct_reply_matcher.handle()
     @random_reply_matcher.handle()
     @poke_notice_matcher.handle()
@@ -230,6 +246,8 @@ def register_reply_matchers(
             finished_exception_cls=finished_exception_cls,
             user_policy_gate=user_policy_gate,
             timing_resolver=lambda: resolve_reply_buffer_timing(plugin_config),
+            supplement_settings=_supplement_settings_snapshot(),
+            route_config_snapshot=_route_config_snapshot(),
         )
 
     return {

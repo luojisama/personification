@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -128,6 +129,114 @@ def test_analyze_images_tries_primary_routes_before_fallback(monkeypatch) -> Non
     assert result == "primary vision result"
     assert route == "route_direct"
     assert calls == ["text-only", "vision-ok"]
+
+
+def test_direct_image_usage_survives_supersession_and_restores_context(monkeypatch) -> None:
+    import pytest
+    fence = load_personification_module("plugin.personification.core.generation_fence")
+    ledger = load_personification_module("plugin.personification.core.token_ledger")
+    context = load_personification_module("plugin.personification.core.llm_context")
+    budget = load_personification_module("plugin.personification.core.context_budget")
+    recorded = []
+    current = {}
+    response = SimpleNamespace(content="stale result", usage={"input_tokens": 12})
+
+    class Caller:
+        async def chat_with_tools(self, **kwargs):
+            assert kwargs["use_builtin_search"] is False
+            assert context.current_llm_context()["usage_route_id"] == "visual-route"
+            assert fence.invalidate_generation(current)
+            return response
+
+    def forbidden_budget(*args, **kwargs):
+        raise AssertionError("disabled route budget must be respected")
+
+    monkeypatch.setattr(budget, "fit_request_to_budget", forbidden_budget)
+    monkeypatch.setattr(media_understanding, "build_tool_caller", lambda config: Caller())
+    monkeypatch.setattr(ledger, "record_response_usage", lambda result, **kw: recorded.append((result, kw)))
+    runtime = SimpleNamespace(plugin_config=SimpleNamespace(), get_configured_api_providers=lambda: [
+        {"provider_id": "visual-route", "api_type": "openai", "model": "vision-model", "context_budget_enabled": False}
+    ])
+
+    async def run():
+        token = fence.bind_generation(current)
+        before = dict(context.current_llm_context())
+        try:
+            with pytest.raises(fence.SupersededGeneration):
+                await media_understanding._try_primary_image_routes(
+                    runtime=runtime, prompt="describe", refs=[], route_name="agent", image_detail="auto")
+            assert context.current_llm_context() == before
+        finally:
+            fence.reset_generation(token)
+
+    asyncio.run(run())
+    assert len(recorded) == 1
+    assert recorded[0][0] is response
+    assert recorded[0][1]["route_id"] == "visual-route"
+
+
+def test_explicit_visual_binding_never_uses_generic_fallback_when_bound_route_fails(monkeypatch) -> None:  # noqa: ANN001
+    class _UnavailableCaller:
+        async def chat_with_tools(self, *_args, **_kwargs):  # noqa: ANN001
+            return SimpleNamespace(content="", vision_unavailable=True)
+
+    class _ForbiddenFallback:
+        async def describe(self, *_args, **_kwargs):  # noqa: ANN001
+            raise AssertionError("an explicit visual binding must not cross-fallback")
+
+    monkeypatch.setattr(media_understanding, "build_tool_caller", lambda _config: _UnavailableCaller())
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(
+            personification_thinking_mode="none",
+            personification_model_purpose_bindings={
+                "vision": {"provider_id": "bound", "model_id": "vision-only"},
+            },
+            personification_api_pools=[{
+                "provider_id": "bound", "name": "bound", "api_type": "openai",
+                "api_url": "https://bound.example/v1", "api_key": "key",
+                "models": [{"model_id": "vision-only"}], "default_model_id": "vision-only",
+            }],
+            personification_context_budget_enabled=True,
+            personification_context_input_ratio=0.5,
+            personification_context_safety_margin_ratio=0.05,
+        ),
+        logger=SimpleNamespace(warning=lambda *_args, **_kwargs: None),
+        vision_caller=_ForbiddenFallback(),
+    )
+
+    result, route = asyncio.run(media_understanding.analyze_images_with_route_or_fallback(
+        runtime=runtime,
+        prompt="describe",
+        image_refs=["data:image/png;base64,AA=="],
+    ))
+
+    assert (result, route) == ("", "vision_binding_unavailable")
+
+
+def test_visual_binding_accepts_persisted_json_string(monkeypatch) -> None:  # noqa: ANN001
+    class _BoundCaller:
+        async def chat_with_tools(self, *_args, **_kwargs):  # noqa: ANN001
+            return SimpleNamespace(content="bound visual result", vision_unavailable=False)
+
+    monkeypatch.setattr(media_understanding, "build_tool_caller", lambda _config: _BoundCaller())
+    runtime = SimpleNamespace(
+        plugin_config=SimpleNamespace(
+            personification_thinking_mode="none",
+            personification_model_purpose_bindings=json.dumps({"vision": {"provider_id": "bound", "model_id": "vision-only"}}),
+            personification_api_pools=[{
+                "provider_id": "bound", "name": "bound", "api_type": "openai",
+                "api_url": "https://bound.example/v1", "api_key": "key",
+                "models": [{"model_id": "vision-only"}], "default_model_id": "vision-only",
+            }],
+            personification_context_budget_enabled=True,
+            personification_context_input_ratio=0.5,
+            personification_context_safety_margin_ratio=0.05,
+        ),
+        logger=SimpleNamespace(warning=lambda *_args, **_kwargs: None),
+    )
+    assert asyncio.run(media_understanding.analyze_images_with_route_or_fallback(
+        runtime=runtime, prompt="describe", image_refs=["data:image/png;base64,AA=="],
+    )) == ("bound visual result", "route_direct")
 
 
 def test_joint_only_analysis_sends_both_images_in_one_primary_request(monkeypatch) -> None:  # noqa: ANN001

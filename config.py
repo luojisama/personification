@@ -687,6 +687,12 @@ class Config(BaseModel):
     personification_humanize_typing_max_delay: float = 5.0
     # ──────────── 回复缓冲（动态等待合同）────────────
     personification_batch_base_wait_seconds: float = 30.0
+    personification_supplement_enabled: bool = True
+    personification_supplement_window_seconds: float = 30.0
+    personification_supplement_relation_batch_seconds: float = 0.5
+    personification_supplement_relation_timeout_seconds: float = 2.0
+    personification_supplement_quiet_seconds: float = 1.0
+    personification_supplement_max_wait_seconds: float = 3.0
     personification_batch_min_wait_seconds: float = 10.0
     personification_batch_max_wait_seconds: float = 60.0
     # 旧版兼容字段只在配置中显式提供时生效；None 表示不继承旧 3/15 秒默认值。

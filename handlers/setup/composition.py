@@ -235,6 +235,25 @@ class MatcherSetupDeps:
 
 def setup_all_matchers(*, deps: MatcherSetupDeps) -> Dict[str, Any]:
     async def _process_response_logic(bot: Any, event: Any, state: Dict[str, Any]) -> None:
+        # The buffer calls this before the first model request.  A later group
+        # message can therefore ask the same lightweight API route whether it
+        # supplements this exact generation, without exposing long-term
+        # memory or constructing a second reply pipeline.
+        try:
+            from ...core.supplement_relation import build_relation_judge
+            runtime = deps.reply_processor_deps.runtime
+            caller = (
+                getattr(runtime, "lite_call_ai_api", None)
+                or getattr(runtime, "review_call_ai_api", None)
+                or getattr(runtime, "call_ai_api", None)
+            )
+            if callable(caller):
+                state.setdefault("supplement_relation_judge", build_relation_judge(
+                    caller, config_snapshot=state.get("_route_config_snapshot")))
+        except Exception:
+            # Absence of the optional lightweight route is intentionally
+            # conservative: group arrivals remain in the next FIFO turn.
+            pass
         await deps.process_response_logic_core(bot, event, state, deps.reply_processor_deps)
 
     deps.clear_private_command_keywords()

@@ -56,11 +56,23 @@ async def _invoke_tool_handler(
     tool: Any,
     tool_args: dict[str, Any],
 ) -> str:
+    from ...core.generation_fence import assert_current_generation, mark_external_action_started
+    from .tool_catalog import _default_tool_metadata
+    assert_current_generation()
+    metadata = {**_default_tool_metadata(tool_name), **(getattr(tool, "metadata", {}) or {})}
+    if (metadata.get("side_effect", "none") != "none"
+            or metadata.get("risk_level") in {"admin", "high"}
+            or metadata.get("evidence_kind", "generic") == "generic"):
+        mark_external_action_started()
     if tool.local:
-        return await tool.handler(**tool_args)
+        result = await tool.handler(**tool_args)
+        assert_current_generation()
+        return result
     from ...mcp.bridge import McpBridge
 
-    return await McpBridge().call_remote(tool_name, tool_args)
+    result = await McpBridge().call_remote(tool_name, tool_args)
+    assert_current_generation()
+    return result
 
 
 def _remaining_time_budget_seconds(deadline: float | None) -> float | None:

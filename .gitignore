@@ -36,6 +36,7 @@ data/
 skill_cache/
 
 # Coding-agent local workspaces and caches
+/_reference/
 .agents/
 .claude/
 .codex/

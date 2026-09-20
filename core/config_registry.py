@@ -960,6 +960,21 @@ def _build_entries() -> list[ConfigEntry]:
                     display_name="用途模型绑定", value_type="dict", default={},
                     scope=GLOBAL_SCOPE, category="config", group="模型路由", description="以供应商 ID 和模型 ID 绑定用途；空项继承已有默认路由。",
                     parser=_json_object_parser),
+        ConfigEntry(key="supplement_enabled", field_name="personification_supplement_enabled",
+                    display_name="补充消息打断重生成", value_type="bool", default=True,
+                    scope=GLOBAL_SCOPE, category="config", group="消息缓冲", description="窗口内的相关补充替换尚未发送且未执行外部动作的回复。",
+                    parser=_bool_parser),
+        *[ConfigEntry(key="supplement_" + key, field_name="personification_supplement_" + key,
+                      display_name=label, value_type="float", default=default,
+                      scope=GLOBAL_SCOPE, category="config", group="消息缓冲", description=description,
+                      advanced=key != "window_seconds", parser=_float_parser)
+          for key, label, default, description in (
+              ("window_seconds", "补充合并窗口秒数", 30.0, "从第一次触发固定计时，不会要求每轮等满窗口。"),
+              ("relation_batch_seconds", "群聊关联判断合批秒数", 0.5, "快速到达的群聊消息合批调用模型。"),
+              ("relation_timeout_seconds", "补充关联判断超时秒数", 2.0, "判断失败保留消息并按下一轮处理。"),
+              ("quiet_seconds", "补充后安静等待秒数", 1.0, "已确认补充后稍等再生成。"),
+              ("max_wait_seconds", "补充后最大等待秒数", 3.0, "持续补充时合批等待上限。"),
+          )],
         ConfigEntry(
             key="model_overrides",
             field_name="personification_model_overrides",

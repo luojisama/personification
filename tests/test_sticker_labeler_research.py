@@ -126,6 +126,25 @@ def test_research_enabled_searches_and_refines_label(monkeypatch) -> None:  # no
     assert result.vision_route == "vision_refined+web_research"
 
 
+def test_sticker_refine_and_second_judge_keep_labeler_purpose(monkeypatch) -> None:  # noqa: ANN001
+    purposes: list[str] = []
+
+    async def _fake_vision(**kwargs):  # noqa: ANN001
+        purposes.append(str(kwargs.get("purpose") or ""))
+        return _vision_json(), "vision"
+
+    monkeypatch.setattr(sticker_library, "analyze_images_with_route_or_fallback", _fake_vision)
+    runtime = _runtime(config_overrides={"personification_sticker_labeler_research_enabled": False})
+    asyncio.run(sticker_library.analyze_sticker_image(runtime=runtime, image_refs=["data:image/png;base64,aaa"]))
+    asyncio.run(sticker_library.judge_sticker_against_library(
+        runtime=SimpleNamespace(vision_caller=None),
+        sticker_data_url="data:image/png;base64,aaa",
+        sticker_summary="摘要", sticker_description="描述", sticker_mood_tags=[], sticker_scene_tags=[],
+        similar_candidates=[], persona_contract="保持克制",
+    ))
+    assert purposes == ["labeler", "labeler"]
+
+
 def test_research_search_failure_falls_back_to_initial_label(monkeypatch) -> None:  # noqa: ANN001
     vision_calls = 0
 

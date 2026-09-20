@@ -814,6 +814,7 @@ async def _refine_sticker_with_research(
             prompt=prompt,
             image_refs=image_refs,
             fallback_vision_caller=fallback_vision_caller,
+            purpose="labeler",
         )
     except Exception:
         return initial
@@ -831,6 +832,7 @@ async def analyze_sticker_image(
 ) -> StickerVisionResult:
     meme_policy = str(getattr(runtime.plugin_config, "personification_sticker_collect_meme_policy", "reject") or "reject").strip().lower()
     raw, route = await analyze_images_with_route_or_fallback(
+        purpose="labeler",
         runtime=runtime,
         prompt=prompt,
         image_refs=image_refs,
@@ -933,6 +935,7 @@ async def judge_sticker_against_library(
             image_refs=[sticker_data_url],
             route_name=VISUAL_ROUTE_REPLY_PLAIN,
             fallback_vision_caller=runtime.vision_caller,
+            purpose="labeler",
         )
     except Exception:
         return {"decision": "skip_unknown", "redundant_with": [], "tag_correction": {}, "reason": "二次判断失败"}

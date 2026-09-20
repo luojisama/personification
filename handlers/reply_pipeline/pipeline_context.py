@@ -717,6 +717,9 @@ def should_suppress_group_topic_loop(
 
 
 def batch_has_newer_messages(state: Dict[str, Any]) -> bool:
+    from ...core.generation_fence import generation_is_current
+    if not generation_is_current(state) or not generation_is_current():
+        return True
     runtime_ref = state.get("batch_runtime_ref")
     if not isinstance(runtime_ref, dict):
         return False
@@ -1127,6 +1130,9 @@ async def run_agent_if_enabled(
 
 
 def stale_reply_abort_reason(state: Dict[str, Any]) -> str:
+    from ...core.generation_fence import generation_is_current
+    if not generation_is_current(state) or not generation_is_current():
+        return "本轮生成已取消或被补充消息替换，旧结果丢弃。"
     runtime_ref = state.get("batch_runtime_ref")
     if not isinstance(runtime_ref, dict):
         return ""

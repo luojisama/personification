@@ -863,6 +863,7 @@ async def run_agent(
     )
     _record_reply_trace_stage(
         key="agent_prompt_segments",
+        label="上下文分段",
         status="info",
         detail=(f"segments={prompt_segments.segment_count} stable={prompt_segments.stable_count} "
                 f"dynamic={prompt_segments.dynamic_count} "

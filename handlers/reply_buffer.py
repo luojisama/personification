@@ -29,6 +29,7 @@ from ..core.turn_media import (
     resolve_onebot_quoted_media_refs,
     serialize_turn_media,
 )
+from ..core.supplement_controller import SupplementController, SupplementSettings
 from .reply_commit import reply_lifecycle_snapshot
 
 
@@ -45,6 +46,89 @@ _RECENT_MEDIA_MAX_ENTRIES = 256
 _recent_media_by_sender: OrderedDict[str, tuple[float, list[dict[str, Any]]]] = OrderedDict()
 _SESSION_GENERATION_MAX_ENTRIES = 2048
 _session_generation_ids: OrderedDict[str, int] = OrderedDict()
+_detached_generation_tasks: set[asyncio.Task[Any]] = set()
+
+
+def _supplement_settings_from_state(state: dict[str, Any]) -> SupplementSettings:
+    """Read a per-turn snapshot only; never consult live config mid-chain."""
+    values = state.get("_supplement_settings")
+    if not isinstance(values, dict) or not values:
+        # Direct test/third-party callers that have not opted into the
+        # configured feature retain the historical buffer behaviour.  The
+        # matcher always supplies an explicit snapshot in production.
+        return SupplementSettings(enabled=False).normalized()
+    try:
+        return SupplementSettings(
+            enabled=bool(values.get("enabled", False)),
+            window_seconds=float(values.get("window_seconds", 30.0)),
+            quiet_seconds=float(values.get("quiet_seconds", 1.0)),
+            max_quiet_seconds=float(values.get("max_quiet_seconds", 3.0)),
+            group_batch_seconds=float(values.get("group_batch_seconds", 0.5)),
+            relation_timeout_seconds=float(values.get("relation_timeout_seconds", 2.0)),
+        ).normalized()
+    except (TypeError, ValueError, OverflowError):
+        return SupplementSettings().normalized()
+
+
+def _supplement_safe_to_supersede(state: dict[str, Any]) -> bool:
+    """Keep the conservative pre-send boundary even if fencing is unavailable."""
+    try:
+        from ..core.generation_fence import safe_to_supersede
+        return bool(safe_to_supersede(state))
+    except Exception:
+        return not any(bool(state.get(key, False)) for key in (
+            "reply_delivery_started", "reply_delivery_confirmed", "reply_delivery_complete",
+            "delivery_unknown", "_external_action_started",
+        ))
+
+
+def _consume_detached_generation(task: asyncio.Task[Any]) -> None:
+    """Consume a late, fenced provider task; it must never become an unhandled error."""
+    try:
+        task.result()
+    except (asyncio.CancelledError, Exception):
+        pass
+    finally:
+        _detached_generation_tasks.discard(task)
+
+
+async def _run_generation_call(
+    process_response_logic: Callable[[Any, Any, Dict[str, Any]], Any],
+    bot: Any,
+    event: Any,
+    state: dict[str, Any],
+    *,
+    timeout: float,
+) -> None:
+    """Run generation in a fenced child so cancellation releases admission now.
+
+    ``shield`` intentionally prevents outer cancellation from waiting for a
+    provider that ignores cancellation.  The inherited generation context and
+    send/tool fences make such a late child unable to produce side effects.
+    """
+    from ..core.generation_fence import bind_generation, reset_generation
+    token = bind_generation(state)
+    task = asyncio.create_task(process_response_logic(bot, event, state))
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=max(0.001, timeout))
+    except asyncio.CancelledError:
+        # Generic shutdown/preemption must not leave a cancellation-ignoring
+        # provider task eligible to send after its owner released admission.
+        state["_generation_invalidated"] = True
+        state.setdefault("generation_cancel_reason", "task_cancelled")
+        task.cancel()
+        _detached_generation_tasks.add(task)
+        task.add_done_callback(_consume_detached_generation)
+        raise
+    except asyncio.TimeoutError:
+        state["_generation_invalidated"] = True
+        state.setdefault("generation_cancel_reason", "generation_timeout")
+        task.cancel()
+        _detached_generation_tasks.add(task)
+        task.add_done_callback(_consume_detached_generation)
+        raise
+    finally:
+        reset_generation(token)
 
 
 def _next_turn_generation(session_key: str) -> int:
@@ -804,18 +888,24 @@ def _serialize_batched_event(
     sender_role = str(
         getattr(sender, "role", "") if sender is not None else ""
     ).strip()
+    message_id = str(getattr(event, "message_id", "") or "").strip()
+    event_time = str(getattr(event, "time", None) or getattr(event, "timestamp", None) or "").strip()
+    reply_to_message_id = str(reply_message_id or "").strip()
     return {
-        "message_id": str(getattr(event, "message_id", "") or "").strip(),
+        "message_id": message_id,
         "user_id": str(getattr(event, "user_id", "") or "").strip(),
         "group_id": str(getattr(event, "group_id", "") or "").strip(),
-        "event_time": str(getattr(event, "time", None) or getattr(event, "timestamp", None) or "").strip(),
+        "event_time": event_time,
+        "timestamp": event_time,
         "sender_name": _extract_sender_name(event),
         # The shared envelope performs the explicit 2,000-char boundary and
         # records truncation diagnostics.  Do not silently narrow it here.
         "text": _extract_plain_text(event),
-        "reply_to_msg_id": str(reply_message_id or "").strip(),
+        "reply_to_msg_id": reply_to_message_id,
+        "reply_to_message_id": reply_to_message_id,
         "reply_to_user_id": extract_reply_sender_id(reply),
         "mentioned_ids": mentioned_ids,
+        "mentioned_user_ids": mentioned_ids,
         "is_direct_mention": bool(item.get("is_direct_mention") or is_at_bot),
         "is_reply_to_bot": bool(item.get("is_reply_to_bot")),
         "has_reply_semantics": _has_reply_semantics(event),
@@ -1154,6 +1244,16 @@ def _schedule_timer(
 
 
 def _promote_pending_batch(entry: dict[str, Any]) -> None:
+    # An ordinary following turn is not a replacement chain.  Drop the old
+    # fixed window/snapshot so its first newly queued message owns fresh
+    # settings.  Replacement hand-offs assign ``items`` directly instead.
+    if not entry.get("supplement_related_items"):
+        for field in (
+            "supplement", "supplement_controller", "supplement_chain_settings",
+            "supplement_chain_route_snapshot", "supplement_replacement_generation",
+        ):
+            entry.pop(field, None)
+        entry.pop("replacement_generation_started", None)
     entry["items"] = list(entry.get("pending_items", []))
     entry["pending_items"] = []
     entry["batch_started_at"] = float(entry.get("pending_started_at", 0.0) or time.monotonic())
@@ -1189,9 +1289,179 @@ def _should_preempt_current_batch(entry: dict[str, Any], *, immediate_flush: boo
     if not immediate_flush or not bool(entry.get("processing")):
         return False
     state = entry.get("active_state") if isinstance(entry.get("active_state"), dict) else {}
-    if any(bool(state.get(key, False)) for key in ("reply_delivery_started", "reply_delivery_confirmed", "reply_delivery_complete", "delivery_unknown")):
+    if any(bool(state.get(key, False)) for key in (
+        "reply_delivery_started", "reply_delivery_confirmed", "reply_delivery_complete",
+        "delivery_unknown", "_external_action_started",
+    )):
         return False
     return bool(entry.get("current_is_random_chat"))
+
+
+def _invalidate_random_preemption(entry: dict[str, Any]) -> None:
+    """Mark a legacy random-turn cancellation stale before releasing its task."""
+    state = entry.get("active_state") if isinstance(entry.get("active_state"), dict) else {}
+    if not _supplement_safe_to_supersede(state):
+        return
+    try:
+        from ..core.generation_fence import invalidate_generation
+        invalidate_generation(state, reason="random_preempt")
+    except Exception:
+        state["_generation_invalidated"] = True
+
+
+def _queue_group_supplement(entry: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """Batch group judgement for 500ms; unrelated candidates remain FIFO."""
+    active_state = entry.get("active_state") if isinstance(entry.get("active_state"), dict) else {}
+    controller = entry.get("supplement_controller")
+    if not isinstance(controller, SupplementController) or not controller.settings.enabled:
+        return False
+    generation = int(entry.get("current_generation", 0) or 0)
+    if (
+        controller.can_replace(entry, generation=generation, safe_to_supersede=_supplement_safe_to_supersede(active_state)).status != "related"
+        and not controller.replacement_pending(entry, generation=generation)
+    ):
+        return False
+
+    # A host judge may be installed by the semantic pipeline.  Without it the
+    # conservative result is "next turn", never a same-group cancellation.
+    if not callable(active_state.get("supplement_relation_judge")):
+        return False
+    event = candidate.get("event")
+    candidate["message_id"] = str(getattr(event, "message_id", "") or "").strip()
+    candidate["user_id"] = str(getattr(event, "user_id", "") or "").strip()
+    candidate["event_time"] = str(getattr(event, "time", None) or getattr(event, "timestamp", None) or "").strip()
+    candidate["timestamp"] = candidate["event_time"]
+    candidate["text"] = _extract_plain_text(event)
+    candidate["reply_to_msg_id"] = str(extract_reply_message_id(event) or "").strip()
+    candidate["reply_to_message_id"] = candidate["reply_to_msg_id"]
+    pending = entry.setdefault("supplement_relation_candidates", [])
+    pending.append(candidate)
+    task = entry.get("supplement_relation_task")
+    if task is not None and not task.done():
+        return True
+
+    async def _drain() -> None:
+        try:
+            await asyncio.sleep(controller.settings.group_batch_seconds)
+            candidates = list(entry.pop("supplement_relation_candidates", []) or [])
+            # The controller supports batches; run one judge request rather
+            # than one per rapidly arriving group message.
+            active = entry.get("active_state") if isinstance(entry.get("active_state"), dict) else {}
+            originals = list(active.get("batched_events") or [])
+            decision = await controller.judge_group(
+                entry, generation=generation, originals=originals, candidates=candidates,
+                safe_to_supersede=_supplement_safe_to_supersede(active),
+                judge=active.get("supplement_relation_judge") if callable(active.get("supplement_relation_judge")) else None,
+            )
+            # Aggregate-only observability: do not put chat text or message
+            # identifiers into the trace, but make a failed/uncertain model
+            # decision distinguishable from "no group recall".
+            _note_buffer_diagnostic(
+                entry,
+                f"supplement_relation_{decision.status}",
+                count=len(candidates),
+            )
+            if decision.status != "related":
+                return
+            accepted = set(decision.accepted_ids)
+            accepted_items = [item for item in candidates if str(item.get("message_id") or item.get("dedupe_key") or "") in accepted]
+            if not accepted_items:
+                return
+            lock = active.get("reply_commit_lock")
+            # Use the exact send lock for the final safety check and fence
+            # write.  A response cannot cross into dispatch between these two
+            # operations.
+            if controller.replacement_pending(entry, generation=generation):
+                entry.setdefault("supplement_related_items", []).extend(accepted_items)
+            else:
+                if lock is None or not hasattr(lock, "__aenter__"):
+                    return
+                async with lock:
+                    if not _supplement_safe_to_supersede(active):
+                        return
+                    if int(entry.get("active_generation_token", 0) or 0) != generation:
+                        return
+                    try:
+                        from ..core.generation_fence import invalidate_generation
+                        if not invalidate_generation(active, reason="supplement"):
+                            return
+                    except Exception:
+                        return
+                    entry.setdefault("supplement_related_items", []).extend(accepted_items)
+            # Non-related and uncertain values are already in pending_items,
+            # which the replacement's finally hand-off leaves for its next
+            # ordinary turn.
+            entry["newer_batch_for_current"] = True
+            entry["supplement_replacement_generation"] = generation
+            # The old request is fenced but this replacement has not begun.
+            # Keeping this false admits later related burst messages until
+            # quiet/max-quiet finalization, without moving the fixed window.
+            entry["replacement_generation_started"] = False
+            entry["superseded_generation"] = max(int(entry.get("superseded_generation", 0) or 0), generation)
+            entry["active_generation_token"] = generation + 1
+            entry["supplement_restart_wait"] = max(0.0, min(float((entry.get("supplement") or {}).get("quiet_until", 0.0) or 0.0) - time.monotonic(), controller.settings.max_quiet_seconds))
+            _note_buffer_diagnostic(entry, "supplement_related", count=len(accepted_items))
+            active_task = entry.get("active_task")
+            if active_task is not None and not active_task.done():
+                active_task.cancel()
+        finally:
+            entry["supplement_relation_task"] = None
+            # Messages that arrived while the API judgement was in flight did
+            # not belong to the submitted batch.  They need their own bounded
+            # decision rather than being stranded until a later arrival.
+            remaining = list(entry.get("supplement_relation_candidates", []) or [])
+            if remaining and int(entry.get("current_generation", 0) or 0) == generation:
+                entry["supplement_relation_candidates"] = []
+                for pending_candidate in remaining:
+                    _queue_group_supplement(entry, pending_candidate)
+            # The cancelled owner may already have reached its finally block
+            # while this API call was in flight.  In that case _drain owns the
+            # one safe hand-off into the replacement timer.
+            if (
+                not bool(entry.get("processing"))
+                and int(entry.get("superseded_generation", 0) or 0) >= generation
+                and entry.get("supplement_related_items")
+            ):
+                related = list(entry.pop("supplement_related_items") or [])
+                # The cancelled owner may already have handed its original
+                # batch to a quiet timer.  Retain that immutable local
+                # provenance until the replacement actually starts so a
+                # third group supplement cannot rebuild from only itself.
+                original_items = list(entry.get("supplement_replay_original_items") or entry.get("active_items") or [])
+                replay = [*original_items, *related]
+                seen: set[str] = set()
+                entry["items"] = [
+                    item for item in replay if isinstance(item, dict)
+                    and not (str(item.get("dedupe_key") or "") in seen or seen.add(str(item.get("dedupe_key") or "")))
+                ]
+                related_keys = {str(item.get("dedupe_key") or "") for item in related}
+                entry["pending_items"] = [
+                    item for item in list(entry.get("pending_items") or [])
+                    if str(item.get("dedupe_key") or "") not in related_keys
+                ]
+                entry["queued_items"] = list(entry.get("pending_items") or [])
+                entry["active_items"] = []
+                _schedule_timer(
+                    entry=entry, key=str(active.get("batch_session_key") or ""),
+                    bot=entry.get("supplement_bot"),
+                    wait_seconds=max(0.0, float(entry.pop("supplement_restart_wait", 0.0) or 0.0)),
+                    start_buffer_timer=entry.get("supplement_start_timer"),
+                )
+            elif (
+                not bool(entry.get("processing"))
+                and int(entry.get("superseded_generation", 0) or 0) >= generation
+                and entry.get("pending_items")
+                and entry.get("supplement_relation_task") is None
+            ):
+                _promote_pending_batch(entry)
+                _schedule_timer(
+                    entry=entry, key=str(active.get("batch_session_key") or ""),
+                    bot=entry.get("supplement_bot"), wait_seconds=0.0,
+                    start_buffer_timer=entry.get("supplement_start_timer"),
+                )
+
+    entry["supplement_relation_task"] = asyncio.create_task(_drain())
+    return True
 
 
 async def run_buffer_timer(
@@ -1224,6 +1494,40 @@ async def run_buffer_timer(
     entry = msg_buffer.get(key)
     if not isinstance(entry, dict):
         return
+    entry["supplement_bot"] = bot
+    entry["supplement_start_timer"] = lambda timer_key, timer_bot, timer_delay: asyncio.create_task(
+        run_buffer_timer(
+            timer_key, timer_bot, msg_buffer=msg_buffer,
+            process_response_logic=process_response_logic,
+            message_event_cls=message_event_cls, message_cls=message_cls,
+            message_segment_cls=message_segment_cls, logger=logger,
+            finished_exception_cls=finished_exception_cls, delay=timer_delay,
+            response_timeout_seconds=response_timeout_seconds,
+            batch_base_wait_seconds=batch_base_wait_seconds,
+            batch_min_wait_seconds=batch_min_wait_seconds,
+            batch_max_wait_seconds=batch_max_wait_seconds,
+            legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,
+            concurrency_controller=concurrency_controller, user_policy_gate=user_policy_gate,
+        )
+    )
+
+    # Do not trust the delay captured by an earlier timer: a second/third
+    # accepted supplement may have extended quiet time while it slept.
+    controller = entry.get("supplement_controller")
+    pending_generation = int(entry.get("supplement_replacement_generation", 0) or 0)
+    if (
+        isinstance(controller, SupplementController)
+        and controller.replacement_pending(entry, generation=pending_generation)
+    ):
+        quiet_until = float((entry.get("supplement") or {}).get("quiet_until", 0.0) or 0.0)
+        remaining_quiet = quiet_until - time.monotonic()
+        if remaining_quiet > 0:
+            _schedule_timer(
+                entry=entry, key=key, bot=bot,
+                wait_seconds=min(remaining_quiet, controller.settings.max_quiet_seconds),
+                start_buffer_timer=entry["supplement_start_timer"],
+            )
+            return
 
     if entry.get("processing"):
         if entry.get("pending_items"):
@@ -1318,7 +1622,14 @@ async def run_buffer_timer(
     entry["next_fire_at"] = 0.0
     entry["current_generation"] = int(entry.get("current_generation", 0) or 0) + 1
     current_generation = int(entry["current_generation"])
+    if int(entry.get("supplement_replacement_generation", -1) or -1) < current_generation:
+        # Late relation API results belong to the now-stale predecessor and
+        # cannot join a replacement that has begun generating or dispatching.
+        entry["replacement_generation_started"] = True
     entry["active_generation_token"] = current_generation
+    # A replacement has consumed its frozen original batch.  Later arrivals
+    # are a normal next turn, not another addition to this old burst.
+    entry.pop("supplement_replay_original_items", None)
     entry["newer_batch_for_current"] = False
     entry["interrupt_requested_generation"] = 0
     entry["items"] = []
@@ -1332,6 +1643,12 @@ async def run_buffer_timer(
         return
 
     state = dict(trigger_item.get("state") or {})
+    # A later @ can become the semantic trigger, but not the configuration
+    # owner: a supplement chain always uses its first ingress snapshot.
+    if "supplement_chain_settings" in entry:
+        state["_supplement_settings"] = dict(entry.get("supplement_chain_settings") or {})
+    if entry.get("supplement_chain_route_snapshot") is not None:
+        state["_route_config_snapshot"] = entry["supplement_chain_route_snapshot"]
     entry["active_state"] = state
     events = [item.get("event") for item in items if isinstance(item.get("event"), message_event_cls)]
     state["buffer_trace_diagnostics"] = _take_buffer_diagnostics(entry, generation=current_generation, wait_ms=int((time.monotonic() - started_at) * 1000), dequeue_count=len(events), queued_count=len(overflow_items))
@@ -1375,6 +1692,29 @@ async def run_buffer_timer(
         "entry": entry,
         "generation": current_generation,
     }
+    # The first generation fixes the 30-second supplement deadline.  A
+    # replacement carries this object forward, so a burst cannot keep a model
+    # request alive indefinitely by resetting its own clock.
+    controller = entry.get("supplement_controller")
+    if not isinstance(controller, SupplementController):
+        controller = SupplementController(_supplement_settings_from_state(state))
+        entry["supplement_controller"] = controller
+    previous = entry.get("supplement") if isinstance(entry.get("supplement"), dict) else {}
+    if not previous or not previous.get("deadline"):
+        controller.begin(entry, generation=current_generation, originals=serialized_items, now=min(
+            (float(item.get("received_at", 0.0) or 0.0) for item in items if float(item.get("received_at", 0.0) or 0.0) > 0),
+            default=time.monotonic(),
+        ))
+    else:
+        # Replacement generation gets a fresh ownership token but retains the
+        # original fixed deadline and accepted-message provenance.
+        previous["generation"] = current_generation
+        entry["supplement"] = previous
+    state["supplement_window"] = {
+        "enabled": controller.settings.enabled,
+        "deadline_monotonic": float((entry.get("supplement") or {}).get("deadline", 0.0) or 0.0),
+        "accepted_message_count": len((entry.get("supplement") or {}).get("accepted_ids") or ()),
+    }
     interrupted_context = attach_interrupted_reply_context(state, entry)
     if interrupted_context is not None:
         _note_buffer_diagnostic(
@@ -1405,9 +1745,9 @@ async def run_buffer_timer(
 
     try:
         if concurrency_controller is None:
-            await asyncio.wait_for(
-                process_response_logic(bot, selected_event, state),
-                timeout=max(0.001, float(state["response_deadline"]) - time.monotonic()),
+            await _run_generation_call(
+                process_response_logic, bot, selected_event, state,
+                timeout=float(state["response_deadline"]) - time.monotonic(),
             )
         else:
             async with concurrency_controller.buffered_turn(
@@ -1415,9 +1755,9 @@ async def run_buffer_timer(
                 deadline=float(state["response_deadline"]),
             ) as commit_lock:
                 state["reply_commit_lock"] = commit_lock
-                await asyncio.wait_for(
-                    process_response_logic(bot, selected_event, state),
-                    timeout=max(0.001, float(state["response_deadline"]) - time.monotonic()),
+                await _run_generation_call(
+                    process_response_logic, bot, selected_event, state,
+                    timeout=float(state["response_deadline"]) - time.monotonic(),
                 )
     except ReplyAdmissionTimeout as exc:
         logger.warning(
@@ -1497,17 +1837,46 @@ async def run_buffer_timer(
         if int(entry.get("active_generation_token", 0) or 0) != current_generation:
             if (
                 int(entry.get("superseded_generation", 0) or 0) >= current_generation
-                and entry.get("pending_items")
             ):
-                # This is the one cancellation that has a proven no-send
-                # boundary.  The cancelled owner hands its FIFO snapshot to a
-                # fresh timer; ordinary shutdown cancellation never reaches
-                # this branch.
+                # Pre-send replacement has a proven no-send boundary.  Its
+                # next generation receives original provenance plus only the
+                # messages approved as related; unrelated/uncertain arrivals
+                # remain FIFO for the ordinary following turn.
                 entry["processing"] = False
                 entry["active_task"] = None
+                related = list(entry.pop("supplement_related_items", []) or [])
+                relation_task = entry.get("supplement_relation_task")
+                if not related and relation_task is not None and not relation_task.done():
+                    # Hold the original provenance until the bounded relation
+                    # request resolves; its drain callback performs the hand-
+                    # off.  Starting a new generation here would make that
+                    # late result race a fresh send.
+                    return
+                if related:
+                    original_items = list(entry.get("active_items") or [])
+                    entry["supplement_replay_original_items"] = list(original_items)
+                    replay = [*original_items, *related]
+                    seen: set[str] = set()
+                    entry["items"] = [
+                        item for item in replay
+                        if isinstance(item, dict)
+                        and not (str(item.get("dedupe_key") or "") in seen or seen.add(str(item.get("dedupe_key") or "")))
+                    ]
+                    related_keys = {str(item.get("dedupe_key") or "") for item in related}
+                    entry["pending_items"] = [
+                        item for item in list(entry.get("pending_items") or [])
+                        if str(item.get("dedupe_key") or "") not in related_keys
+                    ]
+                    entry["queued_items"] = list(entry.get("pending_items") or [])
+                    entry["active_items"] = []
+                    wait = max(0.0, float(entry.pop("supplement_restart_wait", 0.0) or 0.0))
+                    _note_buffer_diagnostic(entry, "supplement_restart", count=len(related))
+                    _schedule_timer(entry=entry, key=key, bot=bot, wait_seconds=wait, start_buffer_timer=start_buffer_timer)
+                    return
                 entry["active_items"] = []
-                _promote_pending_batch(entry)
-                _schedule_timer(entry=entry, key=key, bot=bot, wait_seconds=0.0, start_buffer_timer=start_buffer_timer)
+                if entry.get("pending_items"):
+                    _promote_pending_batch(entry)
+                    _schedule_timer(entry=entry, key=key, bot=bot, wait_seconds=0.0, start_buffer_timer=start_buffer_timer)
             return
         entry["processing"] = False
         entry["active_task"] = None
@@ -1630,7 +1999,18 @@ async def handle_reply_event(
     finished_exception_cls: Any = None,
     user_policy_gate: Any = None,
     timing_resolver: Callable[[], Any] | None = None,
+    supplement_settings: dict[str, Any] | None = None,
+    route_config_snapshot: Any = None,
 ) -> None:
+    if isinstance(supplement_settings, dict):
+        state = dict(state)
+        state["_supplement_settings"] = dict(supplement_settings)
+    if route_config_snapshot is not None and "_route_config_snapshot" not in state:
+        # The first trigger owns route/model limits for every replacement in
+        # its supplement chain.  Do not overwrite a snapshot carried by an
+        # active/replayed item.
+        state = dict(state)
+        state["_route_config_snapshot"] = route_config_snapshot
     policy_allowed = True
     if user_policy_gate is not None:
         try:
@@ -1681,12 +2061,9 @@ async def handle_reply_event(
                 deadline=float(direct_state["response_deadline"]),
             ) as commit_lock:
                 direct_state["reply_commit_lock"] = commit_lock
-                await asyncio.wait_for(
-                    process_response_logic(bot, event, direct_state),
-                    timeout=max(
-                        0.001,
-                        float(direct_state["response_deadline"]) - time.monotonic(),
-                    ),
+                await _run_generation_call(
+                    process_response_logic, bot, event, direct_state,
+                    timeout=float(direct_state["response_deadline"]) - time.monotonic(),
                 )
         except ReplyAdmissionTimeout as exc:
             logger.warning(f"拟人插件：会话 {session_key} poke turn 排队超时，已静默放弃。")
@@ -1810,11 +2187,26 @@ async def handle_reply_event(
                     "is_reply_to_bot": is_reply_to_bot,
                     "received_at": received_monotonic_at,
                     "dedupe_key": _stable_item_key(session_key, event, received_monotonic_at),
+                    "message_id": str(getattr(event, "message_id", "") or "").strip(),
                 }
                 if not any(item.get("dedupe_key") == queued["dedupe_key"] for item in entry.get("items", []) if isinstance(item, dict)):
                     entry["items"].append(queued)
                     _note_buffer_diagnostic(entry, "enqueue_direct", count=1)
                 entry["queued_items"] = list(entry["items"])
+                controller = entry.get("supplement_controller")
+                if isinstance(controller, SupplementController) and controller.replacement_pending(
+                    entry, generation=int(entry.get("supplement_replacement_generation", 0) or 0),
+                ):
+                    # The old reply already has been invalidated.  Keep
+                    # accepting same-private-session context while waiting for
+                    # quiet, and re-arm from this latest accepted message.
+                    controller._accept(entry, (str(queued.get("message_id") or queued.get("dedupe_key") or ""),), now=received_monotonic_at)
+                    wait = max(0.0, min(
+                        float((entry.get("supplement") or {}).get("quiet_until", 0.0) or 0.0) - time.monotonic(),
+                        controller.settings.max_quiet_seconds,
+                    ))
+                    _schedule_timer(entry=entry, key=session_key, bot=bot, wait_seconds=wait, start_buffer_timer=start_buffer_timer)
+                    return
                 entry["pending_ready"] = True
                 _schedule_timer(entry=entry, key=session_key, bot=bot, wait_seconds=0.0, start_buffer_timer=start_buffer_timer)
                 return
@@ -1827,6 +2219,50 @@ async def handle_reply_event(
                     "received_at": received_monotonic_at,
                     "dedupe_key": _stable_item_key(session_key, event, received_monotonic_at),
                 }
+                direct_item["message_id"] = str(getattr(event, "message_id", "") or "").strip()
+                # Private follow-ups from this same session are directly
+                # related.  They share the same hard pre-send fence as group
+                # replacements and do not make an additional model call.
+                controller = entry.get("supplement_controller")
+                active_state = entry.get("active_state") if isinstance(entry.get("active_state"), dict) else {}
+                if isinstance(controller, SupplementController):
+                    decision = controller.accept_private(
+                        entry,
+                        generation=int(entry.get("current_generation", 0) or 0),
+                        candidate=direct_item,
+                        safe_to_supersede=_supplement_safe_to_supersede(active_state),
+                    )
+                    if decision.status == "related":
+                        lock = active_state.get("reply_commit_lock")
+                        invalidated = False
+                        pending_replacement = controller.replacement_pending(
+                            entry, generation=int(entry.get("current_generation", 0) or 0),
+                        )
+                        if pending_replacement:
+                            invalidated = True
+                        elif lock is not None and hasattr(lock, "__aenter__"):
+                            async with lock:
+                                if _supplement_safe_to_supersede(active_state):
+                                    try:
+                                        from ..core.generation_fence import invalidate_generation
+                                        invalidated = bool(invalidate_generation(active_state, reason="supplement"))
+                                    except Exception:
+                                        invalidated = False
+                        if invalidated:
+                            entry.setdefault("supplement_related_items", []).append(direct_item)
+                            entry["supplement_replacement_generation"] = int(entry.get("current_generation", 0) or 0)
+                            # Later private messages in this fixed window are
+                            # part of the same burst even though the original
+                            # state is now deliberately invalidated.
+                            entry["replacement_generation_started"] = False
+                            entry["superseded_generation"] = max(int(entry.get("superseded_generation", 0) or 0), int(entry.get("current_generation", 0) or 0))
+                            entry["active_generation_token"] = int(entry.get("current_generation", 0) or 0) + 1
+                            entry["supplement_restart_wait"] = max(0.0, min(float((entry.get("supplement") or {}).get("quiet_until", 0.0) or 0.0) - time.monotonic(), controller.settings.max_quiet_seconds))
+                            _note_buffer_diagnostic(entry, "supplement_related", count=1)
+                            active_task = entry.get("active_task")
+                            if active_task is not None and not active_task.done():
+                                active_task.cancel()
+                            return
                 if _should_preempt_current_batch(entry, immediate_flush=True):
                     # Return the pre-send snapshot exactly once, followed by
                     # already queued arrivals and the explicit cue.
@@ -1841,6 +2277,7 @@ async def handle_reply_event(
                     _note_buffer_diagnostic(entry, "preempt_requeue", count=len(entry["pending_items"]))
                     entry["newer_batch_for_current"] = True
                     entry["superseded_generation"] = max(int(entry.get("superseded_generation", 0) or 0), int(entry.get("current_generation", 0) or 0))
+                    _invalidate_random_preemption(entry)
                     active_task = entry.get("active_task")
                     if active_task and not active_task.done():
                         active_task.cancel()
@@ -1868,6 +2305,29 @@ async def handle_reply_event(
         direct_state["batch_session_key"] = session_key
         direct_state["turn_generation_id"] = _next_turn_generation(session_key)
         direct_state["batched_events"] = []
+        direct_entry: dict[str, Any] | None = None
+        direct_controller = SupplementController(_supplement_settings_from_state(direct_state))
+        direct_item = {
+            "event": event, "state": dict(state), "is_direct_mention": is_direct_mention,
+            "is_reply_to_bot": is_reply_to_bot, "received_at": received_monotonic_at,
+            "dedupe_key": _stable_item_key(session_key, event, received_monotonic_at),
+            "message_id": str(getattr(event, "message_id", "") or "").strip(),
+        }
+        if direct_controller.settings.enabled:
+            direct_entry = _new_entry(delay)
+            direct_entry["processing"] = True
+            direct_entry["active_task"] = asyncio.current_task()
+            direct_entry["processing_started_at"] = received_monotonic_at
+            direct_entry["current_generation"] = 1
+            direct_entry["active_generation_token"] = 1
+            direct_entry["active_state"] = direct_state
+            direct_entry["supplement_chain_settings"] = dict(direct_state.get("_supplement_settings") or {})
+            direct_entry["supplement_chain_route_snapshot"] = direct_state.get("_route_config_snapshot")
+            direct_entry["active_items"] = [direct_item]
+            direct_entry["supplement_controller"] = direct_controller
+            direct_controller.begin(direct_entry, generation=1, originals=[direct_item])
+            direct_state["batch_runtime_ref"] = {"entry": direct_entry, "generation": 1}
+            msg_buffer[session_key] = direct_entry
         direct_media = await resolve_onebot_quoted_media_refs(event, bot)
         recent_media: list[TurnMediaRef] = []
         if not any(item.kind in {"video", "audio"} for item in direct_media) and event_plain_text:
@@ -1932,12 +2392,9 @@ async def handle_reply_event(
                 deadline=float(direct_state["response_deadline"]),
             ) as commit_lock:
                 direct_state["reply_commit_lock"] = commit_lock
-                await asyncio.wait_for(
-                    process_response_logic(bot, event, direct_state),
-                    timeout=max(
-                        0.001,
-                        float(direct_state["response_deadline"]) - time.monotonic(),
-                    ),
+                await _run_generation_call(
+                    process_response_logic, bot, event, direct_state,
+                    timeout=float(direct_state["response_deadline"]) - time.monotonic(),
                 )
         except ReplyAdmissionTimeout as exc:
             logger.warning(f"拟人插件：会话 {session_key} direct turn 排队超时，已静默放弃。")
@@ -1962,7 +2419,22 @@ async def handle_reply_event(
                 logger=logger,
             )
         except asyncio.CancelledError:
-            raise
+            if direct_entry is None or int(direct_entry.get("active_generation_token", 0) or 0) == 1:
+                # Cancellation outside an explicit supplement replacement is
+                # a lifecycle/shutdown signal.  Do not replay the active
+                # direct turn, but leave already-arrived FIFO follow-ups in a
+                # dormant queue so the next ingress can resume them instead
+                # of retaining an entry forever in ``processing`` state.
+                if direct_entry is not None:
+                    direct_entry["processing"] = False
+                    direct_entry["active_task"] = None
+                    direct_entry["active_items"] = []
+                    if direct_entry.get("pending_items"):
+                        _promote_pending_batch(direct_entry)
+                        direct_entry["queued_items"] = list(direct_entry["items"])
+                    elif msg_buffer.get(session_key) is direct_entry:
+                        _pop_buffer_entry(msg_buffer, session_key)
+                raise
         except Exception as exc:
             if finished_exception_cls and isinstance(exc, finished_exception_cls):
                 logger.debug("拟人插件：direct turn 提前结束（FinishedException）")
@@ -2001,8 +2473,42 @@ async def handle_reply_event(
         if is_private_session and bool(direct_state.get("reply_delivery_started", False)):
             _note_session_reply(session_key)
         await _reset_attention_after_confirmed(direct_state, session_key)
+        if direct_entry is not None and int(direct_entry.get("active_generation_token", 0) or 0) != 1:
+            related = list(direct_entry.pop("supplement_related_items", []) or [])
+            if related:
+                direct_entry["processing"] = False
+                direct_entry["active_task"] = None
+                direct_entry["active_items"] = []
+                direct_entry["items"] = [direct_item, *related]
+                direct_entry["batch_started_at"] = received_monotonic_at
+                _schedule_timer(
+                    entry=direct_entry, key=session_key, bot=bot,
+                    wait_seconds=max(0.0, float(direct_entry.pop("supplement_restart_wait", 0.0) or 0.0)),
+                    start_buffer_timer=start_buffer_timer,
+                )
+                return
+        # A direct turn which has crossed the delivery/action barrier cannot
+        # be replaced.  Arrivals queued by that turn still belong to the
+        # private FIFO lane and must be promoted after the owner completes;
+        # dropping the entry here silently loses the follow-up message.
+        if direct_entry is not None and direct_entry.get("pending_items"):
+            direct_entry["processing"] = False
+            direct_entry["active_task"] = None
+            direct_entry["active_items"] = []
+            direct_entry["queued_items"] = list(direct_entry.get("pending_items") or [])
+            _promote_pending_batch(direct_entry)
+            _schedule_timer(
+                entry=direct_entry, key=session_key, bot=bot,
+                wait_seconds=0.0, start_buffer_timer=start_buffer_timer,
+            )
+            return
+        if direct_entry is not None and msg_buffer.get(session_key) is direct_entry:
+            _pop_buffer_entry(msg_buffer, session_key)
         return
     entry = msg_buffer.setdefault(session_key, _new_entry(delay))
+    if "supplement_chain_settings" not in entry:
+        entry["supplement_chain_settings"] = dict(state.get("_supplement_settings") or {})
+        entry["supplement_chain_route_snapshot"] = state.get("_route_config_snapshot")
     _retain_buffer_entry(
         entry=entry,
         key=session_key,
@@ -2050,10 +2556,24 @@ async def handle_reply_event(
                 int(entry.get("superseded_generation", 0) or 0),
                 int(entry.get("current_generation", 0) or 0),
             )
+            _invalidate_random_preemption(entry)
             _note_buffer_diagnostic(entry, "preempt_requeue", count=len(entry["pending_items"]))
             active_task = entry.get("active_task")
             if active_task and not active_task.done():
                 active_task.cancel()
+            return
+        # A group supplement may replace a still pre-send generation only
+        # after the semantic pipeline supplies a bounded relation judge.  It
+        # remains in the normal FIFO pending lane regardless of the verdict,
+        # so timeout/uncertain never loses a user's message.
+        if isinstance(event, group_message_event_cls) and _queue_group_supplement(entry, item):
+            pending_items = list(entry.get("pending_items") or [])
+            pending_items.append(item)
+            entry["pending_items"] = _trim_items(pending_items)
+            entry["queued_items"] = list(entry["pending_items"])
+            if not float(entry.get("pending_started_at", 0.0) or 0.0):
+                entry["pending_started_at"] = now_ts
+            entry["last_item_at"] = now_ts
             return
         pending_items = list(entry.get("pending_items") or [])
         pending_items.append(item)
