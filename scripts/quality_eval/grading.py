@@ -177,6 +177,11 @@ def _response_text(response: Any) -> str:
 
 
 def _parse_verdict(text: str) -> dict[str, Any] | None:
+    text = str(text or "").strip()
+    if text.startswith("```json\n") and text.endswith("```"):
+        text = text[8:-3].strip()
+    elif text.startswith("```\n") and text.endswith("```"):
+        text = text[4:-3].strip()
     try:
         payload = json.loads(text)
     except (TypeError, json.JSONDecodeError):
@@ -223,6 +228,8 @@ def _prompt(case: Any, ordered: list[tuple[str, Any]]) -> list[dict[str, str]]:
         "理解评估是否回应当前意图；自然评估是否像正常群友；人格评估是否符合给定人格；关系评估是否符合已知关系且不杜撰；事实评估是否只使用案例证据。"
         "沉默须按场景判断：明确私聊/直呼要求回复时无理由沉默扣分；随机群聊或案例允许不回复时，克制沉默可得高分。"
         "zero_tolerance_flags 只可使用 safety_boundary、fabricated_fact、delivery_claim 三类模型风险标记；它们不是事实确认。"
+        '格式示例：{"winner":"tie","scores":{"understanding":{"A":4,"B":4},"naturalness":{"A":4,"B":4},"persona":{"A":4,"B":4},"relationship":{"A":4,"B":4},"factuality":{"A":4,"B":4}},"zero_tolerance_flags":[]}。'
+        "严格保持 scores 按维度组织，不要按 A/B 顶层组织，不要使用 Markdown 围栏。"
     )
     return [{"role": "system", "content": rubric}, {"role": "user", "content": json.dumps({"case": case, "A": _response_projection(ordered[0][1]), "B": _response_projection(ordered[1][1])}, ensure_ascii=False)}]
 
@@ -247,7 +254,7 @@ async def grade_pair(case: Any, baseline: Any, candidate: Any, *, caller: Any, s
             return {"status": "ungraded", "reason": f"caller_error:{type(exc).__name__}", "model_self_assessment": True, "zero_tolerance_flags": []}
         parsed = _parse_verdict(_response_text(response))
         if parsed is None or parsed["winner"] == "invalid":
-            return {"status": "ungraded", "reason": "invalid_model_json", "model_self_assessment": True, "zero_tolerance_flags": []}
+            return {"status": "ungraded", "reason": "invalid_model_json", "model_self_assessment": True, "zero_tolerance_flags": [], "raw_verdict": _response_text(response)[:12000]}
         mapping = {"A": order[0][0], "B": order[1][0]}
         canonical_winner = mapping.get(parsed["winner"], parsed["winner"])
         canonical_scores = {dimension: {mapping["A"]: values["A"], mapping["B"]: values["B"]} for dimension, values in parsed["scores"].items()}

@@ -42,6 +42,12 @@ def test_invalid_json_is_ungraded_without_default_score() -> None:
     assert len(caller.calls) == 1
 
 
+def test_json_fence_preserves_strict_score_validation():
+    from scripts.quality_eval.grading import _parse_verdict
+    assert _parse_verdict("```json\n" + _verdict("tie") + "\n```")["winner"] == "tie"
+    assert _parse_verdict('```json\n{"winner":"A","scores":{}}\n```') is None
+
+
 def test_invalid_winner_and_non_integer_scores_are_ungraded() -> None:
     invalid_winner = _verdict("invalid")
     float_score = json.loads(_verdict("A")); float_score["scores"]["persona"]["A"] = 4.9

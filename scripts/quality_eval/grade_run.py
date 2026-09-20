@@ -126,15 +126,20 @@ async def run(args):
     output = artifact / "grades.jsonl"
     done = {str(row.get("case_id", "")) for row in read_grade_rows(output)}
     (artifact / "pairing.json").write_text(json.dumps({key: value for key, value in pairs.items() if key != "pairs"}, ensure_ascii=False, indent=2), encoding="utf-8")
+    invalid_streak = 0
+    processed = 0
     try:
         for index, pair in enumerate(pairs["pairs"]):
             if pair["case_id"] in done:
                 continue
+            if args.max_pairs is not None and processed >= args.max_pairs:
+                break
             if budget.snapshot()["remaining"] < 2:
                 break
             before = budget.snapshot()["reserved_calls"]
             usage_offset = len(caller.usages)
             result = await grade_pair(pair["case"], pair["baseline"], pair["candidate"], caller=caller, seed=args.seed + index)
+            processed += 1
             row = {"case_id": pair["case_id"], "surface": pair["case"].get("surface"),
                 "category": pair["case"].get("category"), "split": pair["case"].get("split"),
                 "baseline_revision": pair["baseline"]["revision"], "candidate_revision": pair["candidate"]["revision"],
@@ -144,7 +149,8 @@ async def run(args):
                 stream.write(json.dumps(row, ensure_ascii=False) + "\n")
                 stream.flush()
             print(json.dumps({"case_id": pair["case_id"], "status": result["status"], "budget": budget.snapshot()}), flush=True)
-            if caller.failure_types or caller.exhausted:
+            invalid_streak = invalid_streak + 1 if result.get("reason") == "invalid_model_json" else 0
+            if caller.failure_types or caller.exhausted or invalid_streak >= 2:
                 break
     finally:
         await close_db()
@@ -160,4 +166,5 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=20260920)
     parser.add_argument("--corpus", default=str(_DEFAULT_CORPUS))
     parser.add_argument("--split", choices=["dev", "holdout"], default="dev")
+    parser.add_argument("--max-pairs", type=int, help="Limit new pairs for a bounded grading canary")
     asyncio.run(run(parser.parse_args()))
