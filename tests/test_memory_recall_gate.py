@@ -82,3 +82,32 @@ def test_gate_uses_strict_json_second_stage_and_fail_closes() -> None:
             minimum_score=0.2,
         )
     ) == []
+
+
+def test_gate_does_not_cross_private_memory_owners() -> None:
+    class _Caller:
+        async def chat_with_tools(self, **_kwargs):  # noqa: ANN003
+            return SimpleNamespace(
+                content='{"keep_memory_ids":["other-user-private"],"drop_memory_ids":[],"reason":"相关"}'
+            )
+
+    result = asyncio.run(
+        gate.gate_memory_candidates(
+            candidates=[
+                {
+                    "memory_id": "other-user-private",
+                    "summary": "另一位用户的私人偏好",
+                    "score": 0.99,
+                    "confidence": 0.99,
+                    "permission_type": "private_fact",
+                    "user_id": "other-user",
+                }
+            ],
+            query="私人偏好",
+            tool_caller=_Caller(),
+            minimum_score=0.2,
+            private_owner_id="current-user",
+        )
+    )
+
+    assert result == []

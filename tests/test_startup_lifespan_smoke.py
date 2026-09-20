@@ -314,6 +314,7 @@ print("lifespan-ok", len(events))
         if key.lower().startswith("personification_"):
             environment.pop(key)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["PYTHONIOENCODING"] = "utf-8"
     environment["PYTHONPYCACHEPREFIX"] = str(tmp_path / "pycache")
     environment["PERSONIFICATION_LIFESPAN_SOURCE_ROOT"] = str(source_root)
     environment["PERSONIFICATION_LIFESPAN_DATA_DIR"] = str(isolated_data_dir)
@@ -324,6 +325,7 @@ print("lifespan-ok", len(events))
         env=environment,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=45,
         check=False,
     )

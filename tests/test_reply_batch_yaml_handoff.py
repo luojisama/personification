@@ -17,6 +17,7 @@ planner = load_personification_module("plugin.personification.agent.runtime.plan
 pipeline_sticker = load_personification_module("plugin.personification.handlers.reply_pipeline.pipeline_sticker")
 tool_registry_module = load_personification_module("plugin.personification.agent.tool_registry")
 completion_contract = load_personification_module("plugin.personification.core.reply_completion_contract")
+agent_synthesis = load_personification_module("plugin.personification.agent.runtime.final_synthesis")
 
 
 class _Text:
@@ -518,6 +519,40 @@ def test_normal_and_yaml_block_markers_are_silent_without_fixed_refusal() -> Non
     assert 'reply_content = "这个我不能接。"' not in yaml
     assert "当前静默结束本轮" in normal
     assert "当前静默结束本轮" in yaml
+
+
+def test_normal_and_yaml_defer_agent_style_wording_to_shared_final_gate() -> None:
+    """Natural wording reaches the shared semantic boundary without a pre-rewrite."""
+    root = Path(__file__).resolve().parents[1]
+    normal = (root / "handlers" / "reply_pipeline" / "processor.py").read_text(encoding="utf-8")
+    yaml = (root / "handlers" / "yaml_pipeline" / "processor.py").read_text(encoding="utf-8")
+
+    for source, prompt_name in ((normal, "base_prompt"), (yaml, "prompt_config")):
+        assert "rewrite_agent_reply_ooc" not in source
+        assert "is_agent_reply_ooc" not in source
+        assert "final_dialogue_gate(" in source
+        assert f"bool({prompt_name})" in source
+    assert "群聊里不要用澄清问句追问" not in normal
+    assert "缺少推进对方明确请求所必需的一个条件" in normal
+
+
+def test_normal_agent_natural_cue_aware_wording_reaches_final_accept(monkeypatch) -> None:
+    """The normal path keeps a contextual phrase for the shared final gate."""
+    candidate = "被 cue 到了，我先围观一下。"
+
+    async def review(messages, **_kwargs):  # noqa: ANN001
+        assert candidate in str(messages[-1].get("content", ""))
+        return '{"action":"accept","persona_verdict":"consistent","flags":[]}'
+
+    _images, state, _messages = _run_normal_selected_referent_replay(
+        monkeypatch,
+        yaml_mode=False,
+        agent_result=agent_synthesis.AgentResult(text=candidate, pending_actions=[]),
+        review_call=review,
+    )
+
+    assert state.get("reply_delivery_confirmed") is True
+    assert candidate.rstrip("。") in state["_test_replay_sent"]
 
 
 def test_normal_and_yaml_share_self_continuity_snapshot_gate_and_delivery() -> None:

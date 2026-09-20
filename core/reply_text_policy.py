@@ -176,7 +176,10 @@ def normalize_visible_reply_text(text: Any) -> str:
     cleaned = _NUMBERED_RE.sub("", cleaned)
     cleaned = _URL_RE.sub("", cleaned)
     cleaned = strip_visible_reasoning_trace(strip_orphan_control_brackets(cleaned))
-    cleaned = _normalize_formulaic_reply_tics(cleaned)
+    # Keep this function structural.  Formulaic-tic detection remains available
+    # to the semantic quality reviewer, but visible wording (including a
+    # correction, a cue-aware "围观", or a deliberately emphatic reaction)
+    # must not be rewritten or deleted before that reviewer sees its context.
 
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in cleaned.split("\n")]
     compacted: list[str] = []

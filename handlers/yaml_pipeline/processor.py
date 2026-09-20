@@ -96,12 +96,10 @@ from ...core.response_review import (
     arbitrate_reply_mode,
     extract_recent_bot_reply_texts,
     final_dialogue_gate,
-    is_agent_reply_ooc,
     make_passthrough_review_decision,
     needs_uncertain_visible_reply_review,
     required_reply_needs_recovery,
     resolve_uncertain_visible_reply,
-    rewrite_agent_reply_ooc,
     review_response_text,
 )
 from ...core.send_outcome import is_likely_delivered_send_timeout
@@ -205,6 +203,7 @@ from ..reply_pipeline.pipeline_context import (
     guard_reply_ack_text as _guard_reply_ack_text,
     build_reply_operation_id as _build_reply_operation_id,
     primary_route_supports_vision as _runtime_primary_route_supports_vision,
+    _recall_agent_candidate_memories,
     should_use_agent_for_reply as _should_use_agent_for_reply,
     strip_injected_visual_summary as _strip_injected_visual_summary,
 )
@@ -649,6 +648,7 @@ async def process_yaml_response_logic(
     vision_caller: Any = None,
     tts_service: Any = None,
     extract_forward_content: Callable[..., Any] = None,
+    memory_store: Any = None,
     memory_curator: Any = None,
     knowledge_store: Any = None,
     inner_state_updater: Any = None,
@@ -2146,6 +2146,23 @@ async def process_yaml_response_logic(
         )
         try:
             try:
+                # Keep YAML on the normal agent path's scoped recall and
+                # second-stage semantic gate.  The candidates remain separate
+                # from the YAML prompt and are only handed to run_agent as
+                # untrusted evidence.
+                memory_recall_runtime = SimpleNamespace(
+                    plugin_config=plugin_config,
+                    memory_store=memory_store,
+                    lite_tool_caller=lite_tool_caller,
+                    agent_tool_caller=agent_tool_caller,
+                    logger=logger,
+                )
+                candidate_memories = await _recall_agent_candidate_memories(
+                    runtime=memory_recall_runtime,
+                    event=event,
+                    messages=agent_messages,
+                    turn_plan=turn_plan,
+                )
                 agent_result = await run_agent(
                     messages=agent_messages,
                     registry=agent_tool_registry,
@@ -2168,6 +2185,9 @@ async def process_yaml_response_logic(
                     recent_bot_replies=recent_bot_replies,
                     precomputed_intent=intent_decision,
                     turn_plan=turn_plan,
+                    candidate_memories=candidate_memories,
+                    memory_store=memory_store,
+                    memory_curator=memory_curator,
                     time_budget_seconds=_compute_agent_time_budget(
                         started_at=started_at,
                         total_timeout_seconds=float(
@@ -2271,33 +2291,6 @@ async def process_yaml_response_logic(
         if agent_result is not None:
             reply_content, legacy_favorability_signals = extract_legacy_favorability_markers(reply_content)
             favorability_signals.merge(legacy_favorability_signals)
-            if not agent_result.direct_output and is_agent_reply_ooc(reply_content):
-                rewritten_ooc = await rewrite_agent_reply_ooc(
-                    tool_caller=lite_tool_caller or agent_tool_caller,
-                    original_text=reply_content,
-                    persona_system=system_prompt,
-                    output_mode=str(getattr(semantic_frame, "output_mode", "chat_short") or "chat_short"),
-                    reply_shape=str(getattr(semantic_frame, "reply_shape", "auto") or "auto"),
-                    avoid_questions=not is_private_session,
-                    allow_rhetorical_banter=bool(
-                        is_direct_mention
-                        and str(getattr(turn_plan_for_prompt, "speech_act", "") or "") in {"", "participate", "tease"}
-                    ),
-                    max_chars_override=resolve_reply_length_policy(
-                        plugin_config,
-                        turn_plan=turn_plan,
-                        media_context=turn_media_refs,
-                        tool_calls=reply_commit_state.get("agent_tool_calls"),
-                        evidence_delivery_required=bool(
-                            reply_commit_state.get("agent_evidence_delivery_required", False)
-                        ),
-                        bypass_length_limits=bool(getattr(agent_result, "bypass_length_limits", False)),
-                    ).max_chars,
-                )
-                if rewritten_ooc:
-                    reply_content = rewritten_ooc
-                else:
-                    reply_content = "[SILENCE]"
             if _has_newer_batch_now():
                 logger.info(f"拟人插件 (YAML)：会话 {group_id} 已出现更新批次，本轮旧回复丢弃。")
                 _trace_no_reply("stale_reply", diagnosis_code="stale_reply", detail="Agent 结果生成后出现更新批次")
@@ -4125,6 +4118,7 @@ def build_yaml_response_processor(
     vision_caller: Any = None,
     tts_service: Any = None,
     extract_forward_content: Callable[..., Any] = None,
+    memory_store: Any = None,
     memory_curator: Any = None,
     knowledge_store: Any = None,
     inner_state_updater: Any = None,
@@ -4202,6 +4196,7 @@ def build_yaml_response_processor(
                 "extract_forward_content",
                 extract_forward_content,
             ),
+            memory_store=runtime_overrides.get("memory_store", memory_store),
             memory_curator=runtime_overrides.get("memory_curator", memory_curator),
             knowledge_store=runtime_overrides.get("knowledge_store", knowledge_store),
             inner_state_updater=runtime_overrides.get("inner_state_updater", inner_state_updater),

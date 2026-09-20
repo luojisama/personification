@@ -39,6 +39,8 @@ def test_runtime_builder_injects_single_ledger_into_all_runtime_owners() -> None
         calls = _call_keywords(runtime_builder, function_name)
         assert len(calls) == expected_calls
         assert all("qq_outbound_ledger" in keywords for keywords in calls)
+        if function_name == "build_yaml_response_processor":
+            assert all("memory_store" in keywords for keywords in calls)
     recovery_calls = _call_keywords(runtime_builder, "recover_interrupted_dispatches")
     assert len(recovery_calls) == 1
 

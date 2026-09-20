@@ -119,12 +119,10 @@ from ...core.role_integrity import detect_persona_identity_leak
 from ...core.response_review import (
     extract_recent_bot_reply_texts,
     final_dialogue_gate,
-    is_agent_reply_ooc,
     make_passthrough_review_decision,
     needs_uncertain_visible_reply_review,
     required_reply_needs_recovery,
     resolve_uncertain_visible_reply,
-    rewrite_agent_reply_ooc,
     review_response_text,
 )
 from ...core.send_outcome import is_likely_delivered_send_timeout
@@ -2395,6 +2393,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             media_transport_aliases=media_transport_aliases,
             prepared_visual_projection=yaml_visual_projection,
             prepared_memory_context=prepared_memory_context,
+            memory_store=getattr(runtime, "memory_store", None),
             get_configured_api_providers=runtime.get_configured_api_providers,
             vision_caller=runtime.vision_caller,
             disable_network_hooks=disable_network_hooks,
@@ -2614,7 +2613,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         else:
             system_prompt += (
                 "\n[系统提示] 这轮高歧义但对方像是在直接问你。"
-                "群聊里不要用澄清问句追问；能判断就给一句保守短反应，不能判断就输出 [NO_REPLY]。"
+                "只有缺少推进对方明确请求所必需的一个条件时，才自然地问一个具体问题；"
+                "能判断就给一句保守短反应，否则输出 [NO_REPLY]。"
             )
     if has_photo_input:
         system_prompt += (
@@ -3210,32 +3210,6 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     )
                 except Exception:
                     pass
-        elif not agent_direct_output and is_agent_reply_ooc(reply_content):
-            rewritten_ooc = await rewrite_agent_reply_ooc(
-                tool_caller=runtime.lite_tool_caller or runtime.agent_tool_caller,
-                original_text=reply_content,
-                persona_system=system_prompt,
-                output_mode=str(getattr(semantic_frame, "output_mode", "chat_short") or "chat_short"),
-                reply_shape=str(getattr(semantic_frame, "reply_shape", "auto") or "auto"),
-                avoid_questions=not is_private_session,
-                allow_rhetorical_banter=bool(
-                    is_direct_mention
-                    and str(getattr(turn_plan, "speech_act", "") or "") in {"", "participate", "tease"}
-                ),
-                max_chars_override=resolve_reply_length_policy(
-                    runtime.plugin_config,
-                    turn_plan=turn_plan,
-                    media_context=turn_media_context,
-                    tool_calls=state.get("agent_tool_calls"),
-                    evidence_delivery_required=bool(state.get("agent_evidence_delivery_required", False)),
-                    bypass_length_limits=bool(bypass_length_limits),
-                ).max_chars,
-            )
-            if rewritten_ooc:
-                reply_content = rewritten_ooc
-            else:
-                reply_content = "[SILENCE]"
-
         stale_reason = _stale_reply_abort_reason(state)
         if stale_reason:
             runtime.logger.info(f"拟人插件：{stale_reason}")

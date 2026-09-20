@@ -40,8 +40,10 @@ def validate_prompt_segments(segments: Sequence[PromptSegment]) -> PromptSegment
     first_late_stable: int | None = None
     stable_count = 0
     for index, segment in enumerate(segments):
-        if segment.role != "system":
-            raise ValueError(f"prompt segment {index} must keep role=system")
+        if segment.role not in {"system", "user"}:
+            raise ValueError(f"prompt segment {index} must keep role=system or role=user")
+        if segment.role == "user" and segment.stability != "dynamic":
+            raise ValueError(f"prompt segment {index} with role=user must be dynamic")
         if not isinstance(segment.content, str) or not segment.content:
             raise ValueError(f"prompt segment {index} must have non-empty content")
         if segment.stability not in {"stable", "dynamic"}:

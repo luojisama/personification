@@ -945,7 +945,7 @@ def test_review_qzone_post_rewrites_stiff_qzone_tic() -> None:
     class _Caller:
         async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
             assert tools == []
-            assert "模板化的机灵句" in messages[1]["content"]
+            assert "若符合角色和当前语境，原样保留" in messages[1]["content"]
             return _Resp("有点想吃夜宵了")
 
         def build_tool_result_message(self, *_a):  # noqa: ANN001
@@ -964,7 +964,7 @@ def test_review_qzone_post_rewrites_stiff_qzone_tic() -> None:
     assert not diary_flow._QZONE_STIFF_TIC_RE.search(result)
 
 
-def test_qzone_agent_rewrites_request_persona_text_output(monkeypatch) -> None:  # noqa: ANN001
+def test_qzone_style_rewrite_uses_one_agent_request(monkeypatch) -> None:  # noqa: ANN001
     calls: list[dict] = []
 
     async def _agent(**kwargs):  # noqa: ANN001
@@ -981,17 +981,113 @@ def test_qzone_agent_rewrites_request_persona_text_output(monkeypatch) -> None: 
             "persona_system": "你是某角色",
             "logger": _Logger(),
         }
-        await diary_flow._rewrite_qzone_net_slang("原句", **common)
-        await diary_flow._rewrite_qzone_stiff_tic("原句", **common)
+        await diary_flow._rewrite_qzone_style_once(
+            "原句", style_signals=("net_slang", "stiff_tic"), **common
+        )
 
     asyncio.run(_run())
 
-    assert [item["trigger_reason"] for item in calls] == [
-        "qzone_net_slang_rewrite",
-        "qzone_stiff_tic_rewrite",
-    ]
+    assert [item["trigger_reason"] for item in calls] == ["qzone_style_rewrite"]
     assert all(item["surface"] == "qzone_post_rewrite" for item in calls)
     assert all(item["structured_output"] is False for item in calls)
+
+
+def test_review_qzone_post_combined_style_signals_rewrite_only_once() -> None:
+    calls = 0
+
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            nonlocal calls
+            calls += 1
+            assert tools == [] and use_builtin_search is False
+            assert "仅在确实影响自然表达时" in messages[1]["content"]
+            return _Resp("晚上想吃点热乎的")
+
+        def build_tool_result_message(self, *_a):  # noqa: ANN001
+            return {}
+
+    result = asyncio.run(diary_flow._review_qzone_post(
+        "脑子没在加班，胃先开始催了，夜宵也太香了吧",
+        tool_caller=_Caller(), persona_system="你是某角色", logger=_Logger(),
+    ))
+
+    assert result == "晚上想吃点热乎的"
+    assert calls == 1
+
+
+def test_qzone_style_budget_is_shared_across_repaired_candidates() -> None:
+    calls = 0
+
+    class _Caller:
+        async def chat_with_tools(self, *_args):  # noqa: ANN001
+            nonlocal calls
+            calls += 1
+            return _Resp("第一条改写结果")
+
+        def build_tool_result_message(self, *_a):  # noqa: ANN001
+            return {}
+
+    budget = diary_flow.QzoneStyleRewriteBudget()
+    first = asyncio.run(diary_flow._review_qzone_post(
+        "夜宵也太香了吧", tool_caller=_Caller(), persona_system="x",
+        logger=_Logger(), style_rewrite_budget=budget,
+    ))
+    second = asyncio.run(diary_flow._review_qzone_post(
+        "今天只想吃夜宵", tool_caller=_Caller(), persona_system="x",
+        logger=_Logger(), style_rewrite_budget=budget,
+    ))
+
+    assert first == "第一条改写结果"
+    assert second == "今天只想吃夜宵"
+    assert calls == 1
+    assert budget.calls_used == 1
+
+
+def test_review_qzone_post_single_style_rewrite_fails_closed() -> None:
+    report = diary_flow.QzoneGenerationReport()
+
+    class _Caller:
+        async def chat_with_tools(self, *_args):  # noqa: ANN001
+            return _Resp("")
+
+        def build_tool_result_message(self, *_a):  # noqa: ANN001
+            return {}
+
+    result = asyncio.run(diary_flow._review_qzone_post(
+        "夜宵也太香了吧", tool_caller=_Caller(), persona_system="x",
+        logger=_Logger(), report=report,
+    ))
+
+    assert result == ""
+    assert report.code == "style_rewrite_failed"
+
+
+def test_qzone_style_rewrite_still_reaches_grounding_reviewer(monkeypatch) -> None:  # noqa: ANN001
+    semantic_inputs: list[str] = []
+
+    async def _style(*_args, **_kwargs):  # noqa: ANN001
+        return "昨天晚上我已经吃过夜宵啦"
+
+    async def _semantic(text, **_kwargs):  # noqa: ANN001
+        semantic_inputs.append(text)
+        return {
+            "accepted": False, "coherent": True, "grounded": False, "novel": True,
+            "same_topic": False, "same_scene": False, "same_syntax": False,
+            "persona_consistent": True, "identity_safe": True, "injection_safe": True,
+            "topic_key": "night", "reason": "没有已发生事件依据",
+        }
+
+    monkeypatch.setattr(diary_flow, "_rewrite_qzone_style_once", _style)
+    monkeypatch.setattr(diary_flow, "_review_qzone_semantics", _semantic)
+    report = diary_flow.QzoneGenerationReport()
+    result = asyncio.run(diary_flow._build_qzone_post_with_optional_image(
+        content="夜宵也太香了吧", image_prompt="", tool_caller=object(), logger=_Logger(),
+        recent_posts=[], persona_system="x", report=report,
+    ))
+
+    assert semantic_inputs == ["昨天晚上我已经吃过夜宵啦"]
+    assert result == ""
+    assert report.code == "semantic_not_grounded"
 
 
 def test_review_qzone_post_keeps_clean_text_untouched() -> None:
@@ -1899,7 +1995,7 @@ def test_qzone_post_uses_configured_semantic_review_timeout(monkeypatch) -> None
     assert captured["timeout"] == 180.0
 
 
-def test_qzone_stiff_rewrite_failure_drops_original() -> None:
+def test_qzone_style_rewrite_does_not_apply_a_second_keyword_veto() -> None:
     class _Caller:
         async def chat_with_tools(self, _messages, _tools, _use_builtin_search):  # noqa: ANN001
             return _Resp("脑子没在加班，胃先开始催了。")
@@ -1911,7 +2007,10 @@ def test_qzone_stiff_rewrite_failure_drops_original() -> None:
         logger=_Logger(),
     ))
 
-    assert result == ""
+    # The single model-led rewrite is the whole optional style pass.  Its text
+    # is subsequently subject to semantic safety review, not a second regex
+    # rewrite/drop loop.
+    assert result == "脑子没在加班，胃先开始催了。"
 
 
 def test_qzone_post_rejects_content_below_minimum_length() -> None:

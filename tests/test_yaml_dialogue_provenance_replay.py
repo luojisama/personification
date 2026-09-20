@@ -12,6 +12,9 @@ from ._loader import load_personification_module
 config_module = load_personification_module("plugin.personification.config")
 reply_turn_trace = load_personification_module("plugin.personification.core.reply_turn_trace")
 yaml_processor = load_personification_module("plugin.personification.handlers.yaml_pipeline.processor")
+pipeline_context = load_personification_module(
+    "plugin.personification.handlers.reply_pipeline.pipeline_context"
+)
 tool_registry_module = load_personification_module("plugin.personification.agent.tool_registry")
 agent_synthesis_module = load_personification_module(
     "plugin.personification.agent.runtime.final_synthesis"
@@ -498,6 +501,141 @@ def test_yaml_agent_executor_receives_narrow_runtime(monkeypatch) -> None:
     assert runtime.response_review_call_ai_api is not None
     assert reviews and "agent reply" in str(reviews[0])
     assert bot.sent == ["agent reply"]
+
+
+def test_yaml_agent_natural_correction_reaches_final_semantic_accept_unchanged(monkeypatch) -> None:
+    """A natural correction is not pre-rewritten before the shared final gate."""
+    candidate = "等下，我说的是周五，不是周四。"
+    captured: dict[str, object] = {}
+
+    async def fake_agent(**kwargs):  # noqa: ANN003
+        captured.update(kwargs)
+        return agent_synthesis_module.AgentResult(text=candidate, pending_actions=[])
+
+    async def review(messages, **_kwargs):  # noqa: ANN001
+        assert candidate in str(messages[-1].get("content", ""))
+        return '{"action":"accept","persona_verdict":"consistent","flags":[]}'
+
+    monkeypatch.setattr(yaml_processor, "run_agent", fake_agent)
+    monkeypatch.setattr(yaml_processor, "register_groupmate_qzone_agent_tools", lambda *_a, **_k: None)
+    bot, _primary, reviews, _stages = _run_yaml_turn(
+        monkeypatch,
+        history=[],
+        event=_event(text="不是周四，是周五。", message_id="yaml-natural-correction"),
+        candidate="fallback",
+        review_call=review,
+        final_gate_enabled=True,
+        agent_tool_caller=object(),
+        tool_registry=tool_registry_module.ToolRegistry(),
+        configure=lambda cfg: setattr(cfg, "personification_agent_enabled", True),
+    )
+
+    assert captured["messages"]
+    assert reviews
+    assert bot.sent == [candidate.rstrip("。")]
+
+
+def test_yaml_agent_reuses_normal_scoped_memory_gate_without_prompt_injection(monkeypatch) -> None:
+    """YAML hands normal-gated memory evidence to the Agent, never its prompt."""
+    captured: dict[str, object] = {}
+
+    class _MemoryStore:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def recall_memories(self, **kwargs):  # noqa: ANN003
+            self.calls.append(kwargs)
+            return [
+                {
+                    "memory_id": "group-memory",
+                    "summary": "human-1 上周说过想吃火锅",
+                    "score": 0.99,
+                    "confidence": 0.99,
+                    "auto_context_eligible": True,
+                },
+                {
+                    "memory_id": "other-user-private",
+                    "summary": "另一位用户的私人偏好",
+                    "score": 0.99,
+                    "confidence": 0.99,
+                    "permission_type": "private_fact",
+                    "user_id": "other-user",
+                },
+            ]
+
+    class _GateCaller:
+        def __init__(self) -> None:
+            self.messages: list[list[dict[str, object]]] = []
+
+        async def chat_with_tools(self, **kwargs):  # noqa: ANN003
+            self.messages.append(kwargs["messages"])
+            assert kwargs["tools"] == []
+            assert kwargs["use_builtin_search"] is False
+            return SimpleNamespace(
+                content='{"keep_memory_ids":["group-memory"],"drop_memory_ids":[],"reason":"当前话题相关"}'
+            )
+
+    class _MemoryCurator:
+        def schedule_turn_capture(self, **_kwargs) -> None:  # noqa: ANN003
+            return None
+
+    store = _MemoryStore()
+    caller = _GateCaller()
+    curator = _MemoryCurator()
+
+    async def fake_agent(**kwargs):  # noqa: ANN003
+        captured.update(kwargs)
+        return agent_synthesis_module.AgentResult(text="那家火锅你还惦记着呀", pending_actions=[])
+
+    monkeypatch.setattr(yaml_processor, "run_agent", fake_agent)
+    monkeypatch.setattr(yaml_processor, "register_groupmate_qzone_agent_tools", lambda *_a, **_k: None)
+    assert yaml_processor._recall_agent_candidate_memories is pipeline_context._recall_agent_candidate_memories
+
+    async def review(*_a, **_k):
+        return '{"action":"accept","persona_verdict":"consistent","flags":[]}'
+
+    bot, _primary, _reviews, _stages = _run_yaml_turn(
+        monkeypatch,
+        history=[],
+        event=_event(text="还记得我爱吃什么吗？", message_id="yaml-memory-gate"),
+        candidate="fallback",
+        review_call=review,
+        final_gate_enabled=False,
+        agent_tool_caller=caller,
+        tool_registry=tool_registry_module.ToolRegistry(),
+        memory_store=store,
+        memory_curator=curator,
+        configure=lambda cfg: (
+            setattr(cfg, "personification_agent_enabled", True),
+            setattr(cfg, "personification_evidence_synthesizer_enabled", True),
+            setattr(cfg, "personification_memory_palace_enabled", True),
+        ),
+    )
+
+    assert len(store.calls) == 1
+    recall_request = store.calls[0]
+    assert "还记得我爱吃什么吗？" in str(recall_request["query"])
+    assert {key: recall_request[key] for key in recall_request if key != "query"} == {
+        "scope": "auto",
+        "user_id": "human-1",
+        "group_id": "1",
+        "platform": "onebot",
+        "bot_id": "",
+        "limit": 24,
+        "mode": "auto",
+        "context_type": "group",
+    }
+    assert any(
+        "记忆相关性闸门" in str(message[0].get("content", ""))
+        for message in caller.messages
+    )  # normal second-stage LLM relevance gate
+    candidates = captured["candidate_memories"]
+    assert isinstance(candidates, list) and [item["memory_id"] for item in candidates] == ["group-memory"]
+    assert captured["memory_store"] is store
+    assert captured["memory_curator"] is curator
+    agent_prompt = "\n".join(str(message.get("content", "")) for message in captured["messages"])
+    assert "human-1 上周说过想吃火锅" not in agent_prompt
+    assert bot.sent == ["那家火锅你还惦记着呀"]
 
 
 def test_yaml_canonical_projection_keeps_authorized_structured_records() -> None:

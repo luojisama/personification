@@ -86,6 +86,9 @@ def test_turn_specific_prompt_sources_are_dynamic() -> None:
         "bot_avatar",
     ):
         assert by_source[source] == "dynamic"
+    assert by_source["rewritten_query_guidance"] == "dynamic"
+    assert next(segment for segment in sink if segment.source == "rewritten_query").role == "user"
+    assert next(segment for segment in sink if segment.source == "rewritten_query_guidance").role == "system"
     assert by_source["prompt_injection_guard"] == "stable"
     assert report.preceding_messages == "none"
     # This describes the current append order; it does not claim provider cache behavior.
@@ -103,6 +106,13 @@ def test_contiguous_prefix_guard_rejects_stable_after_dynamic() -> None:
 
     with pytest.raises(ValueError, match="contiguous prefix"):
         segments_module.require_contiguous_stable_prefix(invalid)
+
+
+def test_context_segments_reject_static_user_data() -> None:
+    with pytest.raises(ValueError, match="role=user must be dynamic"):
+        segments_module.validate_prompt_segments(
+            [segments_module.PromptSegment("user", "untrusted", "stable", "query")]
+        )
 
 
 def test_surface_early_return_still_reports_segments() -> None:

@@ -829,7 +829,7 @@ def test_social_evidence_delivery_removes_standalone_source_titles() -> None:
     assert result.text == "练度的关键是先精一核心干员。"
 
 
-def test_finalize_agent_reply_quality_propagates_rewrite_provider_failure() -> None:
+def test_finalize_agent_reply_quality_does_not_call_style_rewriter() -> None:
     error = RuntimeError("private provider failure")
     error.code = "provider_call_failed"
 
@@ -837,18 +837,18 @@ def test_finalize_agent_reply_quality_propagates_rewrite_provider_failure() -> N
         async def chat_with_tools(self, *_args, **_kwargs):  # noqa: ANN001
             raise error
 
-    with pytest.raises(RuntimeError) as caught:
-        asyncio.run(reply_quality.finalize_agent_reply_quality(
-            _agent_result("我先看看情况，等会再说"),
-            tool_caller=_FailingCaller(),
-            messages=[],
-            reason="unit",
-        ))
+    result = asyncio.run(reply_quality.finalize_agent_reply_quality(
+        _agent_result("我先看看情况，等会再说"),
+        tool_caller=_FailingCaller(),
+        messages=[],
+        reason="unit",
+    ))
 
-    assert caught.value is error
+    assert result.text == "我先看看情况，等会再说"
+    assert result.quality_checks[-1]["revision_attempted"] is False
 
 
-def test_finalize_agent_reply_quality_rewrites_observer_posture_once() -> None:
+def test_finalize_agent_reply_quality_reports_observer_posture_without_rewrite() -> None:
     caller = _RewriteCaller("那先别绕远，就看当前这个点")
     traces: list[dict[str, object]] = []
 
@@ -862,16 +862,15 @@ def test_finalize_agent_reply_quality_rewrites_observer_posture_once() -> None:
         )
     )
 
-    assert result.text == "那先别绕远，就看当前这个点"
-    assert len(caller.calls) == 1
-    assert caller.calls[0]["tools"] == []
-    assert result.quality_checks[-1]["action"] == "rewritten"
-    assert result.quality_checks[-1]["revision_attempted"] is True
+    assert result.text == "我先看看情况，等会再说"
+    assert caller.calls == []
+    assert result.quality_checks[-1]["action"] == "accepted_with_flags"
+    assert result.quality_checks[-1]["revision_attempted"] is False
     assert "formulaic_tic" in result.quality_checks[-1]["flags"]
-    assert "action=rewritten" in traces[-1]["detail"]
+    assert "action=accepted_with_flags" in traces[-1]["detail"]
 
 
-def test_finalize_agent_reply_quality_rewrites_group_visible_question() -> None:
+def test_finalize_agent_reply_quality_preserves_group_question_for_final_semantic_gate() -> None:
     caller = _RewriteCaller("地点没拿准，我别乱猜天气。")
 
     result = asyncio.run(
@@ -883,13 +882,13 @@ def test_finalize_agent_reply_quality_rewrites_group_visible_question() -> None:
         )
     )
 
-    assert result.text == "地点没拿准，我别乱猜天气。"
-    assert len(caller.calls) == 1
+    assert result.text == "你那边是哪儿啊，我别乱猜天气。"
+    assert caller.calls == []
     assert "group_visible_question" in result.quality_checks[-1]["flags"]
-    assert result.quality_checks[-1]["action"] == "rewritten"
+    assert result.quality_checks[-1]["action"] == "accepted_with_flags"
 
 
-def test_finalize_agent_reply_quality_silences_group_question_rewrite_if_still_question() -> None:
+def test_finalize_agent_reply_quality_does_not_silence_group_question_surface() -> None:
     caller = _RewriteCaller("你那边是哪儿啊")
 
     result = asyncio.run(
@@ -901,8 +900,9 @@ def test_finalize_agent_reply_quality_silences_group_question_rewrite_if_still_q
         )
     )
 
-    assert result.text == "[SILENCE]"
-    assert result.quality_checks[-1]["action"] == "silenced"
+    assert result.text == "你那边是哪儿啊，我别乱猜天气。"
+    assert caller.calls == []
+    assert result.quality_checks[-1]["action"] == "accepted_with_flags"
 
 
 def test_finalize_agent_reply_quality_keeps_direct_banter_retort() -> None:
@@ -927,7 +927,7 @@ def test_finalize_agent_reply_quality_keeps_direct_banter_retort() -> None:
     assert result.quality_checks[-1]["action"] == "accept"
 
 
-def test_finalize_agent_reply_quality_silences_when_revision_still_ooc() -> None:
+def test_finalize_agent_reply_quality_does_not_silence_ooc_keyword_signal() -> None:
     caller = _RewriteCaller("我先看看情况，等会再说")
 
     result = asyncio.run(
@@ -939,9 +939,10 @@ def test_finalize_agent_reply_quality_silences_when_revision_still_ooc() -> None
         )
     )
 
-    assert result.text == "[SILENCE]"
-    assert result.quality_checks[-1]["action"] == "silenced"
-    assert result.quality_checks[-1]["revision_attempted"] is True
+    assert result.text == "根据搜索结果，我先看看情况，等会再说"
+    assert caller.calls == []
+    assert result.quality_checks[-1]["action"] == "accepted_with_flags"
+    assert result.quality_checks[-1]["revision_attempted"] is False
 
 
 def test_finalize_agent_reply_quality_silences_undirected_empty_evidence_without_rewrite() -> None:
@@ -1093,7 +1094,7 @@ def test_finalize_agent_reply_quality_tells_review_that_video_is_already_availab
     assert "系统已取得媒体：可读取视频 1 个" in validation
 
 
-def test_finalize_agent_reply_quality_rejects_group_context_question() -> None:
+def test_finalize_agent_reply_quality_keeps_semantically_approved_group_context_question() -> None:
     caller = _SequenceCaller(
         [
             '{"action":"request_context","text":"你能把这个叫法的原句发来吗？","reason":"补语境"}',
@@ -1113,9 +1114,9 @@ def test_finalize_agent_reply_quality_rejects_group_context_question() -> None:
         )
     )
 
-    assert result.text == "[SILENCE]"
-    assert result.suppress_reply_recovery is True
-    assert result.quality_checks[-1]["action"] == "context_request_rejected"
+    assert result.text == "你能把这个叫法的原句发来吗？"
+    assert result.suppress_reply_recovery is False
+    assert result.quality_checks[-1]["action"] == "context_request"
 
 
 def test_finalize_agent_reply_quality_skips_direct_and_control_outputs() -> None:

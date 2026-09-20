@@ -27,7 +27,7 @@ from ..core.llm_context import (
 from ..core.message_provenance import source_kind_of
 from ..core.operation_diagnostics import OperationDetail, OperationStep, detail, diagnostic, step
 from ..core.provider_health import classify_error as classify_provider_error
-from ..core.response_review import is_agent_reply_ooc, rewrite_agent_reply_ooc
+from ..core.response_review import is_agent_reply_ooc
 from ..core.runtime_identity import get_runtime_identity
 from ..core.sticker_library import (
     list_local_sticker_files,
@@ -192,6 +192,17 @@ class QzoneReviewerBudget:
         self.calls_used += 1
         return self.calls_used
 
+
+@dataclass(slots=True)
+class QzoneStyleRewriteBudget:
+    """One optional wording pass for the complete QZone publication round."""
+
+    max_calls: int = 1
+    calls_used: int = 0
+
+    @property
+    def remaining(self) -> int:
+        return max(0, int(self.max_calls) - int(self.calls_used))
 
 def _mark_qzone_reviewer_budget_exhausted(
     report: QzoneGenerationReport | None,
@@ -1058,9 +1069,10 @@ _QZONE_STIFF_TIC_RE = re.compile(
 )
 
 
-async def _rewrite_qzone_net_slang(
+async def _rewrite_qzone_style_once(
     text: str,
     *,
+    style_signals: tuple[str, ...],
     tool_caller: Any,
     registry: Any = None,
     plugin_config: Any = None,
@@ -1069,30 +1081,37 @@ async def _rewrite_qzone_net_slang(
     timeout: float = 8.0,
     logger: Any = None,
 ) -> str:
-    """把带营业感叹腔/网络流行语的说说改写成平铺直叙的一句。"""
+    """Make the one optional QZone wording pass for all detected style signals.
+
+    The signals are only diagnostics selecting a model-led rewrite.  They never
+    transform or reject visible text by themselves; the later semantic reviewer
+    remains responsible for grounding, persona and injection safety.
+    """
     if tool_caller is None:
         return ""
     messages: list[dict[str, Any]] = []
     persona = str(persona_system or "").strip()
     if persona:
         messages.append({"role": "system", "content": persona[:1200]})
-    messages.append(
-        {
-            "role": "system",
-            "content": (
-                "下面这条 QQ 空间说说带有营业感叹腔/网络流行语"
-                "（如『也太……了吧 / ……爆了 / 绝了 / 谁懂 / 笑死 / yyds』）。"
-                "用你自己的口吻改写成平铺直叙的一句日常碎碎念，去掉所有感叹营业腔和网络流行语，"
-                "只描述那个画面或念头本身，不喊口号、不强行制造情绪；如果原句像散文旁白或状态报告，"
-                "也一起改成更随手、更口语的一句，12-50 字。只输出改写后的句子。"
-            ),
-        }
+    messages.extend(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "下面是一条待发布的 QQ 空间短动态。它的表层文风被诊断为可能有生成痕迹、"
+                    "夸张营业感或模板化机灵句。这些诊断不代表表达有错；若符合角色和当前语境，原样保留。"
+                    "仅在确实影响自然表达时，用角色自己的口吻改写一次："
+                    "保留原本能成立的小念头，不补充事实、经历、承诺或设定；不要解释改写过程、"
+                    "不要口号和营销腔。不为字数硬改原意，只输出最终正文。"
+                ),
+            },
+            {"role": "user", "content": str(text or "").strip()[:300]},
+        ]
     )
-    messages.append({"role": "user", "content": str(text or "").strip()[:300]})
     try:
         if registry is not None:
             return await _run_qzone_llm_call(
-                "qzone_net_slang_rewrite",
+                "qzone_style_rewrite",
                 lambda: run_text_agent(
                     messages=messages,
                     plugin_config=plugin_config,
@@ -1100,74 +1119,15 @@ async def _rewrite_qzone_net_slang(
                     tool_caller=tool_caller,
                     registry=registry,
                     max_steps=agent_max_steps,
-                    trigger_reason="qzone_net_slang_rewrite",
-                    chat_intent_hint="qzone_net_slang_rewrite",
+                    trigger_reason="qzone_style_rewrite",
+                    chat_intent_hint="qzone_style_rewrite",
                     surface="qzone_post_rewrite",
                     structured_output=False,
                     tool_profile=TEXT_AGENT_TOOL_PROFILE_NONE,
                 ),
             )
         response = await _run_qzone_llm_call(
-            "qzone_net_slang_rewrite",
-            lambda: asyncio.wait_for(tool_caller.chat_with_tools(messages, [], False), timeout=timeout),
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        return ""
-    return str(getattr(response, "content", "") or "").strip()
-
-
-async def _rewrite_qzone_stiff_tic(
-    text: str,
-    *,
-    tool_caller: Any,
-    registry: Any = None,
-    plugin_config: Any = None,
-    agent_max_steps: int = 4,
-    persona_system: Any = "",
-    timeout: float = 8.0,
-    logger: Any = None,
-) -> str:
-    """把模板化的机灵句/器官拟人句改成更真一点的随手短句。"""
-    if tool_caller is None:
-        return ""
-    messages: list[dict[str, Any]] = []
-    persona = str(persona_system or "").strip()
-    if persona:
-        messages.append({"role": "system", "content": persona[:1200]})
-    messages.append(
-        {
-            "role": "system",
-            "content": (
-                "下面这条 QQ 空间说说有点像模板化的机灵句：二段式、先后对仗、器官拟人、"
-                "或“今天只想……”这种太工整的口播感。请保留角色口吻和原本的小念头，"
-                "改写成更像真人随手敲的一句日常碎碎念。可以更普通、更短、更松散，"
-                "不要解释为什么改，不要补设定，不要喊口号，12-45 个中文字符。只输出改写后的句子。"
-            ),
-        }
-    )
-    messages.append({"role": "user", "content": str(text or "").strip()[:300]})
-    try:
-        if registry is not None:
-            return await _run_qzone_llm_call(
-                "qzone_stiff_tic_rewrite",
-                lambda: run_text_agent(
-                    messages=messages,
-                    plugin_config=plugin_config,
-                    logger=logger,
-                    tool_caller=tool_caller,
-                    registry=registry,
-                    max_steps=agent_max_steps,
-                    trigger_reason="qzone_stiff_tic_rewrite",
-                    chat_intent_hint="qzone_stiff_tic_rewrite",
-                    surface="qzone_post_rewrite",
-                    structured_output=False,
-                    tool_profile=TEXT_AGENT_TOOL_PROFILE_NONE,
-                ),
-            )
-        response = await _run_qzone_llm_call(
-            "qzone_stiff_tic_rewrite",
+            "qzone_style_rewrite",
             lambda: asyncio.wait_for(tool_caller.chat_with_tools(messages, [], False), timeout=timeout),
         )
     except asyncio.CancelledError:
@@ -1188,92 +1148,51 @@ async def _review_qzone_post(
     logger: Any,
     report: QzoneGenerationReport | None = None,
     attempt_key: str = "draft",
+    style_rewrite_budget: QzoneStyleRewriteBudget | None = None,
 ) -> str:
-    """对生成的说说做去 AI 腔 + 去营业感叹腔审阅。
-
-    1) 引入工具调用循环后，正文最容易漏出"根据搜索结果/查了一下/参考链接"这类搜索腔，
-       用群聊同款的 `is_agent_reply_ooc` 正则 + `rewrite_agent_reply_ooc` 重写兜住；
-       重写失败则丢弃该条（宁缺勿发）。
-    2) 再兜一层『(也)太……了吧 / X爆了 / 绝了 / yyds』等营业感叹腔，改写成平铺直叙。
-    3) 对看起来过度工整的 QZone 机灵句做一次轻改写，避免“越改越怪”的模板感。
-    """
+    """Perform at most one optional model-led wording pass for a QZone post."""
     if not text or tool_caller is None:
         return text
-    if is_agent_reply_ooc(text):
-        rewritten = await _run_qzone_llm_call(
-            "qzone_ooc_rewrite",
-            lambda: rewrite_agent_reply_ooc(
-                tool_caller=tool_caller,
-                original_text=text,
-                persona_system=str(persona_system or "")[:1200],
-                output_mode="chat_short",
-            ),
-        )
+    style_signals = tuple(
+        name for name, detected in (
+            ("ooc", is_agent_reply_ooc(text)),
+            ("net_slang", bool(_NET_SLANG_TIC_RE.search(text))),
+            ("stiff_tic", bool(_QZONE_STIFF_TIC_RE.search(text))),
+        ) if detected
+    )
+    style_budget = style_rewrite_budget or QzoneStyleRewriteBudget()
+    if style_signals and style_budget.remaining > 0:
+        style_budget.calls_used += 1
+        rewritten = _trim_qzone_content(await _rewrite_qzone_style_once(
+            text,
+            style_signals=style_signals,
+            tool_caller=tool_caller,
+            registry=registry,
+            plugin_config=plugin_config,
+            agent_max_steps=agent_max_steps,
+            persona_system=persona_system,
+            logger=logger,
+        ))
         if not rewritten:
             if logger is not None:
-                logger.info(f"[qzone] OOC rewrite failed, drop post: {text}")
+                logger.info("[qzone] style rewrite failed, drop post")
             if report is not None:
                 report.fail(
-                    "ooc_rewrite_failed",
+                    "style_rewrite_failed",
                     "style_review",
-                    "草稿包含不适合公开发布的生成痕迹",
-                    "草稿命中了 OOC、搜索过程或模型说明痕迹，自动改写没有得到合格结果。",
-                    suggestion="重新生成草稿；如果连续出现，请检查 QZone 人设和 Agent 输出。",
+                    "草稿的单次文风改写未得到可用结果",
+                    "草稿命中一个或多个表层文风诊断，但唯一允许的模型改写未返回可见正文。",
+                    suggestion="重新生成草稿；语义与证据审阅不会因文风改写失败而被跳过放行。",
                 )
             return ""
-        text = _trim_qzone_content(rewritten)
-    if text and _NET_SLANG_TIC_RE.search(text):
-        toned = await _rewrite_qzone_net_slang(
-            text,
-            tool_caller=tool_caller,
-            registry=registry,
-            plugin_config=plugin_config,
-            agent_max_steps=agent_max_steps,
-            persona_system=persona_system,
-            logger=logger,
-        )
-        toned = _trim_qzone_content(toned)
-        if toned and not _NET_SLANG_TIC_RE.search(toned):
-            text = toned
-        else:
-            if logger is not None:
-                logger.info(f"[qzone] net-slang rewrite ineffective, drop post: {text}")
-            if report is not None:
-                report.fail(
-                    "net_slang_rewrite_failed",
-                    "style_review",
-                    "草稿的营业感改写未通过",
-                    "草稿命中了夸张营业感表达，自动改写后仍然命中相同风格限制。",
-                    suggestion="重新生成一条更平铺直叙的短说说。",
-                )
-            return ""
-    if text and _QZONE_STIFF_TIC_RE.search(text):
-        toned = await _rewrite_qzone_stiff_tic(
-            text,
-            tool_caller=tool_caller,
-            registry=registry,
-            plugin_config=plugin_config,
-            agent_max_steps=agent_max_steps,
-            persona_system=persona_system,
-            logger=logger,
-        )
-        toned = _trim_qzone_content(toned)
-        if toned and not _QZONE_STIFF_TIC_RE.search(toned):
-            text = toned
-        else:
-            if logger is not None:
-                logger.info(f"[qzone] stiff-tic rewrite ineffective, drop post: {text}")
-            if report is not None:
-                report.fail(
-                    "stiff_tic_rewrite_failed",
-                    "style_review",
-                    "草稿的模板腔改写未通过",
-                    "草稿使用了过度工整或器官拟人的模板句式，自动改写后仍未消除。",
-                    suggestion="重新生成并更换主题、场景和句式。",
-                )
-            return ""
+        text = rewritten
     if report is not None:
-        report.add_step(f"{attempt_key}_style", "文风与生成痕迹检查", "ok", "正文没有残留 OOC、营业感或模板腔问题。")
+        report.add_step(
+            f"{attempt_key}_style",
+            "文风与生成痕迹检查",
+            "ok",
+            "已完成至多一次模型文风处理；正文仍须通过后续证据、人设与注入安全复核。",
+        )
     return text
 
 
@@ -1535,6 +1454,7 @@ async def _build_qzone_post_with_optional_image(
     attempt_key: str = "draft",
     attempt_label: str = "候选草稿",
     reviewer_budget: QzoneReviewerBudget | None = None,
+    style_rewrite_budget: QzoneStyleRewriteBudget | None = None,
 ) -> str:
     if report is not None:
         report.last_review = {}
@@ -1568,6 +1488,7 @@ async def _build_qzone_post_with_optional_image(
         logger=logger,
         report=report,
         attempt_key=attempt_key,
+        style_rewrite_budget=style_rewrite_budget,
     )
     if not text:
         return ""
@@ -2102,6 +2023,7 @@ async def _repair_qzone_candidate(
     rejected_attempt_key: str,
     attempt_offset: int = 1,
     reviewer_budget: QzoneReviewerBudget | None = None,
+    style_rewrite_budget: QzoneStyleRewriteBudget | None = None,
 ) -> str:
     reviewer_budget = reviewer_budget or QzoneReviewerBudget()
     candidate = _trim_qzone_content(rejected_content, max_chars=120)
@@ -2180,6 +2102,7 @@ async def _repair_qzone_candidate(
             attempt_key=attempt_key,
             attempt_label=f"自动修复候选 {repair_number}",
             reviewer_budget=reviewer_budget,
+            style_rewrite_budget=style_rewrite_budget,
         )
         if result:
             return result
@@ -2289,6 +2212,7 @@ async def generate_ai_diary(
     source_context = "\n\n".join(part for part in (chat_context, emotion_hint) if part)
     candidates_used = 0
     reviewer_budget = QzoneReviewerBudget()
+    style_rewrite_budget = QzoneStyleRewriteBudget()
 
     if chat_context:
         rich_prompt = (
@@ -2338,6 +2262,7 @@ async def generate_ai_diary(
                 attempt_key="rich",
                 attempt_label="Rich 候选正文",
                 reviewer_budget=reviewer_budget,
+                style_rewrite_budget=style_rewrite_budget,
             )
         elif raw_rich_result:
             logger.info("[qzone] rich generation returned non-JSON output, reject draft")
@@ -2426,6 +2351,7 @@ async def generate_ai_diary(
             attempt_key="basic",
             attempt_label="Basic 候选正文",
             reviewer_budget=reviewer_budget,
+            style_rewrite_budget=style_rewrite_budget,
         )
     else:
         if raw_result:
@@ -2458,6 +2384,7 @@ async def generate_ai_diary(
         agent_max_steps=agent_max_steps,
         rejected_attempt_key="basic",
         reviewer_budget=reviewer_budget,
+        style_rewrite_budget=style_rewrite_budget,
     )
 
 
@@ -2590,6 +2517,7 @@ async def maybe_generate_proactive_qzone_post(
         f"近期群情绪记忆：\n{emotion_hint or '- 暂无'}\n最近聊天：\n{chat_context}"
     )
     reviewer_budget = QzoneReviewerBudget()
+    style_rewrite_budget = QzoneStyleRewriteBudget()
     payload = _extract_json_object(result)
     if payload:
         if str(payload.get("action", "") or "").strip().lower() != "post":
@@ -2611,6 +2539,7 @@ async def maybe_generate_proactive_qzone_post(
             attempt_key="proactive",
             attempt_label="主动说说候选",
             reviewer_budget=reviewer_budget,
+            style_rewrite_budget=style_rewrite_budget,
         )
         if post:
             return post
@@ -2634,6 +2563,7 @@ async def maybe_generate_proactive_qzone_post(
             agent_max_steps=agent_max_steps,
             rejected_attempt_key="proactive",
             reviewer_budget=reviewer_budget,
+            style_rewrite_budget=style_rewrite_budget,
         )
     if result.startswith("POST|"):
         text = _trim_qzone_content(result.split("|", 1)[1])
@@ -2654,6 +2584,7 @@ async def maybe_generate_proactive_qzone_post(
             attempt_key="proactive_legacy",
             attempt_label="主动说说兼容候选",
             reviewer_budget=reviewer_budget,
+            style_rewrite_budget=style_rewrite_budget,
         )
         if post:
             return post
@@ -2677,5 +2608,6 @@ async def maybe_generate_proactive_qzone_post(
             agent_max_steps=agent_max_steps,
             rejected_attempt_key="proactive_legacy",
             reviewer_budget=reviewer_budget,
+            style_rewrite_budget=style_rewrite_budget,
         )
     return ""

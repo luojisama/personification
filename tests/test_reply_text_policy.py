@@ -48,15 +48,15 @@ def test_normalize_visible_reply_text_drops_reasoning_trace_and_orphan_bracket()
     assert reply_text_policy.normalize_visible_reply_text("[") == ""
 
 
-def test_normalize_visible_reply_text_reduces_formulaic_opening_tics() -> None:
-    assert reply_text_policy.normalize_visible_reply_text("等下，这什么表情") == "这什么表情"
-    assert reply_text_policy.normalize_visible_reply_text("这也太危险了吧，你到底在玩什么") == "挺危险的，你到底在玩什么"
-    assert reply_text_policy.normalize_visible_reply_text("这也抽得太狠了吧") == "抽得挺狠"
-    assert reply_text_policy.normalize_visible_reply_text("被雷炸了，这也太刺激了吧") == "被雷炸了，挺刺激的"
+def test_normalize_visible_reply_text_preserves_formulaic_style_as_semantic_input() -> None:
+    assert reply_text_policy.normalize_visible_reply_text("不是A，是B。") == "不是A，是B。"
+    assert reply_text_policy.normalize_visible_reply_text("等下，我说的是明天，不是今天。") == "等下，我说的是明天，不是今天。"
+    assert reply_text_policy.normalize_visible_reply_text("我先围观一下，别急着吵。") == "我先围观一下，别急着吵。"
+    assert reply_text_policy.normalize_visible_reply_text("这也太危险了吧，你到底在玩什么") == "这也太危险了吧，你到底在玩什么"
+    assert reply_text_policy.normalize_visible_reply_text("这也抽得太狠了吧") == "这也抽得太狠了吧"
+    assert reply_text_policy.normalize_visible_reply_text("被雷炸了，这也太刺激了吧") == "被雷炸了，这也太刺激了吧"
     assert reply_text_policy.normalize_visible_reply_text("这也行") == "这也行"
-    assert reply_text_policy.normalize_visible_reply_text("我先看看情况，等会再说") == ""
-    assert reply_text_policy.normalize_visible_reply_text("先看看情况等会再说吧") == ""
-    assert reply_text_policy.normalize_visible_reply_text("我先围观一下，别急着吵") == "别急着吵"
+    assert reply_text_policy.normalize_visible_reply_text("我先看看情况，等会再说") == "我先看看情况，等会再说"
 
 
 def test_normalize_visible_reply_text_preserves_punctuation_only_micro_replies() -> None:

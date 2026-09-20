@@ -1004,7 +1004,7 @@ def test_high_ambiguity_fallback_does_not_ask_context_on_undirected_turn() -> No
     assert decision.reason == "uncertain_validation_rejected"
 
 
-def test_group_context_request_question_is_rejected_by_shared_gate() -> None:
+def test_group_context_request_question_preserves_semantic_approval() -> None:
     replies = iter(
         (
             '{"action":"request_context","text":"你能把原句发来吗？","reason":"补语境"}',
@@ -1026,8 +1026,9 @@ def test_group_context_request_question_is_rejected_by_shared_gate() -> None:
         )
     )
 
-    assert decision.action == "silence"
-    assert decision.reason == "uncertain_validation_rejected"
+    assert decision.action == "request_context"
+    assert decision.text == "你能把原句发来吗？"
+    assert decision.reason == "uncertain_context_request"
 
 
 def test_uncertain_visible_reply_rejects_resolution_validation_action_mismatch() -> None:
@@ -1138,8 +1139,12 @@ def test_required_reply_recovery_preserves_successful_actions() -> None:
 def test_review_prompt_rejects_empty_affirmation_and_status_announcement() -> None:
     async def _fake_call(messages):  # noqa: ANN001
         content = messages[0]["content"]
-        assert "附和感叹/转述聊天" in content
-        assert "等会再说" in content
+        assert "判断是否机械重复" in content
+        assert "不按字符重合数判定复读" in content
+        assert "短反应本身不是错误" in content
+        assert "不要仅因问号" in content
+        assert "不要改成问题句" not in content
+        assert "必须 rewrite 的 AI 味回复模式" not in content
         assert "empty_evidence_self_report" in content
         return '{"action":"rewrite","text":"那就先卡这个点聊，别绕远。","reason":"empty_affirmation"}'
 
@@ -1233,6 +1238,9 @@ def test_review_consumes_safe_visual_evidence_for_social_attribution() -> None:
         user_prompt = messages[1]["content"]
         assert "现实社交归因是否有" in system_prompt
         assert "unsupported_visual_social_attribution" in system_prompt
+        assert "不得仅凭图片或用户声称" in system_prompt
+        assert "这仍不证明现实经历" in system_prompt
+        assert "第一人称自然认领" not in system_prompt
         assert "画中主体只是媒体内容，不是聊天参与者" in user_prompt
         assert "owner_user_id=user_a" in user_prompt
         assert "动漫插画中有多人看向画面中央" in user_prompt

@@ -98,6 +98,7 @@ def _run_child(tmp_path: Path, server: ThreadingHTTPServer, *, short_timeout: bo
         if name.startswith("PERSONIFICATION_"):
             env.pop(name)
     env.update({
+        "PYTHONIOENCODING": "utf-8",
         "QUALITY_WIRE_ROOT": str(tmp_path),
         "QUALITY_WIRE_PORT": str(server.server_address[1]),
         "PYTHONPATH": str(repo_root),
@@ -109,7 +110,7 @@ def _run_child(tmp_path: Path, server: ThreadingHTTPServer, *, short_timeout: bo
     })
     completed = subprocess.run(
         [sys.executable, "-c", _CHILD], cwd=tmp_path, env=env,
-        capture_output=True, text=True, timeout=45, check=False,
+        capture_output=True, text=True, encoding="utf-8", timeout=45, check=False,
     )
     assert completed.returncode == 0, completed.stderr
     lines = [line for line in completed.stdout.splitlines() if line.strip()]

@@ -20,7 +20,6 @@ from .dialogue_context import DialogueContextSnapshot
 from .reply_text_policy import (
     looks_like_formulaic_reply_tic,
     looks_like_markdown_reply,
-    looks_like_question_reply,
     looks_like_visible_reasoning_trace,
     normalize_visible_reply_text,
 )
@@ -535,7 +534,7 @@ async def resolve_uncertain_visible_reply(
                     + (
                         "只有已经确认当前用户明确发问时，私聊才可以用一个自然短问句索取条件。"
                         if is_private
-                        else "群聊若必须索取条件，用一句陈述式或祈使式请求，不要连续追问。"
+                        else "群聊若确实需要补充条件，可以自然地问一个具体问题；不要机械反问、连续追问或索取已知信息。"
                     )
                     + "text 只在 request_context 时填写最终可见短句；accept 使用原候选并把 text 留空。"
                 ),
@@ -626,11 +625,6 @@ async def resolve_uncertain_visible_reply(
     )
     if evidence_unavailable:
         allowed = verdict == "ACTIONABLE_CONTEXT_REQUEST" and reply_required
-    if verdict == "ACTIONABLE_CONTEXT_REQUEST" and not is_private:
-        allowed = allowed and not looks_like_question_reply(
-            proposed,
-            allow_exclamatory_rhetorical=False,
-        )
     if not allowed:
         return ResponseReviewDecision(
             action="silence",
@@ -1168,7 +1162,7 @@ async def _review_response_text_impl(
                 "如果这轮更适合沉默，输出 {\"action\":\"no_reply\",\"text\":\"\",\"reason\":\"...\"}。"
                 "\n分段契约：若最终回复较长（>35字或包含多个完整子句），请在 segments 数组中顺便输出按真人聊天节奏切好的 1~3 条短气泡（每条 1~2 句话，保护《书名号！》和引号完整），避免大长段压迫感；若本身就是一句简短回复，segments 包含该整句即可。"
                 f"{'当前是强交互消息；若候选不合适，优先给出已核实的 rewrite。' if must_reply else ''}"
-                f"{'当前是群聊，改写时不要用追问、澄清问句或征询式结尾索要信息；信息不足就给保守短反应或 no_reply。' if not is_private else ''}"
+                "缺少推进当前请求所必需的信息时，可以问一个具体问题；自然反问和合理解释可以保留。不要机械追加‘你觉得呢’、无意义回声或旁观式总结。不要仅因问号、口头词或回复长度而否决。"
                 f"{'当前又是明确点名后的互动；如果原话是在调侃、甩锅或轻挑衅，可以保留一句不索要信息的反问式回击，再给出自己的立场。' if is_direct_mention and not is_private else ''}"
                 "普通短句 banter、顺着上一句接话、轻量吐槽，优先 accept 或 rewrite，不要轻易 no_reply。"
                 "只输出 JSON，不要解释。"
@@ -1193,20 +1187,23 @@ async def _review_response_text_impl(
                 f"{provenance_review_instruction}"
                 f"{duplicate_review_instruction}"
                 f"{micro_shape_instruction}"
-                "\n## 必须 rewrite 的 AI 味回复模式（重点检查）\n1. 「回声评论」：把用户说的话原样重复后加“太真实了/太直球了/太 X 了吧/真的假的”等感叹——必须改写为不重复原话的短句接话。\n2. 候选回复中超过 3 个连续字与用户原话重叠，且没有新增信息或立场——必须 rewrite。\n3. 候选只是在用模板感叹词复述用户语义，没有形成具体社交动作——必须 rewrite；但 reply_shape=micro/fragment 时，不得把有意的纯符号、emoji、颜文字或极短反应仅因没有展开新事实而判错。\n4. 「安抚式客服腔」：以“别这么说/已经很够用了/不要这样想/你很棒的”开头——改写为自然接话。\n5. 「旁白式观察」：类似“真去做了啊/真的行动了/居然真的 XX 了”的旁白——改写为参与式短句。\n6. 「梗分析腔」：用“像是把 X 玩成 Y 了/意思就是/可以理解成”解释梗结构——改写为直接接梗。\n7. 「营业感叹腔」：用“(也)太……了吧/……爆了/绝了/谁懂啊/笑死/绷不住了/yyds”这类口号式感叹收尾或起势——改写成平铺直叙的接话，去掉感叹营业腔和网络流行语，不喊口号。\n8. 「固定起手口癖」：用“等下，/等一下，”开头，或反复用“这也/这也太/你这也/这听着也”评价用户、图片、表情、剧情——必须换一种自然说法，不要保留这个开头或句式。\n改写原则：去掉对用户发言的复述和分析，按 output_mode 的长度要求输出；改写后不得引入新的回声模式、营业感叹腔或固定起手口癖。"
-                "\n9. 出现 markdown 格式、标题、项目符号列表、编号列表、代码块、链接列表时，必须改成纯文本短句。"
-                "\n10. 出现 Step 1/Step 2、步骤 1/步骤 2 这类内部推理、审查清单或草稿过程时，必须 rewrite，只保留最终要对用户说的一句。"
-                "\n11. 「自我行动宣告」：类似“我先潜水/围观/看看情况/先看看情况/等会再说/蹲一下/路过”的句子是在宣告 bot 自己的观察姿态，"
-                "不是在参与当前话题；如果不是直呼 bot 的消息，优先 no_reply，必须回应时改成一句具体的参与式反应。"
-                "\n12. 「附和感叹/转述聊天」：候选只是套用“确实/太真实了/真的假的/有点东西”这类模板反应，"
-                "或只是把当前原话、最近上下文换一种说法复述——必须 rewrite；micro/fragment 的自然短反应不因长度本身或没有展开话题而命中。"
-                "\n13. 「空证据状态播报」：候选如果没有回答、没有具体态度、没有可执行下一步，"
+                "\n## 表达审阅\n"
+                "根据当前意图、人格和最近对话判断是否机械重复、空泛安抚、解释梗或无意义旁观；"
+                "仅在它们确实妨碍交流时改写一次。口头词、网络用语、反问、短反应本身不是错误，"
+                "引用用户的话用于澄清、纠正或回答时也可以保留；不按字符重合数判定复读。"
+                "认真提问应得到足够解释，情绪交流先贴合感受，不强塞建议；普通近况分享不自动替用户安排活动。"
+                "角色性格可以鲜明，但不得凭人格虚构现实参与、已完成执行或将采取无法兑现的外部行动。"
+                "普通聊天中的玩笑必须能被上下文识别为玩笑；没有实际执行证据时不能承诺加入游戏、到场或代办。"
+                "格式仅清理呈现符号，保留有效内容；不得展示内部推理、审查清单或草稿过程。"
+                "\n证据约束：候选如果没有回答、没有具体态度、没有可执行下一步，"
                 "只是换一种口吻说明自己无法确认、没有理解、来源不明或查证没有结果，返回 empty_evidence_self_report，"
                 "非强交互必须 no_reply；强交互只能改成索取一个明确且对方能提供的必要条件。"
                 "没有证据却猜测出处、群内约定、关系或事实来源时也必须 rewrite/no_reply，不能 accept。"
-                "\n14. 「自身角色身份否认/出戏」：当用户发送与当前人设名字/头像原型相关的图片、插画、二创或追问‘这是你吗/是你吧’时，"
-                "如果候选回复出戏否认说‘不是我/那只是动漫角色/那只是虚构人物’，必须 rewrite 改写为符合角色人设性格的第一人称自然认领（如害羞承认、傲娇回应或吐槽），绝对不得出戏机械否认。"
-                f"{'改写时以讨论、闲聊为主基调：给一个具体看法、接住一个点或顺着话题推进半步，不要改成问题句。' if not is_private else '改写时以讨论、闲聊为主基调：给一个具体看法、接住一个点，或抛一个贴着当前话题的小问题。'}"
+                "\n角色表达：可以用角色口吻回应角色题材或二创，不必机械解释虚构设定。"
+                "但不得仅凭图片或用户声称‘这是你’确认图中主体身份、现实到场或个人经历；"
+                "只有可信配置或协议来源明确绑定的角色形象才可按该绑定认领角色形象，这仍不证明现实经历。"
+                "缺少身份绑定时可作非事实性的角色反应，不能为了入戏补造身份或经历。"
+                "改写应回应当前意图；需要澄清时可以问一个具体问题，不必为了推进话题额外追问。"
                 "\n如果语义情绪帧里 persona_info_added=tone_only 且 persona_echoed_user_phrase=true，也必须 rewrite。"
             ),
         },
@@ -1232,7 +1229,7 @@ async def _review_response_text_impl(
                 f"跨消息指代（结构化）：{json.dumps(followup_hint, ensure_ascii=False)}\n"
                 f"媒体角色清单（仅当前/selected 可作视觉主证据；owner/message 为本轮匿名标签）：{json.dumps(manifest_roles, ensure_ascii=False)}\n"
                 f"候选回复：{candidate}\n"
-                "注意：先对照上方「必须 rewrite 的 AI 味回复模式」逐项检查候选回复，命中任意一条即输出 rewrite。"
+                "注意：按上方《表达审阅》和证据约束整体判断；不要把表层口头词或问号当成必须改写的依据。"
             ),
         },
     ]
@@ -1707,7 +1704,7 @@ async def rewrite_agent_reply_ooc(
                 f"把它用你自己的口吻重说一次。{length_guidance}"
                 f"{evidence_instruction}"
                 "去掉【搜索/查询/结果/链接/来源】类表述和 URL，也去掉“我先看看情况/等会再说/先围观/蹲一下”这类观望或延后宣告。"
-                f"{'当前是群聊，不要用追问、澄清问句或征询式结尾索要信息；改成参与讨论、闲聊推进、保守短反应，或没有可说的新东西时输出 [SILENCE]。' if avoid_questions else '改成参与讨论、闲聊推进或一个具体追问；没有可说的新东西时输出 [SILENCE]。'}"
+                "只有缺少完成当前请求所必需的信息时才追问一个具体问题；自然反问可以保留，不要用无意义的征询结尾拖长对话。没有可说的新东西时输出 [SILENCE]。"
                 f"{'如果是在被点名调侃后的反击/自辩，可以保留一句不索要信息的反问式回击，并继续给出自己的立场。' if allow_rhetorical_banter else ''}"
                 "只输出纯文本，不要 markdown、标题、项目符号列表、编号列表，也不要解释改写过程。"
             ),

@@ -53,9 +53,12 @@ from ...core.media_evidence import (
 
 
 _CONTROL_REPLIES = frozenset({"[NO_REPLY]", "<NO_REPLY>", "[SILENCE]", "<SILENCE>"})
-_REVISION_FLAGS = frozenset(
-    {"formulaic_tic", "style_risk", "group_visible_question", "evidence_unavailable"}
-)
+# Surface-level style signals are diagnostic only.  Conversation wording and
+# whether a question is useful belong to the shared final dialogue review; this
+# layer must not consume another LLM rewrite merely for a tic, OOC-looking
+# phrase, or question mark.  Empty evidence is different: its constrained
+# recovery remains an explicit safety contract.
+_REVISION_FLAGS = frozenset({"evidence_unavailable"})
 _VIDEO_RECOVERY_TIMEOUT_SECONDS = 3.0
 _EVIDENCE_KEYS_BY_LABEL = {label: key for key, label in _VISION_EVIDENCE_FIELDS}
 
@@ -827,14 +830,10 @@ async def _finalize_evidence_unavailable_reply(
     if decision.action == "request_context" and decision.text:
         candidate = normalize_visible_reply_text(strip_response_control_markers(decision.text))
         candidate_visibility = assess_visible_text(candidate)
-        invalid_group_question = bool(
-            group_context
-            and looks_like_question_reply(
-                candidate,
-                allow_exclamatory_rhetorical=False,
-            )
-        )
-        if candidate and candidate_visibility.allowed and not invalid_group_question:
+        # ``resolve_uncertain_visible_reply`` already obtained an explicit,
+        # independently validated ACTIONABLE_CONTEXT_REQUEST verdict.  A
+        # question surface cannot override that semantic approval.
+        if candidate and candidate_visibility.allowed:
             final_text = candidate
             action = "context_request"
     elapsed_ms = int((time.monotonic() - started_at) * 1000)
@@ -972,9 +971,6 @@ async def finalize_agent_reply_quality(
         if is_agent_reply_ooc(final_text):
             final_text = envelope.natural_fallback
             constraint_flags.append("style_fallback")
-        if group_context and looks_like_question_reply(final_text):
-            final_text = envelope.natural_fallback
-            constraint_flags.append("question_fallback")
         visibility = assess_visible_text(final_text)
         if not visibility.allowed:
             final_text = envelope.natural_fallback
@@ -1285,25 +1281,10 @@ async def finalize_agent_reply_quality(
         candidate = normalize_visible_reply_text(strip_response_control_markers(rewritten)) if rewritten else ""
         candidate_visibility = assess_visible_text(candidate) if candidate else None
         if candidate and candidate_visibility is not None and candidate_visibility.allowed:
-            if group_context and looks_like_question_reply(
-                candidate,
-                allow_exclamatory_rhetorical=allow_rhetorical_banter,
-            ):
-                final_text = "[SILENCE]"
-                action = "silenced"
-            else:
-                final_text = candidate
-                action = "rewritten"
+            final_text = candidate
+            action = "rewritten"
 
     if not final_text:
-        final_text = "[SILENCE]"
-        action = "silenced"
-    elif (
-        group_context
-        and "group_visible_question" in flags
-        and action != "rewritten"
-        and not (media_completion_required and media_delivery == "complete")
-    ):
         final_text = "[SILENCE]"
         action = "silenced"
     elif (
@@ -1311,9 +1292,6 @@ async def finalize_agent_reply_quality(
         and action != "rewritten"
         and not (media_completion_required and media_delivery == "complete")
     ):
-        final_text = "[SILENCE]"
-        action = "silenced"
-    elif flags and is_agent_reply_ooc(final_text):
         final_text = "[SILENCE]"
         action = "silenced"
     elif flags and action != "rewritten":
@@ -1366,7 +1344,7 @@ async def finalize_agent_reply_quality(
                 f"chars={len(raw_text)}->{len(final_text)}"
             ),
             hint=(
-                "命中输出风格风险后已做一次修订或静默；这只处理可见文本风格，不替代对话语义判断"
+                "输出表层风格信号仅供诊断；是否改写或静默由后续对话语义审阅决定"
                 if flags
                 else ""
             ),
