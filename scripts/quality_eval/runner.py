@@ -110,7 +110,8 @@ class BudgetedCaller:
                 reset_llm_context(wire)
                 reset_llm_context(token)
         except (Exception, asyncio.CancelledError) as exc:
-            self.failure_types.append(type(exc).__name__)
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            self.failure_types.append(f"HTTP_{status_code}" if isinstance(status_code, int) else type(exc).__name__)
             raise
         raw_usage = getattr(response, "usage", None) or getattr(response, "token_usage", None)
         if raw_usage is not None:
@@ -360,7 +361,7 @@ async def run_agent_case(case: dict[str, Any], config: dict[str, Any]) -> EvalRe
             usage={"wire_calls": budget.snapshot()["reserved_calls"] - initial_calls, "responses": caller.usages},
             elapsed_ms=round((time.monotonic() - started) * 1000),
             execution_mode="simulated" if config.get("test_double") else "real",
-            error="fixture_not_supported" if blocked else f"{code}:{type(exc).__name__}", turns=turns)
+            error="fixture_not_supported" if blocked else (caller.failure_types[-1] if caller.failure_types else f"{code}:{type(exc).__name__}"), turns=turns)
     finally:
         reset_llm_context(wire_token)
         reset_llm_context(llm_token)

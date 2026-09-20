@@ -47,6 +47,7 @@ async def run(args):
     os.environ["XDG_CACHE_HOME"] = str(artifact / "cache")
     budget = CallBudget(budget_path)
     initial = budget.snapshot()["reserved_calls"]
+    consecutive_failures = 0
     for case in cases:
         if case["id"] in done:
             continue
@@ -65,6 +66,9 @@ async def run(args):
             stream.write(json.dumps(row, ensure_ascii=False) + "\n")
             stream.flush()
         print(json.dumps({"case_id": case["id"], "status": result.status, "budget": budget.snapshot()}), flush=True)
+        consecutive_failures = consecutive_failures + 1 if result.status == "failed" else 0
+        if consecutive_failures >= 3:
+            break
         if result.status == "budget_exhausted" or (result.status in {"failed", "blocked"} and not args.continue_after_failure):
             break
 
