@@ -65,6 +65,9 @@ def prepare_pairs(baseline_jsonl: str | Path, candidate_jsonl: str | Path) -> di
         if baseline_case is None or candidate_case is None or baseline_case != candidate_case:
             rejected.append({"case_id": case_id, "status": "case_content_mismatch"})
             continue
+        if left.get("behavior_config") != right.get("behavior_config"):
+            rejected.append({"case_id": case_id, "status": "behavior_config_mismatch"})
+            continue
         for key in ("corpus_sha256", "coverage"):
             if not str(left.get(key, "") or "").strip() or not str(right.get(key, "") or "").strip() or left.get(key) != right.get(key):
                 rejected.append({"case_id": case_id, "status": f"{key}_mismatch"})

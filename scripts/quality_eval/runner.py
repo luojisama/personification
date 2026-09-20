@@ -23,6 +23,16 @@ from typing import Any, Awaitable, Callable
 
 
 DEFAULT_LIMIT = 1500
+BEHAVIOR_KEYS = (
+    "personification_semantic_frame_timeout", "personification_response_timeout",
+    "personification_turn_planner_enabled", "personification_turn_planner_shadow_enabled",
+    "personification_agent_enabled", "personification_agent_max_steps",
+)
+
+
+def load_behavior_snapshot(config_path: str) -> dict[str, Any]:
+    payload = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    return {key: payload[key] for key in BEHAVIOR_KEYS if key in payload}
 
 
 class BudgetExhausted(RuntimeError):
@@ -267,7 +277,8 @@ async def run_agent_case(case: dict[str, Any], config: dict[str, Any]) -> EvalRe
     try:
         if config.get("runtime_path") == "pipeline":
             from scripts.quality_eval.pipeline_adapter import run_full_path_case
-            payload = await run_full_path_case(case, caller=caller, isolated_dir=str(isolated_dir))
+            behavior = load_behavior_snapshot(str(config["config_path"])) if config.get("behavior_source") == "server" else {}
+            payload = await run_full_path_case(case, caller=caller, isolated_dir=str(isolated_dir), behavior_config=behavior)
             status = str(payload.get("status", "failed"))
             if caller.failure_types:
                 status = "failed"
@@ -342,13 +353,14 @@ async def run_agent_case(case: dict[str, Any], config: dict[str, Any]) -> EvalRe
             execution_mode="simulated" if config.get("test_double") else "real", turns=turns)
     except Exception as exc:
         exhausted = isinstance(exc, BudgetExhausted) or caller.exhausted
+        blocked = isinstance(exc, ValueError) and str(exc).startswith(("blocked_fixture:", "unsupported_fixture:"))
         code = "budget_exhausted" if exhausted else "quality_eval_failed"
         reply_turn_trace.finish_trace(trace_id=trace_id, outcome="evaluation_failed", diagnosis_code=code)
-        return EvalResult(status="budget_exhausted" if exhausted else "failed", trace=trace_id,
+        return EvalResult(status="budget_exhausted" if exhausted else "blocked" if blocked else "failed", trace=trace_id,
             usage={"wire_calls": budget.snapshot()["reserved_calls"] - initial_calls, "responses": caller.usages},
             elapsed_ms=round((time.monotonic() - started) * 1000),
             execution_mode="simulated" if config.get("test_double") else "real",
-            error=f"{code}:{type(exc).__name__}", turns=turns)
+            error="fixture_not_supported" if blocked else f"{code}:{type(exc).__name__}", turns=turns)
     finally:
         reset_llm_context(wire_token)
         reset_llm_context(llm_token)

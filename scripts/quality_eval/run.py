@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from runner import CallBudget, invoke_case
+from runner import CallBudget, invoke_case, load_behavior_snapshot
 
 
 async def run(args):
@@ -29,7 +29,9 @@ async def run(args):
     repo = Path(__file__).resolve().parents[2]
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     manifest = {"revision": revision, "corpus_sha256": hashlib.sha256(Path(args.corpus).read_bytes()).hexdigest(),
-                "runtime_path": args.runtime_path, "model": "gemini-3.8-flash-high"}
+                "runtime_path": args.runtime_path, "model": "gemini-3.8-flash-high",
+                "behavior_source": args.behavior_source,
+                "behavior_config": load_behavior_snapshot(args.config_path) if args.behavior_source == "server" else {}}
     manifest_path = artifact / "manifest.json"
     if manifest_path.exists() and json.loads(manifest_path.read_text(encoding="utf-8")) != manifest:
         raise ValueError("Artifact directory belongs to a different revision or corpus; use a new directory")
@@ -53,15 +55,17 @@ async def run(args):
         result = await invoke_case(case, {
             "execution_mode": "real", "config_path": str(config_path),
             "runtime_path": args.runtime_path,
+            "behavior_source": args.behavior_source,
             "budget_db": str(budget_path), "isolated_db_path": str(artifact / case["id"]),
         })
         row = {"case_id": case["id"], "split": case["split"], "surface": case["surface"],
-               "revision": revision, "corpus_sha256": manifest["corpus_sha256"], "case": case, **asdict(result)}
+               "revision": revision, "corpus_sha256": manifest["corpus_sha256"],
+               "behavior_config": manifest["behavior_config"], "case": case, **asdict(result)}
         with output.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(row, ensure_ascii=False) + "\n")
             stream.flush()
         print(json.dumps({"case_id": case["id"], "status": result.status, "budget": budget.snapshot()}), flush=True)
-        if result.status in {"budget_exhausted", "failed", "blocked"}:
+        if result.status == "budget_exhausted" or (result.status in {"failed", "blocked"} and not args.continue_after_failure):
             break
 
 
@@ -75,4 +79,6 @@ if __name__ == "__main__":
     parser.add_argument("--split", choices=["dev", "holdout"], default="dev")
     parser.add_argument("--stage-calls", type=int, default=50)
     parser.add_argument("--runtime-path", choices=["pipeline", "agent_fragment"], default="pipeline")
+    parser.add_argument("--behavior-source", choices=["defaults", "server"], default="server")
+    parser.add_argument("--continue-after-failure", action="store_true", help="Record a failed case and continue to other cases; never retry that case")
     asyncio.run(run(parser.parse_args()))

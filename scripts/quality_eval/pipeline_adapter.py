@@ -104,7 +104,7 @@ async def _caller_text(caller: Any, messages: list[dict[str, Any]]) -> str:
     return str(getattr(response, "content", "") or "")
 
 
-async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir: str) -> dict[str, Any]:
+async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir: str, behavior_config: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run one capture-only normal turn, optionally through real YAML routing.
 
     ``caller`` is injected by the owner and is expected to already enforce the
@@ -118,7 +118,7 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
     if not events:
         raise ValueError("unsupported_fixture:no_events")
     seed = case.get("seed") if isinstance(case.get("seed"), dict) else {}
-    if case.get("seed_memory") or seed.get("memory") or seed.get("seed_memory") or case.get("coverage_requires"):
+    if seed.get("memory") or seed.get("seed_memory") or case.get("coverage_requires"):
         raise ValueError("blocked_fixture:memory_or_coverage_requires")
     if any(str(item.get("kind", "")) in {"tool_result", "send_receipt", "memory_update"} for item in events):
         raise ValueError("unsupported_fixture:external_or_state_event")
@@ -149,7 +149,9 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
     # The injected BudgetedCaller counts chat_with_tools only.  Keep discovery
     # and provider-native search off so no delegated/provider path can bypass
     # that single accounting boundary during an evaluation run.
-    config = config_mod.Config(personification_data_dir=str(root), personification_response_timeout=180, personification_qq_expression_enabled=False, personification_tts_enabled=False, personification_schedule_global=False, personification_tool_disclosure_mode="off", personification_model_builtin_search_enabled=False, personification_builtin_search=False)
+    values = dict(behavior_config or {})
+    values.update(personification_data_dir=str(root), personification_qq_expression_enabled=False, personification_tts_enabled=False, personification_schedule_global=False, personification_tool_disclosure_mode="off", personification_model_builtin_search_enabled=False, personification_builtin_search=False)
+    config = config_mod.Config(**values)
     session_data: dict[str, list[dict[str, Any]]] = {}
     confirmed_history: list[dict[str, Any]] = []
     group_window = list((case.get("seed") or {}).get("group_window", [])) if isinstance(case.get("seed"), dict) else []
@@ -160,6 +162,12 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
     logger = _Log()
     data_store = importlib.import_module("plugin.personification.core.data_store")
     data_store.init_data_store(config, logger=logger)
+    memory_store = None
+    if case.get("seed_memory"):
+        from scripts.quality_eval.memory_fixtures import build_memory_store
+        memory_store = build_memory_store(case, {"isolated_data_dir": str(root)}, logger)
+        if memory_store.quality_fixture_unsupported:
+            raise ValueError("blocked_fixture:memory_seed_incomplete")
 
     def append(session_id: str, role: str, content: str, **meta: Any) -> None:
         record = {"role": role, "content": content, **meta}
@@ -198,7 +206,7 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
         save_plugin_runtime_config=None, user_blacklist={}, record_group_msg=lambda *_a, **_k: None,
         split_text_into_segments=lambda text: [text], message_segment_cls=_Segment, get_sticker_files=lambda: [],
         get_http_client=lambda: _NoNetworkClient(), get_whitelisted_groups=lambda: [], agent_tool_caller=caller,
-        lite_tool_caller=caller, tool_registry=registry_mod.ToolRegistry())
+        lite_tool_caller=caller, tool_registry=registry_mod.ToolRegistry(), memory_store=memory_store)
     type_deps = processor.TypeDeps(poke_event_cls=type("Poke", (), {}), message_event_cls=_MessageEvent,
         group_message_event_cls=_GroupEvent, private_message_event_cls=_PrivateEvent, message_cls=list)
     state: dict[str, Any] = {}
