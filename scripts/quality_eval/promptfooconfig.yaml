@@ -1,0 +1,10 @@
+# External development tooling only; no production dependency is added.
+providers:
+  - id: file://provider.py
+    config:
+      workers: 1
+      execution_mode: simulated
+      call_limit: 1500
+      # VPS invocation supplies config_path; it is intentionally absent here.
+prompts:
+  - '{{case_json}}'

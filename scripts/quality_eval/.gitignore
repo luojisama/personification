@@ -1,0 +1,4 @@
+node_modules/
+.promptfoo/
+*.sqlite*
+results/

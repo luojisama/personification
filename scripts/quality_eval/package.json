@@ -1,0 +1,12 @@
+{
+  "name": "personification-quality-evaluation",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Development-only evaluation tooling; never loaded by the plugin runtime",
+  "scripts": {
+    "eval": "promptfoo eval --max-concurrency 1"
+  },
+  "devDependencies": {
+    "promptfoo": "0.120.0"
+  }
+}

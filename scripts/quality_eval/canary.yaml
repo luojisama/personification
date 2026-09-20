@@ -1,0 +1,11 @@
+description: Offline Python provider import, async and JSON export check
+providers:
+  - id: file://canary_provider.py
+prompts:
+  - '{{message}}'
+tests:
+  - vars:
+      message: 'offline contract only'
+    assert:
+      - type: equals
+        value: blocked
