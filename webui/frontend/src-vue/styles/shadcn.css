@@ -1,0 +1,20 @@
+/*
+ * Tailwind v4 is deliberately utility-only here: preflight is not imported.
+ * The `pf` prefix prevents registry utilities from colliding with the legacy
+ * management console while Sidebar07 is adopted incrementally.
+ */
+@import "tailwindcss/theme.css" prefix(pf);
+@import "tailwindcss/utilities.css" prefix(pf);
+
+@source "../components/ui/**/*.{vue,ts}";
+@source "../components/AppShell.vue";
+
+@theme inline {
+  --color-background: var(--color-surface);
+  --color-foreground: var(--color-ink);
+  --color-sidebar: var(--color-surface);
+  --color-sidebar-foreground: var(--color-ink);
+  --color-sidebar-accent: var(--selected-bg);
+  --color-sidebar-accent-foreground: var(--selected-ink);
+  --color-sidebar-border: var(--color-line);
+}

@@ -295,6 +295,67 @@ DDL_STATEMENTS = (
         ON token_usage_hourly_ledger(group_id, bucket_hour)
     """,
     """
+    CREATE TABLE IF NOT EXISTS token_price_versions (
+        version_id TEXT PRIMARY KEY,
+        route TEXT NOT NULL,
+        model TEXT NOT NULL DEFAULT '',
+        currency TEXT NOT NULL,
+        input_per_million TEXT,
+        output_per_million TEXT,
+        cache_read_per_million TEXT,
+        cache_create_per_million TEXT,
+        cache_create_5m_per_million TEXT,
+        cache_create_1h_per_million TEXT,
+        effective_from REAL NOT NULL,
+        created_at REAL NOT NULL,
+        CHECK(route != ''),
+        CHECK(currency != '')
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_token_price_version_effective
+        ON token_price_versions(route, model, effective_from, version_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_token_price_lookup
+        ON token_price_versions(route, model, effective_from DESC)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS token_usage_events (
+        event_id TEXT PRIMARY KEY,
+        observed_at REAL NOT NULL,
+        bucket_day TEXT NOT NULL,
+        bucket_hour TEXT NOT NULL,
+        provider TEXT NOT NULL DEFAULT '',
+        route TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        purpose TEXT NOT NULL DEFAULT '',
+        bot_id TEXT NOT NULL DEFAULT '',
+        group_id TEXT NOT NULL DEFAULT '',
+        user_id TEXT NOT NULL DEFAULT '',
+        input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens >= 0),
+        output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens >= 0),
+        cache_read_tokens INTEGER CHECK(cache_read_tokens IS NULL OR cache_read_tokens >= 0),
+        cache_create_tokens INTEGER CHECK(cache_create_tokens IS NULL OR cache_create_tokens >= 0),
+        cache_create_5m_tokens INTEGER CHECK(cache_create_5m_tokens IS NULL OR cache_create_5m_tokens >= 0),
+        cache_create_1h_tokens INTEGER CHECK(cache_create_1h_tokens IS NULL OR cache_create_1h_tokens >= 0),
+        input_includes_cache INTEGER NOT NULL DEFAULT 1 CHECK(input_includes_cache IN (0, 1)),
+        price_version_id TEXT,
+        currency TEXT,
+        cost_decimal TEXT,
+        pricing_complete INTEGER NOT NULL DEFAULT 0 CHECK(pricing_complete IN (0, 1)),
+        FOREIGN KEY(price_version_id) REFERENCES token_price_versions(version_id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_token_usage_events_time
+        ON token_usage_events(observed_at, route, model)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_token_usage_events_scope
+        ON token_usage_events(bot_id, group_id, observed_at)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS group_style_snapshots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         group_id TEXT NOT NULL,

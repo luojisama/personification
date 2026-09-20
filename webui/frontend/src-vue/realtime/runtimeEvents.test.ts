@@ -54,6 +54,11 @@ describe("Runtime Events 管理器", () => {
     expect(fake!.stopCalls).toBe(1);
     expect(manager.client.value).toBeNull();
     expect(manager.state.value).toBe("closed");
+    expect(manager.events.value).toEqual([]);
+    expect(manager.resyncCount.value).toBe(0);
+
+    fake!.options.onEvent(event(2));
+    expect(manager.events.value).toEqual([]);
   });
 
   it("仅保留最新五百条事件且不为未知主题失效查询", () => {

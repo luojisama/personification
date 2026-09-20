@@ -17,7 +17,6 @@ app.use(router);
 
 const runtimeEventsManager = createRuntimeEventsManager(queryClient);
 provideRuntimeEvents(app, runtimeEventsManager);
-runtimeEventsManager.start();
 
 const themeStore = useThemeStore(pinia);
 themeStore.init();

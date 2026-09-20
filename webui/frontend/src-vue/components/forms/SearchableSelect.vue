@@ -8,64 +8,78 @@
     :required="required"
   >
     <template #default="{ controlId, describedBy, invalid }">
-      <div class="searchable-select">
-        <input
-          v-bind="attrs"
-          :id="controlId"
-          ref="inputElement"
-          class="form-control searchable-select-input"
-          type="text"
-          role="combobox"
-          autocomplete="off"
-          :value="searchText"
-          :placeholder="placeholder"
-          :disabled="disabled"
-          :required="required"
-          :aria-autocomplete="'list'"
-          :aria-controls="listboxId"
-          :aria-expanded="isOpen"
-          :aria-activedescendant="activeOptionId"
-          :aria-invalid="invalid ? 'true' : undefined"
-          :aria-describedby="describedBy || undefined"
-          @input="onInput"
-          @focus="openOptions"
-          @blur="closeAfterBlur"
-          @keydown="onKeydown"
-        />
-        <button
-          class="searchable-select-toggle"
-          type="button"
-          :disabled="disabled"
-          :aria-label="`${label}选项`"
-          :aria-expanded="isOpen"
-          :aria-controls="listboxId"
-          @mousedown.prevent
-          @click="toggleOptions"
-        >
-          <span aria-hidden="true">⌄</span>
-        </button>
-        <ul v-if="isOpen" :id="listboxId" class="searchable-select-options" role="listbox" :aria-label="`${label}选项`">
-          <li
-            v-for="(option, index) in filteredOptions"
-            :id="optionId(index)"
-            :key="option.value"
-            :class="{ active: index === activeIndex, selected: option.value === modelValue }"
-            role="option"
-            :aria-selected="option.value === modelValue"
-            @mousedown.prevent
-            @click="chooseOption(option)"
+      <ComboboxRoot
+        v-model="selectedValue"
+        v-model:open="isOpen"
+        class="searchable-select"
+        :disabled="disabled"
+        :required="required"
+        :ignore-filter="true"
+        :reset-model-value-on-clear="false"
+        open-on-click
+        open-on-focus
+      >
+        <ComboboxAnchor class="searchable-select-anchor">
+          <ComboboxInput
+            v-bind="attrs"
+            :id="controlId"
+            ref="inputElement"
+            v-model="searchText"
+            class="form-control searchable-select-input"
+            type="text"
+            :display-value="displayValue"
+            :placeholder="placeholder"
+            :disabled="disabled"
+            :required="required"
+            :aria-invalid="invalid ? 'true' : undefined"
+            :aria-describedby="describedBy || undefined"
+          />
+          <ComboboxTrigger class="searchable-select-toggle" :disabled="disabled" :aria-label="`${label}选项`">
+            <span aria-hidden="true">⌄</span>
+          </ComboboxTrigger>
+        </ComboboxAnchor>
+
+        <ComboboxPortal>
+          <ComboboxContent
+            :id="listboxId"
+            position="popper"
+            class="searchable-select-options"
+            :side-offset="6"
+            :collision-padding="8"
+            :aria-label="`${label}选项`"
           >
-            <span>{{ option.label }}</span>
-            <small v-if="option.description">{{ option.description }}</small>
-          </li>
-          <li v-if="!filteredOptions.length" class="searchable-select-empty" role="status">没有匹配的选项</li>
-        </ul>
-      </div>
+            <ComboboxViewport class="searchable-select-viewport">
+              <ComboboxItem
+                v-for="option in filteredOptions"
+                :key="option.value"
+                class="searchable-select-option"
+                :value="option.value"
+                :disabled="option.disabled"
+              >
+                <span>{{ option.label }}</span>
+                <small v-if="option.description">{{ option.description }}</small>
+              </ComboboxItem>
+              <ComboboxEmpty class="searchable-select-empty">没有匹配的选项</ComboboxEmpty>
+            </ComboboxViewport>
+          </ComboboxContent>
+        </ComboboxPortal>
+      </ComboboxRoot>
     </template>
   </FormField>
 </template>
 
 <script setup lang="ts">
+import {
+  ComboboxAnchor,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxPortal,
+  ComboboxRoot,
+  ComboboxTrigger,
+  ComboboxViewport,
+} from "reka-ui";
 import { computed, ref, useAttrs, useId, watch } from "vue";
 
 import FormField from "./FormField.vue";
@@ -105,11 +119,14 @@ const attrs = useAttrs();
 const generatedId = useId();
 const resolvedControlId = props.id ?? `searchable-select-${generatedId}`;
 const listboxId = `${resolvedControlId}-options`;
-const inputElement = ref<HTMLInputElement | null>(null);
+const inputElement = ref<InstanceType<typeof ComboboxInput> | null>(null);
 const isOpen = ref(false);
-const activeIndex = ref(0);
 const searchText = ref("");
 
+const selectedValue = computed({
+  get: () => props.modelValue,
+  set: (value: string) => emit("update:modelValue", value),
+});
 const selectedOption = computed(() => props.options.find((option) => option.value === props.modelValue) ?? null);
 const filteredOptions = computed(() => {
   const normalizedQuery = searchText.value.trim().toLocaleLowerCase("zh-CN");
@@ -120,95 +137,17 @@ const filteredOptions = computed(() => {
     .toLocaleLowerCase("zh-CN")
     .includes(normalizedQuery));
 });
-const activeOptionId = computed(() => isOpen.value && filteredOptions.value[activeIndex.value]
-  ? optionId(activeIndex.value)
-  : undefined);
+
+function displayValue(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return props.options.find((option) => option.value === value)?.label ?? "";
+}
 
 watch(selectedOption, (option) => {
   if (!isOpen.value) searchText.value = option?.label ?? "";
 }, { immediate: true });
 
-watch(filteredOptions, (options) => {
-  if (!options.length) {
-    activeIndex.value = 0;
-  } else if (activeIndex.value >= options.length) {
-    activeIndex.value = options.length - 1;
-  }
-});
-
-function optionId(index: number): string {
-  return `${listboxId}-${index}`;
-}
-
-function openOptions(): void {
-  if (props.disabled) return;
-  isOpen.value = true;
-  const selectedIndex = filteredOptions.value.findIndex((option) => option.value === props.modelValue);
-  activeIndex.value = selectedIndex >= 0 ? selectedIndex : 0;
-}
-
-function toggleOptions(): void {
-  if (isOpen.value) {
-    isOpen.value = false;
-    searchText.value = selectedOption.value?.label ?? "";
-    inputElement.value?.focus();
-    return;
-  }
-  openOptions();
-  inputElement.value?.focus();
-}
-
-function onInput(event: Event): void {
-  searchText.value = (event.target as HTMLInputElement).value;
-  isOpen.value = true;
-  activeIndex.value = 0;
-}
-
-function closeAfterBlur(): void {
-  window.setTimeout(() => {
-    isOpen.value = false;
-    searchText.value = selectedOption.value?.label ?? "";
-  }, 0);
-}
-
-function chooseOption(option: SearchableSelectOption): void {
-  if (option.disabled) return;
-  emit("update:modelValue", option.value);
-  searchText.value = option.label;
-  isOpen.value = false;
-  inputElement.value?.focus();
-}
-
-function onKeydown(event: KeyboardEvent): void {
-  if (event.key === "ArrowDown") {
-    event.preventDefault();
-    if (!isOpen.value) openOptions();
-    if (filteredOptions.value.length) activeIndex.value = (activeIndex.value + 1) % filteredOptions.value.length;
-    return;
-  }
-  if (event.key === "ArrowUp") {
-    event.preventDefault();
-    if (!isOpen.value) openOptions();
-    if (filteredOptions.value.length) activeIndex.value = (activeIndex.value - 1 + filteredOptions.value.length) % filteredOptions.value.length;
-    return;
-  }
-  if (event.key === "Enter" && isOpen.value) {
-    const activeOption = filteredOptions.value[activeIndex.value];
-    if (activeOption) {
-      event.preventDefault();
-      chooseOption(activeOption);
-    }
-    return;
-  }
-  if (event.key === "Escape") {
-    event.preventDefault();
-    isOpen.value = false;
-    searchText.value = selectedOption.value?.label ?? "";
-  }
-  if (event.key === "Tab") isOpen.value = false;
-}
-
 defineExpose({
-  focus: () => inputElement.value?.focus(),
+  focus: () => inputElement.value?.$el?.focus(),
 });
 </script>

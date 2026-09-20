@@ -68,4 +68,24 @@ describe("ConfigSchemaField.vue", () => {
     const emitted = wrapper.emitted("update:modelValue");
     expect(emitted?.at(-1)?.[0]).toEqual({ serious: "轻松回应" });
   });
+
+  it("为 provider_list 使用专用多模型编辑器，而不是平铺的单模型行", () => {
+    const wrapper = mount(ConfigSchemaField, {
+      props: {
+        item: configItem({ field_name: "personification_api_pools", ui_schema: { control_kind: "provider_list" } }),
+        modelValue: [{ provider_id: "shared", name: "共享连接", models: [{ model_id: "fast" }], purpose_models: { main: "fast" } }],
+      },
+    });
+    expect(wrapper.text()).toContain("按用途快捷选择");
+    expect(wrapper.text()).toContain("主回复");
+    expect(wrapper.text()).not.toContain("添加一项");
+  });
+
+  it("为跨供应商用途模型绑定使用专用选择器", () => {
+    const wrapper = mount(ConfigSchemaField, {
+      props: { item: configItem({ ui_schema: { control_kind: "purpose_binding" } }), modelValue: {} },
+    });
+    expect(wrapper.text()).toContain("每个用途选择");
+    expect(wrapper.find(".purpose-bindings").exists()).toBe(true);
+  });
 });

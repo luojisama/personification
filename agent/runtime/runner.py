@@ -843,7 +843,7 @@ async def run_agent(
                 ),
                 reason="background_image_generation",
             )
-    append_agent_system_prompts(
+    prompt_segments = append_agent_system_prompts(
         messages=messages,
         runtime_chat_intent=runtime_chat_intent,
         plugin_query_intent=plugin_query_intent,
@@ -860,6 +860,15 @@ async def run_agent(
         plugin_config=plugin_config,
         budget_profile=budget_profile,
         bot_avatar_context=bot_avatar_context,
+    )
+    _record_reply_trace_stage(
+        key="agent_prompt_segments",
+        status="info",
+        detail=(f"segments={prompt_segments.segment_count} stable={prompt_segments.stable_count} "
+                f"dynamic={prompt_segments.dynamic_count} "
+                f"stable_prefix_available={str(prompt_segments.stable_prefix_available).lower()} "
+                f"stable_prefix_contiguous={str(prompt_segments.stable_prefix_contiguous).lower()} "
+                f"preceding_messages={prompt_segments.preceding_messages} wire_order=preserved"),
     )
 
     async def _append_evidence_guidance_if_needed(*, draft_answer_text: str = "") -> EvidenceSynthesis | None:

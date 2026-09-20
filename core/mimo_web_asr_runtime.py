@@ -168,7 +168,7 @@ class MiMoWebAsrRuntime:
         self._recent_jobs: deque[float] = deque()
 
     def configure(self, params: dict[str, Any]) -> dict[str, Any]:
-        self.browser.set_idle_timeout(
+        self.browser.set_idle_timeout_seconds(
             _bounded_float(params.get("idle_timeout_seconds"), 300.0, 60.0, 1800.0)
         )
         return self.status()

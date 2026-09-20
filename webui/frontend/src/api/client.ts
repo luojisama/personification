@@ -1,4 +1,5 @@
 const API_BASE = "/personification/api/v2";
+export const AUTH_API_BASE = "/personification/api/auth";
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 type JsonRecord = Record<string, unknown>;
@@ -96,8 +97,28 @@ async function apiRequestAt<T>(base: string, path: string, options: ApiRequestOp
     ? await response.json()
     : await response.text();
 
-  if (!response.ok) throw new ApiError(response.status, payload);
+  if (!response.ok) {
+    const error = new ApiError(response.status, payload);
+    if (response.status === 401 && !options.signal?.aborted) notifyAuthenticationInvalid(error);
+    throw error;
+  }
   return payload as T;
+}
+
+export type AuthenticationInvalidListener = (error: ApiError) => void;
+const authenticationInvalidListeners = new Set<AuthenticationInvalidListener>();
+
+export function notifyAuthenticationInvalid(error: ApiError): void {
+  for (const listener of authenticationInvalidListeners) listener(error);
+}
+
+export function onAuthenticationInvalid(listener: AuthenticationInvalidListener): () => void {
+  authenticationInvalidListeners.add(listener);
+  return () => authenticationInvalidListeners.delete(listener);
+}
+
+export function authRequest<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
+  return apiRequestAt<T>(AUTH_API_BASE, path, options);
 }
 
 export async function rawApiRequest<T>(base: string, path: string, body: BodyInit, headers: Record<string, string>, signal?: AbortSignal): Promise<T> {
@@ -107,7 +128,11 @@ export async function rawApiRequest<T>(base: string, path: string, body: BodyIni
   const response = await fetch(buildUrlAt(base, path), { method: "POST", body, headers: requestHeaders, credentials: "include", signal });
   const contentType = response.headers.get("content-type") ?? "";
   const payload: unknown = contentType.includes("application/json") ? await response.json() : await response.text();
-  if (!response.ok) throw new ApiError(response.status, payload);
+  if (!response.ok) {
+    const error = new ApiError(response.status, payload);
+    if (response.status === 401 && !signal?.aborted) notifyAuthenticationInvalid(error);
+    throw error;
+  }
   return payload as T;
 }
 

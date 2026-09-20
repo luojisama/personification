@@ -50,6 +50,37 @@ def test_config_manager_save_and_load_round_trip() -> None:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def test_first_provider_catalog_save_keeps_one_exact_legacy_backup() -> None:
+    temp_dir = _make_workspace_temp_dir("catalog-backup-")
+    try:
+        legacy = {
+            "personification_api_pools": [{
+                "name": "legacy", "api_type": "openai", "api_url": "https://example.test/v1",
+                "api_key": "secret", "model": "old-model",
+            }],
+            "personification_global_enabled": True,
+        }
+        raw = json.dumps(legacy, ensure_ascii=False, indent=2)
+        (temp_dir / "env.json").write_text(raw, encoding="utf-8")
+        cfg = _build_config(temp_dir)
+        cfg.personification_api_pools = [{
+            **legacy["personification_api_pools"][0],
+            "provider_id": "provider-1",
+            "models": [{"model_id": "old-model"}, {"model_id": "new-model"}],
+            "default_model_id": "new-model",
+        }]
+        manager = config_manager.ConfigManager(plugin_config=cfg, logger=None)
+        manager.save()
+        backup = temp_dir / "env.json.provider-catalog-v1.bak"
+        assert backup.read_text(encoding="utf-8") == raw
+        first_backup_bytes = backup.read_bytes()
+        cfg.personification_api_pools[0]["default_model_id"] = "old-model"
+        manager.save()
+        assert backup.read_bytes() == first_backup_bytes
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def test_config_manager_env_json_overrides_explicit_env_fields() -> None:
     temp_dir = _make_workspace_temp_dir("config-manager-")
     try:

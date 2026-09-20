@@ -664,8 +664,15 @@ def _entry_to_view(entry: Any, *, plugin_config: Any) -> ConfigEntryView:
 
 
 def _provider_secret_ref(provider: dict[str, Any], index: int) -> str:
+    # A browser must be able to reorder models and providers without losing a
+    # masked credential.  The old index-based HMAC made that impossible.
+    from ...core.provider_catalog import stable_provider_id
+
     payload = json.dumps(
-        {"index": index, "provider": provider},
+        {
+            "provider_id": stable_provider_id(provider, index),
+            "transport": _provider_transport_identity(provider),
+        },
         ensure_ascii=False,
         sort_keys=True,
         default=str,
@@ -703,6 +710,10 @@ def _contains_masked_value(value: Any) -> bool:
 
 
 def _mask_api_pool_config(value: Any) -> Any:
+    from ...core.provider_catalog import normalize_catalog_pools
+
+    if isinstance(value, list):
+        value = normalize_catalog_pools(value)
     sanitized = sanitize_object(value)
     if not isinstance(value, list) or not isinstance(sanitized, list):
         return sanitized
@@ -772,11 +783,60 @@ def _restore_masked_value(value: Any, existing: Any) -> Any:
     return value
 
 
-def _restore_masked_config_secrets(field_name: str, value: Any, plugin_config: Any) -> Any:
+def _validate_catalog_model_references(pools: list[Any], bindings: Any) -> None:
+    """Reject deleting a model that is still selected by a purpose.
+
+    A caller may explicitly clear a purpose first (inherit) or select a
+    replacement in the global binding, then remove the model in a subsequent
+    atomic config save.  Never silently redirect it to another supplier.
+    """
+    from ...core.provider_catalog import PURPOSES, normalize_purpose_bindings, stable_provider_id
+
+    existing_bindings = normalize_purpose_bindings(bindings)
+    raw_bindings = json.loads(bindings) if isinstance(bindings, str) and bindings.strip() else bindings
+    if raw_bindings is not None and not isinstance(raw_bindings, dict):
+        raise ValueError("purpose bindings must be an object")
+    for purpose, binding in (raw_bindings or {}).items():
+        if purpose not in PURPOSES or (binding and purpose not in existing_bindings):
+            raise ValueError("invalid provider/model purpose binding")
+    available: dict[str, set[str]] = {}
+    for index, raw in enumerate(pools):
+        if not isinstance(raw, dict):
+            continue
+        provider_id = stable_provider_id(raw, index)
+        if provider_id in available:
+            raise ValueError("duplicate provider identity")
+        model_ids = {
+            str(item.get("model_id") or item.get("id") or item.get("model") or "").strip()
+            for item in raw.get("models", []) if isinstance(item, dict)
+        }
+        if not model_ids and str(raw.get("model") or "").strip():
+            model_ids.add(str(raw["model"]).strip())
+        available[provider_id] = model_ids
+        local = raw.get("purpose_models")
+        if isinstance(local, dict):
+            for purpose, model_id in local.items():
+                if str(model_id or "").strip() not in model_ids:
+                    raise ValueError(f"purpose {purpose} references a deleted model")
+    for purpose, binding in existing_bindings.items():
+        provider_id = binding.get("provider_id", "")
+        if binding.get("model_id") not in available.get(provider_id, set()):
+            raise ValueError(f"global purpose {purpose} references a deleted model")
+
+
+def _restore_masked_config_secrets(
+    field_name: str,
+    value: Any,
+    plugin_config: Any,
+    *,
+    validate_references: bool = True,
+) -> Any:
     if field_name != "personification_api_pools" or not isinstance(value, list):
         return value
+    from ...core.provider_catalog import normalize_catalog_pools
+
     existing = getattr(plugin_config, field_name, None)
-    existing_items = existing if isinstance(existing, list) else []
+    existing_items = normalize_catalog_pools(existing) if isinstance(existing, list) else []
     existing_by_ref = {
         _provider_secret_ref(item, index): item
         for index, item in enumerate(existing_items)
@@ -817,8 +877,35 @@ def _restore_masked_config_secrets(field_name: str, value: Any, plugin_config: A
             )
             if new_value != _MASKED_CONFIG_VALUE and str(new_value or "").strip() != old_value:
                 raise ValueError("provider transport changed while secret remained masked")
-        restored.append(_restore_masked_value(candidate, current))
-    return restored
+        restored_candidate = _restore_masked_value(candidate, current)
+        # Old provider-list clients edit only the legacy `model` input.  Once
+        # a catalog has an explicit default we normally trust that field, but
+        # this specific before/after comparison proves the old UI changed the
+        # mirror while leaving the old default untouched.  Convert that edit
+        # at the write boundary instead of guessing during pure normalization.
+        old_model = str(current.get("model") or "").strip()
+        new_model = str(restored_candidate.get("model") or "").strip()
+        old_default = str(current.get("default_model_id") or old_model).strip()
+        submitted_default = str(candidate.get("default_model_id") or "").strip()
+        if new_model and new_model != old_model and submitted_default == old_default:
+            restored_candidate["default_model_id"] = new_model
+            models = list(restored_candidate.get("models") or [])
+            if not any(
+                isinstance(model, dict)
+                and str(model.get("model_id") or model.get("id") or model.get("model") or "").strip() == new_model
+                for model in models
+            ):
+                models.append({"model_id": new_model, "display_name": new_model})
+            restored_candidate["models"] = models
+        restored.append(restored_candidate)
+    if validate_references:
+        _validate_catalog_model_references(
+            restored,
+            getattr(plugin_config, "personification_model_purpose_bindings", {}),
+        )
+    # Persist the migration on every successful catalog write so subsequent
+    # browser edits use the durable ID rather than a display order.
+    return normalize_catalog_pools(restored)
 
 
 def build_config_router(*, runtime) -> APIRouter:
@@ -1101,6 +1188,33 @@ def build_config_router(*, runtime) -> APIRouter:
                     message="提交的值未通过该字段的类型或范围校验。",
                     details=(detail("字段", field_name, "error"),),
                     suggestion="按字段说明、类型和范围修改后重试。",
+                    retryable=True,
+                ),
+            )
+        # Cross-field catalog references are validated against the prospective
+        # state.  A binding cannot name a missing supplier/model and deleting a
+        # selected model cannot silently fall back to an unrelated route.
+        try:
+            if field_name == "personification_model_purpose_bindings":
+                _validate_catalog_model_references(
+                    list(getattr(runtime.plugin_config, "personification_api_pools", []) or []),
+                    normalized,
+                )
+            elif field_name == "personification_api_pools":
+                _validate_catalog_model_references(
+                    list(normalized or []),
+                    getattr(runtime.plugin_config, "personification_model_purpose_bindings", {}),
+                )
+        except ValueError:
+            raise HTTPException(
+                status_code=409,
+                detail=diagnostic(
+                    ok=False,
+                    code="provider_catalog_reference_invalid",
+                    phase="value_normalization",
+                    title="模型用途绑定需要替代模型",
+                    message="被删除或选择的模型仍被用途绑定引用，未保存本次配置。",
+                    suggestion="先为该用途选择同一或另一供应商的模型，或清空绑定以恢复继承。",
                     retryable=True,
                 ),
             )

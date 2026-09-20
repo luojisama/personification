@@ -5,6 +5,9 @@ from types import SimpleNamespace
 from ._loader import load_personification_module
 
 tool_loop = load_personification_module("plugin.personification.agent.runtime.tool_loop")
+tool_caller_impl = load_personification_module(
+    "plugin.personification.skills.skillpacks.tool_caller.scripts.impl"
+)
 
 
 class _Logger:
@@ -186,8 +189,80 @@ def test_observe_model_step_records_trace_and_warns_empty_stop() -> None:
     assert traces[0]["key"] == "agent_model_step"
     assert traces[0]["status"] == "warn"
     assert "tool_calls=0" in traces[0]["detail"]
+    assert "cache_usage=unknown" in traces[0]["detail"]
     assert logger.warnings
     assert "provider returned empty stop response" in logger.warnings[0]
+
+
+def test_observe_model_step_traces_provider_specific_cache_counters() -> None:
+    traces: list[dict] = []
+    response = SimpleNamespace(
+        finish_reason="stop",
+        content="done",
+        tool_calls=[],
+        usage={
+            "prompt_tokens": 20,
+            "completion_tokens": 2,
+            "total_tokens": 22,
+            "cache_provider": "anthropic",
+            "cache_read_input_tokens": 12,
+            "cache_creation_input_tokens": 8,
+        },
+    )
+
+    tool_loop.observe_model_step(
+        response=response,
+        tool_caller=SimpleNamespace(),
+        logger=_Logger(),
+        step=1,
+        selected_names=[],
+        runtime_chat_intent="chat",
+        model_elapsed_ms=10,
+        record_trace=lambda **kwargs: traces.append(kwargs),
+    )
+
+    detail = traces[0]["detail"]
+    assert "cache_anthropic_read_tokens=12" in detail
+    assert "cache_anthropic_create_tokens=8" in detail
+    assert "cache_usage=unknown" not in detail
+
+
+def test_provider_response_shape_flows_through_extract_to_model_step_trace() -> None:
+    usage = tool_caller_impl._extract_usage(
+        {
+            "usageMetadata": {
+                "promptTokenCount": 200,
+                "candidatesTokenCount": 20,
+                "totalTokenCount": 220,
+                "cachedContentTokenCount": 160,
+            }
+        }
+    )
+    traces: list[dict] = []
+    tool_loop.observe_model_step(
+        response=SimpleNamespace(
+            finish_reason="stop",
+            content="done",
+            tool_calls=[],
+            usage=usage,
+        ),
+        tool_caller=SimpleNamespace(),
+        logger=_Logger(),
+        step=1,
+        selected_names=[],
+        runtime_chat_intent="chat",
+        model_elapsed_ms=10,
+        record_trace=lambda **kwargs: traces.append(kwargs),
+    )
+
+    assert "cache_gemini_read_tokens=160" in traces[0]["detail"]
+
+
+def test_cache_trace_rejects_bool_even_when_usage_is_manually_constructed() -> None:
+    response = SimpleNamespace(
+        usage={"cache_provider": "openai", "cache_read_input_tokens": True}
+    )
+    assert tool_loop._cache_usage_trace_detail(response) == " cache_usage=unknown"
 
 
 def test_trace_tool_result_exposes_only_stable_media_route_diagnostics() -> None:

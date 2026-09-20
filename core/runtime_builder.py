@@ -1,3 +1,4 @@
+from .provider_catalog import normalize_purpose_bindings
 import random
 from pathlib import Path
 from typing import Any, Callable, Dict
@@ -452,6 +453,7 @@ def build_plugin_runtime(
         f"video_fallback_source={route_state['video_fallback_source'] or 'none'}"
     )
     persona_tool_caller = build_routed_tool_caller(
+        purpose="persona",
         plugin_config=plugin_config,
         logger=logger,
     )
@@ -765,13 +767,14 @@ def build_plugin_runtime(
             get_model_override_for_role(plugin_config, MODEL_ROLE_INTENT)
             or str(getattr(plugin_config, "personification_lite_model", "") or "").strip()
         )
-        if not lite_model:
+        if not lite_model and not normalize_purpose_bindings(getattr(plugin_config, "personification_model_purpose_bindings", {})).get("lite"):
             return default_caller
         try:
             return build_routed_tool_caller(
                 plugin_config=plugin_config,
                 logger=logger,
                 model_override=lite_model,
+                purpose="lite",
             )
         except Exception as exc:
             logger.warning(f"personification: rebuild lite tool caller failed, fallback to primary caller: {exc}")
@@ -894,6 +897,7 @@ def build_plugin_runtime(
         if persona_store is not None:
             try:
                 refreshed_persona_caller = build_routed_tool_caller(
+                    purpose="persona",
                     plugin_config=plugin_config,
                     logger=logger,
                 )

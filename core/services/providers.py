@@ -1,3 +1,4 @@
+from ..provider_catalog import normalize_purpose_bindings
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -145,23 +146,36 @@ def build_ai_api_caller(
         temperature: float = 0.7,
         use_builtin_search: Optional[bool] = None,
     ) -> Optional[str]:
+        from ..generation_fence import active_config, assert_current_generation
+        current_config = active_config(plugin_config)
+        assert_current_generation()
+        purpose = {"agent": "main", "intent": "lite", "review": "lite", "sticker": "labeler"}.get(model_role, "main")
+        if "compress" in model_override_field_name:
+            purpose = "compress"
+        strict_lite = purpose == "lite" and bool(getattr(current_config, "personification_strict_main_model", False))
+        if strict_lite:
+            purpose = "main"
         model_override = ""
         if model_role:
-            model_override = get_model_override_for_role(plugin_config, model_role)
+            model_override = get_model_override_for_role(current_config, model_role)
         if not model_override and model_override_field_name:
-            model_override = str(getattr(plugin_config, model_override_field_name, "") or "").strip()
+            model_override = str(getattr(current_config, model_override_field_name, "") or "").strip()
+        if strict_lite or normalize_purpose_bindings(getattr(current_config, "personification_model_purpose_bindings", {})).get(purpose):
+            model_override = ""
         default_builtin_search = should_enable_default_builtin_search(
-            plugin_config,
-            get_configured_api_providers=lambda: get_configured_api_providers_core(plugin_config, logger),
+            current_config,
+            get_configured_api_providers=lambda: get_configured_api_providers_core(current_config, logger),
         )
         response = await call_ai_api_core(
             messages,
-            plugin_config=plugin_config,
+            plugin_config=current_config,
             logger=logger,
             tools=tools,
             use_builtin_search=default_builtin_search if use_builtin_search is None else bool(use_builtin_search),
             model_override=model_override,
+            purpose=purpose,
         )
+        assert_current_generation()
         _ = max_tokens, temperature
         if response.vision_unavailable:
             raise RuntimeError("image input not supported by configured providers")

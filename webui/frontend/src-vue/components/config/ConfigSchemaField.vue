@@ -92,6 +92,28 @@
       @update:model-value="emitValue"
     />
 
+    <ProviderPoolEditor
+      v-else-if="controlKind === 'provider_list'"
+      :id="controlId"
+      :model-value="modelValue"
+      :label="item.display_name"
+      :description="item.description"
+      :error="error"
+      @update:model-value="emitValue"
+      @update:error="emit('update:error', $event)"
+    />
+
+    <PurposeModelBindingsEditor
+      v-else-if="controlKind === 'purpose_binding'"
+      :id="controlId"
+      :model-value="modelValue"
+      :label="item.display_name"
+      :description="item.description"
+      :error="error"
+      @update:model-value="emitValue"
+      @update:error="emit('update:error', $event)"
+    />
+
     <FormField
       v-else-if="isStructuredControl"
       :label="item.display_name"
@@ -267,6 +289,8 @@ import NumberField from "@vue-app/components/forms/NumberField.vue";
 import SearchableSelect from "@vue-app/components/forms/SearchableSelect.vue";
 import SelectField from "@vue-app/components/forms/SelectField.vue";
 import StructuredListEditor from "@vue-app/components/forms/StructuredListEditor.vue";
+import ProviderPoolEditor from "./ProviderPoolEditor.vue";
+import PurposeModelBindingsEditor from "./PurposeModelBindingsEditor.vue";
 import SwitchField from "@vue-app/components/forms/SwitchField.vue";
 import TextareaField from "@vue-app/components/forms/TextareaField.vue";
 import TextField from "@vue-app/components/forms/TextField.vue";
@@ -306,7 +330,7 @@ const listItemLabel = computed(() => String(schema.value.item_schema?.label || "
 const stringListValue = computed(() => Array.isArray(props.modelValue)
   ? props.modelValue.filter((value): value is string => typeof value === "string")
   : []);
-const isStructuredControl = computed(() => ["provider_list", "key_value", "level_table", "behavior_band_table"].includes(controlKind.value));
+const isStructuredControl = computed(() => ["key_value", "level_table", "behavior_band_table"].includes(controlKind.value));
 const structuredFields = computed<ConfigUiField[]>(() => Array.isArray(schema.value.item_schema?.fields)
   ? schema.value.item_schema?.fields ?? []
   : []);

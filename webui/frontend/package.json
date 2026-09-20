@@ -12,8 +12,15 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@tailwindcss/vite": "4.3.3",
     "@tanstack/vue-query": "5.102.8",
+    "@unovis/ts": "1.7.0",
+    "@unovis/vue": "1.7.0",
+    "@vueuse/core": "15.0.0",
+    "lucide-vue-next": "0.468.0",
     "pinia": "4.0.3",
+    "reka-ui": "2.10.4",
+    "tailwindcss": "4.3.3",
     "vue": "3.5.42",
     "vue-router": "5.3.1"
   },

@@ -485,6 +485,7 @@ class Config(BaseModel):
     personification_game_info_community_sites: Optional[Union[str, List[str]]] = None
 
     personification_api_pools: Optional[Union[str, List[Dict[str, Any]]]] = None
+    personification_model_purpose_bindings: Dict[str, Dict[str, str]] = {}
     personification_api_type: str = "openai"
     personification_api_url: str = ""
     personification_api_key: str = ""

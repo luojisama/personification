@@ -9,6 +9,7 @@ from typing import Any
 from dotenv import dotenv_values, set_key
 
 from .config_manager import (
+    backup_legacy_provider_catalog_once,
     _restrict_sensitive_file_permissions,
     _write_payload_atomic,
     get_env_config_path,
@@ -112,6 +113,9 @@ def write_env_json_values(values: dict[str, Any], plugin_config: Any) -> Path:
         except Exception:
             payload = {}
     payload.update(dict(values or {}))
+    # WebUI batch saves are the ordinary catalog migration writer.  Preserve
+    # the exact old env.json once before replacing its legacy provider pool.
+    backup_legacy_provider_catalog_once(path, payload)
     _write_payload_atomic(path, payload)
     return path
 

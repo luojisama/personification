@@ -11,13 +11,21 @@ import {
 import { resources } from "@/api/resources";
 import ConfigOperationsPages from "./ConfigOperationsPages.vue";
 
+vi.mock("@/api/tokenBilling", () => ({
+  tokenBillingApi: {
+    routes: vi.fn().mockResolvedValue({ items: [] }),
+    prices: vi.fn().mockResolvedValue({ items: [] }),
+    createPrice: vi.fn(),
+  },
+}));
+
 vi.mock("@/api/resources", () => ({
   resources: {
     configMetadata: vi.fn().mockResolvedValue({
       revision: "rev-001",
       groups: ["基础配置", "模型设置"],
-      group_counts: { "基础配置": 10, "模型设置": 5 },
-      modified_counts: { "基础配置": 1, "模型设置": 0 },
+      group_counts: { 基础配置: 10, 模型设置: 5 },
+      modified_counts: { 基础配置: 1, 模型设置: 0 },
       total: 15,
       diagnostic_code: "ok",
     }),
@@ -28,7 +36,7 @@ vi.mock("@/api/resources", () => ({
       total: 2,
       total_pages: 1,
       groups: ["基础配置"],
-      group_counts: { "基础配置": 1 },
+      group_counts: { 基础配置: 1 },
       modified_counts: {},
       items: [
         {
@@ -79,7 +87,11 @@ vi.mock("@/api/resources", () => ({
           max_value: null,
           ui_schema: {
             control_kind: "string_list",
-            item_schema: { type: "string", label: "插件", placeholder: "输入插件名" },
+            item_schema: {
+              type: "string",
+              label: "插件",
+              placeholder: "输入插件名",
+            },
           },
         },
         {
@@ -104,7 +116,10 @@ vi.mock("@/api/resources", () => ({
           choices: [],
           min_value: null,
           max_value: null,
-          ui_schema: { control_kind: "json_advanced", placeholder: "输入 JSON 对象" },
+          ui_schema: {
+            control_kind: "json_advanced",
+            placeholder: "输入 JSON 对象",
+          },
         },
       ],
     }),
@@ -151,12 +166,16 @@ describe("ConfigOperationsPages.vue", () => {
   let runtimeEvents: RuntimeEventsManager;
 
   beforeEach(async () => {
-    queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
     pinia = createPinia();
     runtimeEvents = createMockRuntimeEvents();
     router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: "/operations/config/all", component: ConfigOperationsPages }],
+      routes: [
+        { path: "/operations/config/all", component: ConfigOperationsPages },
+      ],
     });
     await router.push("/operations/config/all");
   });
@@ -177,6 +196,7 @@ describe("ConfigOperationsPages.vue", () => {
     const wrapper = mountComponent();
     await flushPromises();
     expect(wrapper.text()).toContain("配置中心");
+    expect(wrapper.text()).toContain("Token 自定义价格");
   });
 
   it("仅对未知结构在 JSON 抽屉中校验，并关联可访问错误", async () => {
@@ -186,17 +206,25 @@ describe("ConfigOperationsPages.vue", () => {
     expect(wrapper.text()).toContain("添加插件");
 
     await wrapper.get("#config-bot_name").setValue("新的昵称");
-    expect(wrapper.get(".config-save-actions button").attributes("disabled")).toBeUndefined();
+    expect(
+      wrapper.get(".config-save-actions button").attributes("disabled"),
+    ).toBeUndefined();
 
     await wrapper.get("#config-unknown_metadata").trigger("click");
     const textarea = wrapper.get("#config-unknown_metadata-json");
     await textarea.setValue("not valid json");
-    const verifyButton = wrapper.findAll("button").find((button) => button.text() === "校验并应用草稿");
+    const verifyButton = wrapper
+      .findAll("button")
+      .find((button) => button.text() === "校验并应用草稿");
     expect(verifyButton).toBeTruthy();
     await verifyButton?.trigger("click");
-    expect(wrapper.get("#config-unknown_metadata-json-error").text()).toContain("JSON");
+    expect(wrapper.get("#config-unknown_metadata-json-error").text()).toContain(
+      "JSON",
+    );
     expect(textarea.attributes("aria-invalid")).toBe("true");
-    expect(wrapper.get(".config-save-actions button").attributes("disabled")).toBeDefined();
+    expect(
+      wrapper.get(".config-save-actions button").attributes("disabled"),
+    ).toBeDefined();
   });
 
   it("以共享确认对话框提交原子配置保存，而不调用浏览器确认框", async () => {
@@ -207,12 +235,16 @@ describe("ConfigOperationsPages.vue", () => {
     await wrapper.get(".config-save-actions button").trigger("click");
 
     expect(wrapper.get("[role=dialog]").text()).toContain("原子保存配置草稿");
-    const confirmButton = wrapper.findAll("button").find((button) => button.text() === "确认保存");
+    const confirmButton = wrapper
+      .findAll("button")
+      .find((button) => button.text() === "确认保存");
     expect(confirmButton).toBeTruthy();
     await confirmButton?.trigger("click");
     await flushPromises();
 
-    expect(resources.patchConfig).toHaveBeenCalledWith("rev-001", { bot_name: "新的昵称" });
+    expect(resources.patchConfig).toHaveBeenCalledWith("rev-001", {
+      bot_name: "新的昵称",
+    });
     expect(wrapper.find("[role=dialog]").exists()).toBe(false);
   });
 
@@ -220,15 +252,21 @@ describe("ConfigOperationsPages.vue", () => {
     const wrapper = mountComponent();
     await flushPromises();
 
-    const resultContainer = wrapper.get(".config-results").element as HTMLElement;
+    const resultContainer = wrapper.get(".config-results")
+      .element as HTMLElement;
     resultContainer.scrollTop = 180;
     type ConfigResult = Awaited<ReturnType<typeof resources.config>>;
     let resolveNext: ((value: ConfigResult) => void) | undefined;
-    vi.mocked(resources.config).mockImplementationOnce(() => new Promise<ConfigResult>((resolve) => {
-      resolveNext = resolve;
-    }));
+    vi.mocked(resources.config).mockImplementationOnce(
+      () =>
+        new Promise<ConfigResult>((resolve) => {
+          resolveNext = resolve;
+        }),
+    );
 
-    const categoryButton = wrapper.findAll(".config-category-rail button").find((button) => button.text().includes("基础配置"));
+    const categoryButton = wrapper
+      .findAll(".config-category-rail button")
+      .find((button) => button.text().includes("基础配置"));
     expect(categoryButton).toBeTruthy();
     await categoryButton?.trigger("click");
     await flushPromises();
@@ -243,7 +281,7 @@ describe("ConfigOperationsPages.vue", () => {
       total: 0,
       total_pages: 1,
       groups: ["基础配置"],
-      group_counts: { "基础配置": 0 },
+      group_counts: { 基础配置: 0 },
       modified_counts: {},
       items: [],
     });

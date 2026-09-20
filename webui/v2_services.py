@@ -261,7 +261,12 @@ async def apply_config_patch(
     revision: str,
     values: dict[str, Any],
 ) -> dict[str, Any]:
-    from .routes.config_routes import _MASKED_CONFIG_VALUE, _reload_runtime_step, _restore_masked_config_secrets
+    from .routes.config_routes import (
+        _MASKED_CONFIG_VALUE,
+        _reload_runtime_step,
+        _restore_masked_config_secrets,
+        _validate_catalog_model_references,
+    )
 
     lock = getattr(runtime, "_personification_v2_config_lock", None)
     if not isinstance(lock, asyncio.Lock):
@@ -280,12 +285,34 @@ async def apply_config_patch(
             entry = entries[field_name]
             try:
                 value = entry.normalize_value(raw)
-                value = _restore_masked_config_secrets(field_name, value, runtime.plugin_config)
+                # Validate pool/binding references only after every supplied
+                # field has been normalized.  This permits an atomic rebind
+                # plus removal regardless of JSON key order.
+                value = _restore_masked_config_secrets(
+                    field_name,
+                    value,
+                    runtime.plugin_config,
+                    validate_references=False,
+                )
             except ValueError as exc:
                 raise ValueError(field_name) from exc
             if entry.secret and raw == _MASKED_CONFIG_VALUE:
                 value = getattr(runtime.plugin_config, field_name, None)
             normalized[field_name] = value
+        prospective_pools = normalized.get(
+            "personification_api_pools",
+            getattr(runtime.plugin_config, "personification_api_pools", []),
+        )
+        prospective_bindings = normalized.get(
+            "personification_model_purpose_bindings",
+            getattr(runtime.plugin_config, "personification_model_purpose_bindings", {}),
+        )
+        try:
+            _validate_catalog_model_references(
+                list(prospective_pools or []), prospective_bindings
+            )
+        except ValueError as exc:
+            raise ValueError("provider_catalog_reference_invalid") from exc
         if not normalized:
             return {
                 "revision": current_revision,

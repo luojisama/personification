@@ -96,7 +96,7 @@ def selected_tool_names(active_schemas: list[dict], schema_tool_name: Callable[[
 def record_model_response_usage(*, response: Any, tool_caller: Any) -> None:
     try:
         usage = getattr(response, "usage", None) or {}
-        if not isinstance(usage, dict) or not (usage.get("prompt_tokens") or usage.get("completion_tokens")):
+        if not isinstance(usage, dict) or not usage:
             return
         from ...core import llm_context as _llm_ctx
         from ...core import token_ledger as _ledger
@@ -117,17 +117,30 @@ def record_model_response_usage(*, response: Any, tool_caller: Any) -> None:
             provider_label = "openai"
         else:
             provider_label = ""  # 让 token_ledger 从 model 名自行推导
-        _ledger.record_llm_call(
-            model=str(getattr(response, "model_used", "") or ""),
-            prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
-            completion_tokens=int(usage.get("completion_tokens", 0) or 0),
-            group_id=str(ctx.get("group_id", "") or ""),
-            user_id=str(ctx.get("user_id", "") or ""),
+        _ledger.record_response_usage(
+            response,
             purpose=str(ctx.get("purpose", "") or "agent"),
-            provider=provider_label,
+            provider=str(getattr(response, "usage_provider", "") or provider_label),
         )
     except Exception:
         pass
+
+
+def _cache_usage_trace_detail(response: Any) -> str:
+    usage = getattr(response, "usage", None)
+    if not isinstance(usage, dict):
+        return " cache_usage=unknown"
+    provider = str(usage.get("cache_provider") or "").strip().lower()
+    read_tokens = usage.get("cache_read_input_tokens")
+    create_tokens = usage.get("cache_creation_input_tokens")
+    if provider not in {"openai", "anthropic", "gemini"}:
+        return " cache_usage=unknown"
+    fields: list[str] = []
+    if type(read_tokens) is int and read_tokens >= 0:
+        fields.append(f"cache_{provider}_read_tokens={read_tokens}")
+    if provider == "anthropic" and type(create_tokens) is int and create_tokens >= 0:
+        fields.append(f"cache_anthropic_create_tokens={create_tokens}")
+    return (" " + " ".join(fields)) if fields else " cache_usage=unknown"
 
 
 def observe_model_step(
@@ -165,6 +178,7 @@ def observe_model_step(
             f"tools={','.join(selected_names[:8]) if selected_names else '-'} "
             f"finish={finish_reason} tool_calls={len(tool_calls)} "
             f"content_len={content_len} elapsed_ms={model_elapsed_ms}"
+            f"{_cache_usage_trace_detail(response)}"
         ),
     )
     if finish_reason == "stop" and not tool_calls and content_len == 0:

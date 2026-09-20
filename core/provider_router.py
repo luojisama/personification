@@ -23,6 +23,7 @@ from .provider_types import (
 )
 from .safety_filter import build_safe_reframe_messages, detect_route_safety_issue
 from .visual_capabilities import error_indicates_vision_unavailable, heuristic_supports_vision
+from .provider_catalog import expand_bound_catalog_pools, normalize_catalog_pools, normalize_purpose_bindings
 
 
 PROVIDER_FAILURE_STATE: Dict[str, Dict[str, Any]] = {}
@@ -292,7 +293,13 @@ def _log_removed_provider_routes(logger: Any, routes: List[Dict[str, Any]]) -> N
         pass
 
 
-def parse_api_pool_config(raw_config: Any, logger: Any = None) -> List[Dict[str, Any]]:
+def parse_api_pool_config(
+    raw_config: Any,
+    logger: Any = None,
+    *,
+    purpose: str = "main",
+    purpose_bindings: Any = None,
+) -> List[Dict[str, Any]]:
     if not raw_config:
         return []
 
@@ -313,8 +320,14 @@ def parse_api_pool_config(raw_config: Any, logger: Any = None) -> List[Dict[str,
             logger.error("personification: personification_api_pools must be a JSON array")
         return []
 
+    # Catalog entries own the connection and credentials once.  Existing
+    # callers still receive ordinary one-model route dicts.
+    catalog_items = normalize_catalog_pools(parsed)
+    route_items = expand_bound_catalog_pools(
+        catalog_items, purpose=purpose, bindings=purpose_bindings
+    )
     providers: List[Dict[str, Any]] = []
-    for index, item in enumerate(parsed):
+    for index, item in enumerate(route_items):
         if not isinstance(item, dict):
             continue
         api_type = normalize_api_type(item.get("api_type"))
@@ -353,6 +366,11 @@ def parse_api_pool_config(raw_config: Any, logger: Any = None) -> List[Dict[str,
 
         provider = {
             "name": str(item.get("name") or f"pool_{index + 1}").strip() or f"pool_{index + 1}",
+            "provider_id": str(item.get("provider_id") or "").strip(),
+            "model_id": str(item.get("model_id") or model).strip(),
+            "route_purpose": str(item.get("route_purpose") or purpose).strip().lower() or "main",
+            "purpose_binding": _to_bool(item.get("purpose_binding", False), False),
+            "capabilities": dict(item.get("capabilities") or {}),
             "api_type": api_type,
             "api_url": api_url,
             "api_key": api_key,
@@ -409,11 +427,11 @@ def _read_env_api_pool_raw() -> str:
     return read_env_file_value("personification_api_pools") or ""
 
 
-def _load_env_api_pool_config(logger: Any) -> List[Dict[str, Any]]:
+def _load_env_api_pool_config(logger: Any, *, purpose: str = "main", purpose_bindings: Any = None) -> List[Dict[str, Any]]:
     raw_env = _read_env_api_pool_raw()
     if not raw_env:
         return []
-    return parse_api_pool_config(raw_env, logger)
+    return parse_api_pool_config(raw_env, logger, purpose=purpose, purpose_bindings=purpose_bindings)
 
 
 def _has_usable_legacy_primary_config(plugin_config: Any) -> bool:
@@ -431,15 +449,28 @@ def _has_usable_legacy_primary_config(plugin_config: Any) -> bool:
     return bool(api_url and api_key and model)
 
 
-def load_api_pool_config(plugin_config: Any, logger: Any) -> List[Dict[str, Any]]:
+def load_api_pool_config(plugin_config: Any, logger: Any, *, purpose: str = "main") -> List[Dict[str, Any]]:
     raw_config = getattr(plugin_config, "personification_api_pools", None)
-    providers = parse_api_pool_config(raw_config, logger)
+    bindings = getattr(plugin_config, "personification_model_purpose_bindings", {})
+    explicit_binding = normalize_purpose_bindings(bindings).get(str(purpose or "main").strip().lower())
+    providers = parse_api_pool_config(raw_config, logger, purpose=purpose, purpose_bindings=bindings)
 
     env_raw = _read_env_api_pool_raw()
-    env_providers = _load_env_api_pool_config(logger)
+    # Preserve the long-standing zero-extra-keyword helper seam for existing
+    # diagnostics/tests when resolving the ordinary main route.
+    env_providers = (
+        _load_env_api_pool_config(logger)
+        if purpose == "main"
+        else _load_env_api_pool_config(logger, purpose=purpose, purpose_bindings=bindings)
+    )
 
     # 运行时为空（未配置或被异常清空）：直接用 .env 兜底救援。
     if not providers:
+        # A selected supplier/model is an administrator's explicit safety
+        # choice.  A stale ID must be surfaced as unconfigured rather than
+        # quietly running the request through .env or legacy credentials.
+        if explicit_binding:
+            return []
         if env_providers:
             if _has_usable_legacy_primary_config(plugin_config):
                 logger.info(
@@ -492,9 +523,9 @@ def _decorate_context_budget_config(providers: List[Dict[str, Any]], plugin_conf
         provider["context_safety_margin_ratio"] = margin_ratio
 
 
-def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[str, Any]]:
+def get_configured_api_providers(plugin_config: Any, logger: Any, *, purpose: str = "main") -> List[Dict[str, Any]]:
     _log_removed_provider_routes(logger, detect_removed_provider_routes(plugin_config))
-    providers = load_api_pool_config(plugin_config, logger)
+    providers = load_api_pool_config(plugin_config, logger, purpose=purpose)
     if providers:
         _decorate_context_budget_config(providers, plugin_config)
         _log_active_provider_config_once(
@@ -503,6 +534,11 @@ def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[s
             providers=providers,
         )
         return providers
+
+    if normalize_purpose_bindings(
+        getattr(plugin_config, "personification_model_purpose_bindings", {})
+    ).get(str(purpose or "main").strip().lower()):
+        return []
 
     legacy_type = normalize_api_type(getattr(plugin_config, "personification_api_type", "openai"))
     if legacy_type == PROVIDER_TYPE_REMOVED:
@@ -593,10 +629,10 @@ def get_configured_api_providers(plugin_config: Any, logger: Any) -> List[Dict[s
     return providers
 
 
-def get_provider_candidates(plugin_config: Any, logger: Any) -> List[Dict[str, Any]]:
+def get_provider_candidates(plugin_config: Any, logger: Any, *, purpose: str = "main") -> List[Dict[str, Any]]:
     global PROVIDER_ROTATION_CURSOR
 
-    providers = get_configured_api_providers(plugin_config, logger)
+    providers = get_configured_api_providers(plugin_config, logger, purpose=purpose)
     if not providers:
         return []
 
@@ -665,6 +701,23 @@ def get_provider_candidates(plugin_config: Any, logger: Any) -> List[Dict[str, A
         cursor = PROVIDER_ROTATION_CURSOR % len(top_tier)
         PROVIDER_ROTATION_CURSOR = (PROVIDER_ROTATION_CURSOR + 1) % len(top_tier)
     return top_tier[cursor:] + top_tier[:cursor] + lower_tiers
+
+
+def resolve_purpose_provider(plugin_config: Any, purpose: str, logger: Any = None) -> Dict[str, Any] | None:
+    """Resolve one catalog model for a logical purpose without creating a client.
+
+    ``strict_main_model`` deliberately wins for auxiliary text purposes.  Vision
+    and labeler remain selectable because their inputs may require a visual
+    capability rather than merely a cheaper text route.
+    """
+    normalized = str(purpose or "main").strip().lower() or "main"
+    if (
+        normalized == "lite"
+        and _to_bool(getattr(plugin_config, "personification_strict_main_model", False), False)
+    ):
+        normalized = "main"
+    candidates = get_provider_candidates(plugin_config, logger, purpose=normalized)
+    return dict(candidates[0]) if candidates else None
 
 
 def get_provider_failure_snapshot(now_ts: float | None = None) -> Dict[str, Dict[str, Any]]:
@@ -861,17 +914,27 @@ async def _call_provider_once(
     tools: Optional[List[Dict[str, Any]]] = None,
     use_builtin_search: bool = False,
 ) -> ToolCallerResponse:
+    from .generation_fence import assert_current_generation
+    assert_current_generation()
     caller = _build_provider_caller(provider, plugin_config)
     start_ts = time.monotonic()
     success = False
     error_kind = ""
-    wire_retry_token = set_wire_retry_disabled()
+    response = None
+    from .provider_catalog import stable_provider_id
+    wire_retry_token = set_wire_retry_disabled(usage_route_id=stable_provider_id(provider),
+                                               usage_provider=str(provider.get("api_type") or ""))
     try:
+        if provider.get("context_budget_enabled", True) is not False:
+            from .context_budget import ContextBudget, fit_request_to_budget
+            messages, _budget_detail = fit_request_to_budget(
+                messages, list(tools or []), ContextBudget.from_route(provider))
         response = await caller.chat_with_tools(
             messages=messages,
             tools=list(tools or []),
             use_builtin_search=_should_use_builtin_search(provider, use_builtin_search),
         )
+        assert_current_generation()
         # vision_unavailable 算业务失败（影响 success_rate），让后续真正能识图的
         # provider 自然排前面；error_kind 标 vision_unavailable 便于诊断
         safety_issue = detect_route_safety_issue(response)
@@ -890,6 +953,19 @@ async def _call_provider_once(
         raise
     finally:
         reset_llm_context(wire_retry_token)
+        # Usage is chargeable even if generation was invalidated after receipt.
+        # The response event ID also deduplicates callers' on_response hooks.
+        if response is not None:
+            try:
+                from .token_ledger import record_response_usage
+                from .provider_catalog import stable_provider_id
+
+                response.usage_route_id = stable_provider_id(provider)
+                response.usage_provider = str(provider.get("api_type") or "")
+                record_response_usage(response, model_fallback=str(provider.get("model") or ""),
+                                      route_id=response.usage_route_id, provider=response.usage_provider)
+            except Exception:
+                pass
         try:
             from . import provider_health
 
@@ -902,27 +978,6 @@ async def _call_provider_once(
             )
         except Exception:
             pass
-    # 中央 token 拦截：所有走 call_ai_api → _call_provider_once 的调用统一在这里
-    # 记账，覆盖 user_persona / group_style / group_knowledge / proactive / qzone /
-    # inner_state / review / intent / planner / vision 等所有非-runner 路径。
-    # runner.py 走 runtime.agent_tool_caller，独立拦截。
-    try:
-        usage = getattr(response, "usage", None) or {}
-        if isinstance(usage, dict) and (usage.get("prompt_tokens") or usage.get("completion_tokens")):
-            from . import llm_context as _llm_ctx
-            from . import token_ledger as _ledger
-
-            ctx = _llm_ctx.current_llm_context()
-            _ledger.record_llm_call(
-                model=str(getattr(response, "model_used", "") or provider.get("model", "") or ""),
-                prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
-                completion_tokens=int(usage.get("completion_tokens", 0) or 0),
-                group_id=str(ctx.get("group_id", "") or ""),
-                user_id=str(ctx.get("user_id", "") or ""),
-                purpose=str(ctx.get("purpose", "") or "ai_route"),
-            )
-    except Exception:
-        pass
     return response
 
 
@@ -1393,10 +1448,23 @@ async def call_ai_api(
     tools: Optional[List[Dict[str, Any]]] = None,
     use_builtin_search: bool = False,
     model_override: str = "",
+    purpose: str = "main",
 ) -> ToolCallerResponse:
+    # A supplement chain captures configuration at its first generation.  Do
+    # not let a WebUI save halfway through cause the retry/rebuild to use a
+    # different supplier or context limit.
+    from .generation_fence import active_config, assert_current_generation
+
+    plugin_config = active_config(plugin_config)
+    assert_current_generation()
+    candidate_routes = (
+        get_provider_candidates(plugin_config, logger)
+        if purpose == "main"
+        else get_provider_candidates(plugin_config, logger, purpose=purpose)
+    )
     providers = [
         _override_provider_model(provider, model_override)
-        for provider in get_provider_candidates(plugin_config, logger)
+        for provider in candidate_routes
     ]
     errors: List[str] = []
     route_attempts: List[Dict[str, Any]] = []
@@ -1411,6 +1479,7 @@ async def call_ai_api(
             tools=tools,
             use_builtin_search=use_builtin_search,
         )
+        assert_current_generation()
         errors.extend(primary_errors)
         route_attempts.extend(primary_attempts)
         saw_vision_unavailable = saw_vision_unavailable or primary_saw_vision_unavailable
@@ -1418,6 +1487,19 @@ async def call_ai_api(
             return response
     else:
         logger.warning("personification: no configured API provider available")
+
+    # Keep an invalid explicit catalog pair fail-closed.  Global fallback is
+    # still available for ordinary provider/network exhaustion.
+    explicit_binding = normalize_purpose_bindings(
+        getattr(plugin_config, "personification_model_purpose_bindings", {})
+    ).get(str(purpose or "main").strip().lower())
+    if explicit_binding and not providers:
+        raise ProviderRouteError(
+            "provider_model_binding_unavailable",
+            "configured provider/model binding is unavailable",
+            retryable=False,
+            route_attempts=route_attempts,
+        )
 
     from .ai_routes import resolve_global_fallback_provider
 
@@ -1434,6 +1516,7 @@ async def call_ai_api(
                 "timeout",
                 _DEFAULT_PROVIDER_TIMEOUT_SECONDS,
             )
+            assert_current_generation()
             fallback_provider.setdefault("max_retries", _DEFAULT_PROVIDER_MAX_ATTEMPTS)
             fallback_provider.setdefault(
                 "supports_native_search",
@@ -1448,6 +1531,7 @@ async def call_ai_api(
                 tools=tools,
                 use_builtin_search=use_builtin_search,
             )
+            assert_current_generation()
             errors.extend(fallback_errors)
             route_attempts.extend(fallback_attempts)
             saw_vision_unavailable = saw_vision_unavailable or fallback_saw_vision_unavailable

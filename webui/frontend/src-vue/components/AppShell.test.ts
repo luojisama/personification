@@ -1,5 +1,5 @@
 import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
-import { mount } from "@vue/test-utils";
+import { DOMWrapper, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { nextTick, ref, shallowRef } from "vue";
 import { createMemoryHistory, createRouter } from "vue-router";
@@ -51,13 +51,18 @@ function installViewport(initialMatches: boolean): (matches: boolean) => void {
 
 describe("AppShell", () => {
   beforeEach(() => {
+    document.body.innerHTML = "";
+    HTMLElement.prototype.scrollIntoView = vi.fn();
     window.localStorage.clear();
     vi.mocked(resources.bots).mockResolvedValue({ items: bots, total: 2, diagnostic_code: "ok" });
     vi.mocked(resources.adminIdentity).mockResolvedValue({ qq: "10001", device_id: "device", label: "浏览器", identity_source: "SUPERUSER" });
     installViewport(false);
   });
 
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    document.body.innerHTML = "";
+  });
 
   async function renderShell() {
     const pinia = createPinia();
@@ -98,25 +103,39 @@ describe("AppShell", () => {
     queryClient.clear();
   });
 
+  it("桌面折叠按钮与 Ctrl+B 共用 UI store 和布局状态", async () => {
+    const { wrapper, queryClient } = await renderShell();
+    expect(wrapper.get(".app-frame").classes()).not.toContain("rail-collapsed");
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "b", ctrlKey: true }));
+    await nextTick();
+    expect(wrapper.get(".app-frame").classes()).toContain("rail-collapsed");
+    expect(window.localStorage.getItem("personification.nav.collapsed")).toBe("1");
+    await wrapper.get(".rail-collapse").trigger("click");
+    expect(wrapper.get(".app-frame").classes()).not.toContain("rail-collapsed");
+    wrapper.unmount();
+    queryClient.clear();
+  });
+
   it("无真实网络即可选择 Bot、搜索页面和控制移动抽屉", async () => {
     installViewport(true);
     const { wrapper, queryClient } = await renderShell();
     await nextTick();
-    await vi.waitFor(() => expect(wrapper.find(".bot-selector").exists()).toBe(true));
-    const botInput = wrapper.get(".bot-selector .searchable-select-input");
-    await botInput.trigger("focus");
-    await botInput.trigger("keydown", { key: "ArrowDown" });
-    await botInput.trigger("keydown", { key: "Enter" });
+    await wrapper.get(".mobile-nav-trigger").trigger("click");
+    await nextTick();
+    const rail = document.querySelector<HTMLElement>("#admin-navigation")!;
+    await vi.waitFor(() => expect(rail.querySelector(".bot-selector")).not.toBeNull());
+    const botInput = rail.querySelector<HTMLInputElement>(".bot-selector .searchable-select-input")!;
+    const botInputWrapper = new DOMWrapper(botInput);
+    await botInputWrapper.trigger("focus");
+    await botInputWrapper.trigger("keydown", { key: "ArrowDown" });
+    await botInputWrapper.trigger("keydown", { key: "Enter" });
     expect(useBotStore().selectedBotId).toBe("10002");
 
-    await wrapper.get(".global-page-search input").setValue("告警");
-    expect(wrapper.findAll(".page-search-results button").length).toBeGreaterThan(0);
-
-    await wrapper.get(".mobile-nav-trigger").trigger("click");
-    expect(wrapper.find(".top-status-line .mobile-nav-trigger").exists()).toBe(true);
-    expect(wrapper.get(".evidence-rail").classes()).toContain("is-open");
-    await wrapper.get(".drawer-scrim").trigger("click");
-    expect(wrapper.get(".evidence-rail").classes()).not.toContain("is-open");
+    const search = new DOMWrapper(rail.querySelector<HTMLInputElement>(".global-page-search input")!);
+    await search.setValue("告警");
+    expect(rail.querySelectorAll(".page-search-results button").length).toBeGreaterThan(0);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await vi.waitFor(() => expect(rail.dataset.state).toBe("closed"));
     wrapper.unmount();
     queryClient.clear();
   });
@@ -125,23 +144,17 @@ describe("AppShell", () => {
     installViewport(true);
     const { wrapper, queryClient } = await renderShell();
     await nextTick();
-    const rail = wrapper.get("#admin-navigation");
     const trigger = wrapper.get(".mobile-nav-trigger");
-    expect(rail.attributes("inert")).toBeDefined();
-    expect(rail.attributes("aria-hidden")).toBe("true");
+    expect(document.querySelector("#admin-navigation")).toBeNull();
 
     await trigger.trigger("click");
     await nextTick();
-    expect(rail.attributes("inert")).toBeUndefined();
-    expect(rail.attributes("role")).toBe("dialog");
-    expect(document.body.style.overflow).toBe("hidden");
-    expect(document.activeElement).toBe(wrapper.get(".global-page-search input").element);
-
-    await rail.trigger("keydown", { key: "Escape" });
-    await nextTick();
-    expect(rail.attributes("inert")).toBeDefined();
-    expect(document.body.style.overflow).toBe("");
-    expect(document.activeElement).toBe(trigger.element);
+    const rail = document.querySelector<HTMLElement>("#admin-navigation")!;
+    expect(rail.getAttribute("role")).toBe("dialog");
+    await vi.waitFor(() => expect(rail.contains(document.activeElement)).toBe(true));
+    await trigger.trigger("click");
+    await vi.waitFor(() => expect(rail.dataset.state).toBe("closed"));
+    expect(trigger.attributes("aria-expanded")).toBe("false");
     wrapper.unmount();
     queryClient.clear();
   });
@@ -152,22 +165,12 @@ describe("AppShell", () => {
     await nextTick();
     await wrapper.get(".mobile-nav-trigger").trigger("click");
     await nextTick();
-    const rail = wrapper.get("#admin-navigation");
-    const focusable = rail.findAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')
-      .filter((item) => getComputedStyle(item.element).visibility !== "hidden" && getComputedStyle(item.element).display !== "none");
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    expect(first).toBeDefined();
-    expect(last).toBeDefined();
-    last!.element.focus();
-    await last!.trigger("keydown", { key: "Tab" });
-    expect(document.activeElement).toBe(first!.element);
+    const rail = document.querySelector<HTMLElement>("#admin-navigation")!;
+    await vi.waitFor(() => expect(rail.contains(document.activeElement)).toBe(true));
 
     resize(false);
     await nextTick();
-    expect(rail.attributes("inert")).toBeUndefined();
-    expect(rail.classes()).not.toContain("is-open");
-    expect(document.body.style.overflow).toBe("");
+    expect(document.querySelector("#admin-navigation")?.tagName).toBe("ASIDE");
     wrapper.unmount();
     queryClient.clear();
   });
@@ -178,17 +181,19 @@ describe("AppShell", () => {
     await nextTick();
     await wrapper.get(".mobile-nav-trigger").trigger("click");
     await nextTick();
-    expect(document.body.style.overflow).toBe("hidden");
+    expect(document.querySelector("#admin-navigation")).not.toBeNull();
     wrapper.unmount();
-    expect(document.body.style.overflow).toBe("");
+    expect(document.querySelector("#admin-navigation")).toBeNull();
     queryClient.clear();
   });
 
   it("在窄屏使用原生键盘分区选择器，并且顶部只列出当前视觉分区页面", async () => {
     const { wrapper, router, queryClient } = await renderShell();
-    const selector = wrapper.get(".mobile-section-selector select");
+    await wrapper.get(".mobile-nav-trigger").trigger("click");
+    await nextTick();
+    const selector = new DOMWrapper(document.querySelector<HTMLSelectElement>(".mobile-section-selector select")!);
     expect(selector.element.tagName).toBe("SELECT");
-    expect(wrapper.get(".mobile-section-selector label[for]").text()).toBe("选择导航分区");
+    expect(document.querySelector(".mobile-section-selector label[for]")?.textContent).toBe("选择导航分区");
 
     await selector.trigger("keydown", { key: "ArrowDown" });
     await selector.setValue("debug-recovery");

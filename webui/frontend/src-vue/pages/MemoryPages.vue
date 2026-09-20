@@ -39,6 +39,14 @@
       eyebrow="MEMORY / RECENT"
       title="最近记忆"
     >
+      <div class="memory-filters">
+        <TextField v-model="sourceFilter" label="来源类型" placeholder="例如 social_mcp_summary" />
+        <TextField v-model="typeFilter" label="记忆类型" placeholder="填写精确类型，可留空" />
+        <TextField v-model="groupFilter" label="群 ID" />
+        <TextField v-model="userFilter" label="用户 ID" />
+        <button type="button" class="button" @click="applyMemoryFilters">应用筛选</button>
+      </div>
+      <p class="muted">归属表示记忆的群与用户来源；跨群召回仍由原有权限策略决定。</p>
       <QueryBoundary :pending="recentQuery.isPending.value" :error="recentQuery.error.value">
         <div v-if="memoriesList.length === 0" class="empty-notice">
           当前没有匹配的记忆记录。
@@ -61,8 +69,16 @@
                   <br />
                   <code>{{ textAt(row, 'memory_id', 'id') || '—' }}</code>
                 </td>
-                <td :title="rawMemoryScope(row) || undefined">{{ memoryScopeLabel(rawMemoryScope(row)) }}</td>
-                <td :title="rawMemorySource(row) || undefined">{{ memorySourceLabel(rawMemorySource(row)) }}</td>
+                <td :title="rawMemoryScope(row) || undefined">
+                  {{ textAt(row, 'scope_label') || memoryScopeLabel(rawMemoryScope(row)) }}
+                  <small v-if="row.group_id" class="memory-attribution">群：{{ row.group_id }}</small>
+                  <small v-if="row.user_id" class="memory-attribution">用户：{{ row.user_id }}</small>
+                </td>
+                <td :title="rawMemorySource(row) || undefined">
+                  {{ textAt(row, 'source_kind_label') || memorySourceLabel(rawMemorySource(row)) }}
+                  <small class="memory-attribution">{{ textAt(row, 'memory_type_label', 'memory_type') }}</small>
+                  <small v-if="row.permission_type" class="memory-attribution">权限：{{ row.permission_type }}</small>
+                </td>
                 <td>
                   <StateBadge :tone="badgeTone(rawMemoryStatus(row))" :raw="rawMemoryStatus(row)">
                     {{ memoryStatusLabel(rawMemoryStatus(row)) }}
@@ -439,6 +455,7 @@ function badgeTone(stateStr: string): "ok" | "warn" | "error" | "running" | "unk
 }
 
 const MEMORY_SCOPE_LABELS: Readonly<Record<string, string>> = {
+  group_user: "群内用户",
   group: "群聊",
   private: "私聊",
   user: "当前用户",
@@ -461,7 +478,7 @@ const MEMORY_STATUS_LABELS: Readonly<Record<string, string>> = {
 };
 
 function rawMemoryScope(record: RecordObj): string {
-  return textAt(record, "scope", "session_type", "group_id");
+  return textAt(record, "scope_kind", "scope", "session_type");
 }
 
 function rawMemorySource(record: RecordObj): string {
@@ -494,9 +511,19 @@ function formatScore(score: unknown): string {
 }
 
 // Recent query
+const sourceFilter = ref("");
+const typeFilter = ref("");
+const groupFilter = ref("");
+const userFilter = ref("");
+const appliedFilters = ref({ source_kind: "", memory_type: "", group_id: "", user_id: "" });
+function applyMemoryFilters() {
+  appliedFilters.value = { source_kind: sourceFilter.value.trim(), memory_type: typeFilter.value.trim(),
+    group_id: groupFilter.value.trim(), user_id: userFilter.value.trim() };
+  page.value = 1;
+}
 const recentQuery = useQuery<Page<CatalogItem>>({
-  queryKey: computed(() => ["memories-page", page.value, appliedSearch.value]),
-  queryFn: ({ signal }) => resources.memoryPage(page.value, 20, { search: appliedSearch.value }, signal),
+  queryKey: computed(() => ["memories-page", page.value, appliedSearch.value, appliedFilters.value]),
+  queryFn: ({ signal }) => resources.memoryPage(page.value, 20, { search: appliedSearch.value, ...appliedFilters.value }, signal),
   enabled: computed(() => currentSection.value === "recent"),
 });
 
@@ -610,6 +637,8 @@ function handleRebuildPrompt() {
 </script>
 
 <style scoped>
+.memory-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); gap: 12px; align-items: end; }
+.memory-attribution { display: block; overflow-wrap: anywhere; margin-top: 4px; color: var(--color-muted); }
 .palace-zone-button {
   width: 100%;
 }

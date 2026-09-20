@@ -68,6 +68,7 @@ def test_config_entries_publish_registry_owned_ui_schemas_without_secret_echo(
     response = asyncio.run(endpoint(_admin()))
     entries = {entry.field_name: entry for entry in response.entries}
     allowed_control_kinds = {
+        "purpose_binding",
         "switch",
         "select",
         "number",

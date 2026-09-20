@@ -243,6 +243,25 @@
         </template>
 
         <template v-else>
+          <Panel eyebrow="PERSONA / EFFECTIVE CONFIG" title="人格作用域与模型配置来源">
+            <QueryBoundary :pending="personaConfigQuery.isPending.value" :error="personaConfigQuery.error.value">
+              <dl class="count-ledger persona-config-ledger">
+                <div><dt>人格生效范围</dt><dd>{{ promptScopeLabel }}</dd></div>
+                <div><dt>Prompt 优先级</dt><dd>{{ promptPriorityLabel }}</dd></div>
+                <div><dt>当前 Prompt 来源</dt><dd>{{ promptSourceLabel }}</dd></div>
+                <div><dt>上下文 Token 预算</dt><dd>{{ contextBudgetLabel }}</dd></div>
+              </dl>
+              <div class="persona-binding-list">
+                <h3>用途模型 preset 绑定</h3>
+                <p v-if="purposeBindings.length === 0" class="field-hint">当前没有显式用途绑定；各用途继承现有默认模型路由。</p>
+                <table v-else class="business-table" aria-label="用途模型 preset 绑定">
+                  <thead><tr><th>用途</th><th>Provider</th><th>模型 / preset</th></tr></thead>
+                  <tbody><tr v-for="binding in purposeBindings" :key="binding.purpose"><td><code>{{ binding.purpose }}</code></td><td>{{ binding.provider }}</td><td><code>{{ binding.model }}</code></td></tr></tbody>
+                </table>
+              </div>
+              <p class="field-hint">这里只读展示配置中心当前返回的有效值；“显式配置”表示值偏离注册默认值，不代表已验证 Provider 可用。</p>
+            </QueryBoundary>
+          </Panel>
           <Panel eyebrow="PERSONA / EFFECTIVE PROMPT" title="有效 System Prompt 预览">
             <div v-if="!effectivePrompt" class="query-empty">
               服务端没有返回可见 Prompt 预览。
@@ -729,10 +748,53 @@ const previewQuery = useQuery({
   enabled: computed(() => pageMode.value === "preview"),
 });
 
+const personaConfigQuery = useQuery({
+  queryKey: ["persona-effective-config"],
+  queryFn: ({ signal }) => resources.config(1, 200, {}, signal),
+  enabled: computed(() => pageMode.value === "preview"),
+});
+
+function personaConfigEntry(fieldName: string) {
+  return personaConfigQuery.data.value?.items.find((item) => item.field_name === fieldName);
+}
+
+const promptConfigEntry = computed(() =>
+  personaConfigEntry("personification_prompt_path")
+  ?? personaConfigEntry("personification_system_path")
+  ?? personaConfigEntry("personification_system_prompt"),
+);
+const promptScopeLabel = computed(() => promptConfigEntry.value?.scope === "global" ? "全局（所有人格回复入口）" : String(promptConfigEntry.value?.scope || "未返回"));
+const promptPriorityLabel = computed(() => {
+  const source = String(previewQuery.data.value?.source || "");
+  if (source.includes("prompt_path / system_path")) return "文件路径配置优先于内联 system_prompt";
+  if (source.includes("prompt_path")) return "prompt_path 文件配置优先于内联文本";
+  if (source.includes("system_path")) return "system_path 优先于内联 system_prompt";
+  if (source.includes("system_prompt")) return "内联 system_prompt（未命中文件路径）";
+  return "由服务端按 prompt_path → system_path → system_prompt 解析";
+});
+const promptSourceLabel = computed(() => {
+  const source = String(previewQuery.data.value?.source || "未返回");
+  const mode = previewQuery.data.value?.is_file === true ? "文件" : previewQuery.data.value?.exists === true ? "内联文本" : "未载入";
+  return `${source} · ${mode}${promptConfigEntry.value?.modified ? " · 显式配置" : " · 注册默认值"}`;
+});
+const contextBudgetLabel = computed(() => {
+  const entry = personaConfigEntry("personification_context_budget_enabled");
+  if (!entry) return "未返回";
+  return `${entry.value === true ? "已启用" : "未启用"}${entry.modified ? " · 显式配置" : " · 注册默认值"}`;
+});
+const purposeBindings = computed(() => {
+  const raw = personaConfigEntry("personification_model_purpose_bindings")?.value;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+  return Object.entries(raw as Record<string, unknown>).map(([purpose, value]) => {
+    const binding = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    return { purpose, provider: String(binding.provider_id || binding.provider || "继承默认路由"), model: String(binding.model_id || binding.model || binding.preset || "继承默认路由") };
+  });
+});
+
 const effectivePrompt = computed(() => {
   const data = previewQuery.data.value;
   if (!data) return "";
-  return String(data.prompt || data.prompt_preview || data.system_prompt || data.persona_prompt || "");
+  return String(data.content || data.prompt || data.prompt_preview || data.system_prompt || data.persona_prompt || "");
 });
 
 const previewWarnings = computed(() => {

@@ -1,3 +1,4 @@
+from ..provider_catalog import normalize_purpose_bindings
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
@@ -882,13 +883,14 @@ def _build_lite_tool_caller(plugin_config: Any, logger: Any, default_caller: Any
         get_model_override_for_role(plugin_config, MODEL_ROLE_INTENT)
         or str(getattr(plugin_config, "personification_lite_model", "") or "").strip()
     )
-    if not lite_model:
+    if not lite_model and not normalize_purpose_bindings(getattr(plugin_config, "personification_model_purpose_bindings", {})).get("lite"):
         return default_caller
     try:
         return build_routed_tool_caller(
             plugin_config=plugin_config,
             logger=logger,
             model_override=lite_model,
+            purpose="lite",
         )
     except Exception:
         return default_caller
@@ -896,6 +898,7 @@ def _build_lite_tool_caller(plugin_config: Any, logger: Any, default_caller: Any
 
 def _build_compress_tool_caller(plugin_config: Any, logger: Any) -> Any:
     return build_routed_tool_caller(
+        purpose="compress",
         plugin_config=plugin_config,
         logger=logger,
     )

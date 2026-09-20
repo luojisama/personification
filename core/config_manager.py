@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import tempfile
 import threading
 from pathlib import Path
@@ -139,6 +140,50 @@ def _write_payload_atomic(path: Path, payload: dict[str, Any]) -> None:
         raise
 
 
+_PROVIDER_CATALOG_BACKUP_SUFFIX = ".provider-catalog-v1.bak"
+
+
+def _pool_is_catalog(value: Any) -> bool:
+    return isinstance(value, list) and any(
+        isinstance(item, dict) and any(key in item for key in (
+            "provider_id", "models", "default_model_id", "purpose_models",
+        ))
+        for item in value
+    )
+
+
+def _pool_is_legacy(value: Any) -> bool:
+    return isinstance(value, list) and any(
+        isinstance(item, dict) and not any(key in item for key in (
+            "provider_id", "models", "default_model_id", "purpose_models",
+        ))
+        for item in value
+    )
+
+
+def backup_legacy_provider_catalog_once(path: Path, next_payload: Mapping[str, Any]) -> Path | None:
+    """Preserve exact old env.json bytes before its first catalog migration.
+
+    The fixed sibling is deliberately never overwritten.  A failure to create
+    it aborts the migration write: credentials in a legacy pool are material
+    configuration, not regenerable cache data.
+    """
+    if not path.exists() or not _pool_is_catalog(next_payload.get("personification_api_pools")):
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(raw, dict) or not _pool_is_legacy(raw.get("personification_api_pools")):
+        return None
+    backup = path.with_name(path.name + _PROVIDER_CATALOG_BACKUP_SUFFIX)
+    if backup.exists():
+        return backup
+    shutil.copy2(path, backup)
+    _restrict_sensitive_file_permissions(backup)
+    return backup
+
+
 class ConfigManager:
     def __init__(self, *, plugin_config: Any, logger: Any) -> None:
         self.plugin_config = plugin_config
@@ -166,6 +211,7 @@ class ConfigManager:
                 for field_name, value in dict(updates or {}).items():
                     if field_name in payload:
                         payload[field_name] = value
+                backup_legacy_provider_catalog_once(self.path, payload)
                 _write_payload_atomic(self.path, payload)
                 self._write_provenance_unlocked(
                     set(dict(updates or {})),
@@ -221,6 +267,7 @@ class ConfigManager:
         had_payload = self.path.exists()
         had_provenance = self._read_provenance_unlocked() is not None
         try:
+            backup_legacy_provider_catalog_once(self.path, payload)
             _write_payload_atomic(self.path, payload)
             info = get_env_config_load_info(self.plugin_config)
             initial = set(info.get("pre_load_explicit_fields", []) if isinstance(info, dict) else [])

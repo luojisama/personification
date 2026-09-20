@@ -13,7 +13,11 @@
             <button
               class="button"
               type="button"
-              :disabled="draftCount === 0 || hasEditorErrors || saveMutation.isPending.value"
+              :disabled="
+                draftCount === 0 ||
+                hasEditorErrors ||
+                saveMutation.isPending.value
+              "
               @click="requestConfirmation('save')"
             >
               {{ saveMutation.isPending.value ? "保存中…" : "原子保存" }}
@@ -45,7 +49,7 @@
             <b>{{ metaQuery.data.value?.total ?? 0 }}</b>
           </button>
           <button
-            v-for="name in (metaQuery.data.value?.groups ?? [])"
+            v-for="name in metaQuery.data.value?.groups ?? []"
             :key="name"
             type="button"
             :class="{ active: selectedGroup === name }"
@@ -61,7 +65,13 @@
 
         <div class="config-main">
           <Panel eyebrow="FILTER / CONFIG REGISTRY" title="快速筛选">
-            <div v-for="warning in configQuery.data.value?.compatibility_warnings ?? []" :key="warning.code" class="empty-notice" role="status">
+            <div
+              v-for="warning in configQuery.data.value
+                ?.compatibility_warnings ?? []"
+              :key="warning.code"
+              class="empty-notice"
+              role="status"
+            >
               <strong>{{ warning.title }}：</strong>{{ warning.message }}
             </div>
             <div class="config-search-row">
@@ -90,10 +100,16 @@
 
           <Panel eyebrow="MODEL / MEDIA TOOLS" title="模型与媒体配置工具">
             <div class="dossier-actions">
-              <RouterLink class="button button-secondary" to="/runtime/model-tests/video-turn">
+              <RouterLink
+                class="button button-secondary"
+                to="/runtime/model-tests/video-turn"
+              >
                 模型与视频测试
               </RouterLink>
-              <RouterLink class="button button-secondary" to="/runtime/routes/capabilities">
+              <RouterLink
+                class="button button-secondary"
+                to="/runtime/routes/capabilities"
+              >
                 查看路由能力证据
               </RouterLink>
               <button
@@ -113,6 +129,14 @@
             </div>
           </Panel>
 
+          <Panel
+            id="token-prices"
+            eyebrow="TOKEN PRICING / VERSIONED"
+            title="Token 自定义价格"
+          >
+            <TokenPriceEditor />
+          </Panel>
+
           <div ref="configResultsRef" class="config-results" tabindex="-1">
             <QueryBoundary
               :pending="configQuery.isPending.value"
@@ -124,27 +148,53 @@
                 <article
                   v-for="item in configQuery.data.value?.items ?? []"
                   :key="item.field_name"
-                  :class="['config-entry', { 'is-dirty': item.field_name in draft }]"
+                  :class="[
+                    'config-entry',
+                    { 'is-dirty': item.field_name in draft },
+                  ]"
                 >
                   <header class="config-entry-header">
                     <div>
-                      <label :for="`config-${item.field_name}`" class="config-title">
-                        <span v-html="highlightText(item.display_name, debouncedSearch)" />
+                      <label
+                        :for="`config-${item.field_name}`"
+                        class="config-title"
+                      >
+                        <span
+                          v-html="
+                            highlightText(item.display_name, debouncedSearch)
+                          "
+                        />
                       </label>
                       <code>{{ item.field_name }}</code>
                     </div>
                     <div class="config-badges">
-                      <StateBadge v-if="item.secret" tone="warn">秘密</StateBadge>
-                      <StateBadge v-if="item.advanced" tone="running">高级</StateBadge>
+                      <StateBadge v-if="item.secret" tone="warn"
+                        >秘密</StateBadge
+                      >
+                      <StateBadge v-if="item.advanced" tone="running"
+                        >高级</StateBadge
+                      >
                       <StateBadge :tone="item.hot_reloadable ? 'ok' : 'warn'">
                         {{ item.hot_reloadable ? "热加载" : "需重启" }}
                       </StateBadge>
                     </div>
                   </header>
 
-                  <p class="config-description" v-html="highlightText(item.description, debouncedSearch)" />
-                  <p v-if="item.field_name === 'personification_tool_disclosure_mode' && getResolvedValue(item) === 'off'" class="config-description" role="status">
-                    当前保留完整工具目录模式。建议改为 auto，让模型按需发现工具并减少首轮请求体积；此提示不会自动修改配置。
+                  <p
+                    class="config-description"
+                    v-html="highlightText(item.description, debouncedSearch)"
+                  />
+                  <p
+                    v-if="
+                      item.field_name ===
+                        'personification_tool_disclosure_mode' &&
+                      getResolvedValue(item) === 'off'
+                    "
+                    class="config-description"
+                    role="status"
+                  >
+                    当前保留完整工具目录模式。建议改为
+                    auto，让模型按需发现工具并减少首轮请求体积；此提示不会自动修改配置。
                   </p>
 
                   <div class="config-editor-control">
@@ -167,17 +217,31 @@
                   </div>
 
                   <small
-                    v-if="item.min_value != null || item.max_value != null || item.aliases?.length"
+                    v-if="
+                      item.min_value != null ||
+                      item.max_value != null ||
+                      item.aliases?.length
+                    "
                     class="config-meta-info"
                   >
-                    范围 {{ item.min_value ?? "−∞" }} – {{ item.max_value ?? "+∞" }}
-                    <template v-if="item.aliases?.length"> · 别名 {{ item.aliases.join("、") }}</template>
+                    范围 {{ item.min_value ?? "−∞" }} –
+                    {{ item.max_value ?? "+∞" }}
+                    <template v-if="item.aliases?.length">
+                      · 别名 {{ item.aliases.join("、") }}</template
+                    >
                   </small>
                 </article>
               </div>
             </QueryBoundary>
 
-            <Pagination v-if="configQuery.data.value" :page="currentPage" :total-pages="configQuery.data.value.total_pages" :total="configQuery.data.value.total" :disabled="configQuery.isFetching.value" @update:page="setPage" />
+            <Pagination
+              v-if="configQuery.data.value"
+              :page="currentPage"
+              :total-pages="configQuery.data.value.total_pages"
+              :total="configQuery.data.value.total"
+              :disabled="configQuery.isFetching.value"
+              @update:page="setPage"
+            />
           </div>
         </div>
       </div>
@@ -192,7 +256,11 @@
       />
 
       <div class="settings-grid">
-        <Panel class="wide-panel" eyebrow="APPEARANCE / LOCAL" title="取证台主题">
+        <Panel
+          class="wide-panel"
+          eyebrow="APPEARANCE / LOCAL"
+          title="取证台主题"
+        >
           <ThemeSwitcher />
         </Panel>
 
@@ -230,20 +298,36 @@
               <div>
                 <dt>配置版本</dt>
                 <dd>
-                  <code>{{ formatRevision(settingsQuery.data.value?.revision) }}</code>
+                  <code>{{
+                    formatRevision(settingsQuery.data.value?.revision)
+                  }}</code>
                 </dd>
               </div>
               <div>
                 <dt>参与策略</dt>
-                <dd>{{ formatParticipation(settingsQuery.data.value?.participation_v2_mode) }}</dd>
+                <dd>
+                  {{
+                    formatParticipation(
+                      settingsQuery.data.value?.participation_v2_mode,
+                    )
+                  }}
+                </dd>
               </div>
             </dl>
           </QueryBoundary>
         </Panel>
 
-        <Panel class="wide-panel" eyebrow="SECURITY / DISPLAY" title="可见数据边界">
+        <Panel
+          class="wide-panel"
+          eyebrow="SECURITY / DISPLAY"
+          title="可见数据边界"
+        >
           <div class="security-manifest">
-            <p>此管理台只消费服务端白名单 DTO。Trace 详情不会读取隐藏推理、完整 Tool 参数、原始 Tool 结果、Provider 请求/响应、Cookie、API Key 或媒体 Token。</p>
+            <p>
+              此管理台只消费服务端白名单 DTO。Trace 详情不会读取隐藏推理、完整
+              Tool 参数、原始 Tool 结果、Provider 请求/响应、Cookie、API Key
+              或媒体 Token。
+            </p>
             <code>frontend_trace_allowlist_v1</code>
           </div>
         </Panel>
@@ -305,13 +389,19 @@
       <Panel
         v-if="logSection !== 'cleanup'"
         :eyebrow="`LOGS / ${logSection.toUpperCase()}`"
-        :title="logSection === 'live' ? `实时流 · SSE ${sseStatus}` : '历史日志'"
+        :title="
+          logSection === 'live' ? `实时流 · SSE ${sseStatus}` : '历史日志'
+        "
       >
         <QueryBoundary
           :pending="logsQuery.isPending.value && logSection !== 'live'"
           :error="logsQuery.error.value"
           :empty="currentLogRows.length === 0"
-          :empty-text="logSection === 'live' ? '当前 SSE 窗口没有日志事件。' : '当前筛选没有历史日志。'"
+          :empty-text="
+            logSection === 'live'
+              ? '当前 SSE 窗口没有日志事件。'
+              : '当前筛选没有历史日志。'
+          "
         >
           <div class="table-responsive">
             <table class="data-table">
@@ -325,10 +415,15 @@
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(row, idx) in currentLogRows" :key="String(row.id || row.ts || idx)">
+                <tr
+                  v-for="(row, idx) in currentLogRows"
+                  :key="String(row.id || row.ts || idx)"
+                >
                   <td>{{ formatDateTime(row.ts as string | number) }}</td>
                   <td>
-                    <StateBadge :tone="getLogLevelTone(row.level || row.status)">
+                    <StateBadge
+                      :tone="getLogLevelTone(row.level || row.status)"
+                    >
                       {{ row.level || row.status || "INFO" }}
                     </StateBadge>
                   </td>
@@ -344,12 +439,26 @@
           </div>
         </QueryBoundary>
 
-        <Pagination v-if="logSection === 'history' && logsQuery.data.value" :page="logPage" :total-pages="logsQuery.data.value.total_pages" :total="logsQuery.data.value.total" :disabled="logsQuery.isFetching.value" @update:page="setLogPage" />
+        <Pagination
+          v-if="logSection === 'history' && logsQuery.data.value"
+          :page="logPage"
+          :total-pages="logsQuery.data.value.total_pages"
+          :total="logsQuery.data.value.total"
+          :disabled="logsQuery.isFetching.value"
+          @update:page="setLogPage"
+        />
       </Panel>
 
-      <Panel v-if="logSection === 'cleanup'" eyebrow="LOGS / CLEANUP" title="清理插件日志">
+      <Panel
+        v-if="logSection === 'cleanup'"
+        eyebrow="LOGS / CLEANUP"
+        title="清理插件日志"
+      >
         <div class="cleanup-box">
-          <p>该操作只清理插件管理日志，不影响 Trace 数据库。输入 <code>CLEAR LOGS</code> 才能提交。</p>
+          <p>
+            该操作只清理插件管理日志，不影响 Trace 数据库。输入
+            <code>CLEAR LOGS</code> 才能提交。
+          </p>
           <div class="inline-controls">
             <TextField
               id="cleanup-logs-confirmation"
@@ -362,7 +471,10 @@
             <button
               class="button button-danger"
               type="button"
-              :disabled="cleanupConfirmation !== 'CLEAR LOGS' || clearLogsMutation.isPending.value"
+              :disabled="
+                cleanupConfirmation !== 'CLEAR LOGS' ||
+                clearLogsMutation.isPending.value
+              "
               @click="requestConfirmation('clear-logs')"
             >
               {{ clearLogsMutation.isPending.value ? "清理中…" : "清理日志" }}
@@ -386,10 +498,20 @@
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { keepPreviousData, useQuery, useMutation, useQueryClient } from "@tanstack/vue-query";
+import {
+  keepPreviousData,
+  useQuery,
+  useMutation,
+  useQueryClient,
+} from "@tanstack/vue-query";
 import { resources } from "@/api/resources";
 import { diagnosticFromError, safeDiagnostic } from "@/api/diagnostics";
-import type { ConfigListItem, OperationDiagnostic, PagedCursorPage, CatalogItem } from "@/api/types";
+import type {
+  ConfigListItem,
+  OperationDiagnostic,
+  PagedCursorPage,
+  CatalogItem,
+} from "@/api/types";
 import { formatDateTime } from "@/lib/format";
 import { useRuntimeEvents } from "@vue-app/realtime/runtimeEvents";
 import PageHeader from "@vue-app/components/PageHeader.vue";
@@ -402,22 +524,37 @@ import ConfirmDialog from "@vue-app/components/ConfirmDialog.vue";
 import ThemeSwitcher from "@vue-app/components/ThemeSwitcher.vue";
 import ConfigSchemaField from "@vue-app/components/config/ConfigSchemaField.vue";
 import TextField from "@vue-app/components/forms/TextField.vue";
+import TokenPriceEditor from "@vue-app/components/TokenPriceEditor.vue";
 
-const props = withDefaults(defineProps<{ mode?: "config" | "settings" | "logs" }>(), {
-  mode: "config",
-});
+const props = withDefaults(
+  defineProps<{ mode?: "config" | "settings" | "logs" }>(),
+  {
+    mode: "config",
+  },
+);
 
 const route = useRoute();
 const router = useRouter();
 const queryClient = useQueryClient();
 const runtimeEvents = useRuntimeEvents();
 
-const activeMode = computed(() => props.mode || (route.meta.mode as "config" | "settings" | "logs") || "config");
+const activeMode = computed(
+  () =>
+    props.mode ||
+    (route.meta.mode as "config" | "settings" | "logs") ||
+    "config",
+);
 
 /* ==========================================================================
    1. 配置中心 (Config Center) 状态与逻辑
    ========================================================================== */
-type FilterKey = "modified" | "restart_required" | "hot_reloadable" | "advanced" | "secret" | "invalid";
+type FilterKey =
+  | "modified"
+  | "restart_required"
+  | "hot_reloadable"
+  | "advanced"
+  | "secret"
+  | "invalid";
 const FILTERS: Array<{ key: FilterKey; label: string }> = [
   { key: "modified", label: "仅已修改" },
   { key: "restart_required", label: "需要重启" },
@@ -427,7 +564,9 @@ const FILTERS: Array<{ key: FilterKey; label: string }> = [
   { key: "invalid", label: "验证错误" },
 ];
 
-const currentPage = computed(() => Math.max(1, Number(route.query.page ?? 1) || 1));
+const currentPage = computed(() =>
+  Math.max(1, Number(route.query.page ?? 1) || 1),
+);
 const searchInput = ref(String(route.query.search ?? ""));
 const debouncedSearch = ref(searchInput.value);
 const selectedGroup = computed(() => String(route.query.group ?? ""));
@@ -451,7 +590,9 @@ watch(searchInput, (val) => {
 
 const draft = ref<Record<string, unknown>>({});
 const editorErrors = ref<Record<string, string>>({});
-const hasEditorErrors = computed(() => Object.keys(editorErrors.value).length > 0);
+const hasEditorErrors = computed(
+  () => Object.keys(editorErrors.value).length > 0,
+);
 const draftCount = computed(() => Object.keys(draft.value).length);
 const operationError = ref<unknown>(null);
 const toolDiagnostics = ref<OperationDiagnostic[]>([]);
@@ -482,8 +623,12 @@ function setQueryParam(key: string, value?: string) {
   if (key !== "page") next.page = "1";
   router.push({ query: next });
 }
-function setGroup(group: string) { setQueryParam("group", group || undefined); }
-function setPage(p: number) { setQueryParam("page", String(p)); }
+function setGroup(group: string) {
+  setQueryParam("group", group || undefined);
+}
+function setPage(p: number) {
+  setQueryParam("page", String(p));
+}
 function toggleFilter(key: FilterKey) {
   setQueryParam(key, activeFilters.value[key] ? undefined : "1");
 }
@@ -507,7 +652,11 @@ const configQuery = useQuery({
     resources.config(
       currentPage.value,
       20,
-      { search: debouncedSearch.value, group: selectedGroup.value, ...activeFilters.value },
+      {
+        search: debouncedSearch.value,
+        group: selectedGroup.value,
+        ...activeFilters.value,
+      },
       signal,
     ),
   placeholderData: keepPreviousData,
@@ -515,7 +664,9 @@ const configQuery = useQuery({
 });
 
 function getResolvedValue(item: ConfigListItem) {
-  return item.field_name in draft.value ? draft.value[item.field_name] : item.value;
+  return item.field_name in draft.value
+    ? draft.value[item.field_name]
+    : item.value;
 }
 function updateDraft(field: string, val: unknown) {
   draft.value = { ...draft.value, [field]: val };
@@ -537,7 +688,8 @@ function resetDraft(field: string) {
 
 const saveMutation = useMutation({
   mutationFn: () => {
-    const revision = configQuery.data.value?.revision ?? metaQuery.data.value?.revision ?? "";
+    const revision =
+      configQuery.data.value?.revision ?? metaQuery.data.value?.revision ?? "";
     return resources.patchConfig(revision, draft.value);
   },
   onSuccess: () => {
@@ -547,14 +699,17 @@ const saveMutation = useMutation({
     void queryClient.invalidateQueries({ queryKey: ["config-center"] });
     void queryClient.invalidateQueries({ queryKey: ["config-meta"] });
   },
-  onError: (err) => { operationError.value = err; },
+  onError: (err) => {
+    operationError.value = err;
+  },
 });
 
 async function executeConfigTool(kind: "speed" | "recommended") {
   try {
-    const result = kind === "speed"
-      ? await resources.searchEngineSpeedTest()
-      : await resources.applyRecommendedConfig();
+    const result =
+      kind === "speed"
+        ? await resources.searchEngineSpeedTest()
+        : await resources.applyRecommendedConfig();
     toolDiagnostics.value = [result, ...toolDiagnostics.value].slice(0, 5);
     operationError.value = null;
   } catch (caught) {
@@ -575,7 +730,8 @@ const confirmationDetails = computed(() => {
     case "save":
       return {
         title: "原子保存配置草稿",
-        description: "确认将当前草稿原子写入服务端配置？包含需重启项时需重启服务生效。",
+        description:
+          "确认将当前草稿原子写入服务端配置？包含需重启项时需重启服务生效。",
         confirmLabel: "确认保存",
         dangerous: true,
       };
@@ -601,13 +757,29 @@ const confirmationDetails = computed(() => {
         dangerous: true,
       };
     default:
-      return { title: "确认操作", description: "请确认继续。", confirmLabel: "确认", dangerous: false };
+      return {
+        title: "确认操作",
+        description: "请确认继续。",
+        confirmLabel: "确认",
+        dangerous: false,
+      };
   }
 });
 
 function requestConfirmation(action: ConfirmationAction) {
-  if (action === "save" && (draftCount.value === 0 || hasEditorErrors.value || saveMutation.isPending.value)) return;
-  if (action === "clear-logs" && (cleanupConfirmation.value !== "CLEAR LOGS" || clearLogsMutation.isPending.value)) return;
+  if (
+    action === "save" &&
+    (draftCount.value === 0 ||
+      hasEditorErrors.value ||
+      saveMutation.isPending.value)
+  )
+    return;
+  if (
+    action === "clear-logs" &&
+    (cleanupConfirmation.value !== "CLEAR LOGS" ||
+      clearLogsMutation.isPending.value)
+  )
+    return;
   pendingConfirmation.value = action;
 }
 
@@ -631,7 +803,10 @@ function highlightText(text: string, needle: string): string {
   if (!needle || !text) return text || "";
   const tokens = needle.trim().split(/\s+/).filter(Boolean);
   if (!tokens.length) return text;
-  const exp = new RegExp(`(${tokens.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "gi");
+  const exp = new RegExp(
+    `(${tokens.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`,
+    "gi",
+  );
   return text.replace(exp, "<mark>$1</mark>");
 }
 
@@ -645,7 +820,9 @@ const settingsQuery = useQuery({
 });
 
 function formatRevision(rev: unknown): string {
-  return typeof rev === "string" || typeof rev === "number" ? String(rev) : "未提供";
+  return typeof rev === "string" || typeof rev === "number"
+    ? String(rev)
+    : "未提供";
 }
 function formatParticipation(mode: unknown): string {
   return typeof mode === "string" ? `影子开关（${mode}）` : "未提供";
@@ -683,12 +860,20 @@ const cleanupConfirmationError = computed(() =>
 );
 const sseStatus = computed<"connected" | "connecting" | "idle">(() => {
   if (runtimeEvents.state.value === "open") return "connected";
-  if (runtimeEvents.state.value === "connecting" || runtimeEvents.state.value === "retrying") return "connecting";
+  if (
+    runtimeEvents.state.value === "connecting" ||
+    runtimeEvents.state.value === "retrying"
+  )
+    return "connecting";
   return "idle";
 });
 const liveEvents = computed<CatalogItem[]>(() => {
   const result: CatalogItem[] = [];
-  for (let index = runtimeEvents.events.value.length - 1; index >= 0; index -= 1) {
+  for (
+    let index = runtimeEvents.events.value.length - 1;
+    index >= 0;
+    index -= 1
+  ) {
     const event = runtimeEvents.events.value[index];
     if (!event || event.topic !== "log.appended") continue;
     result.push({
@@ -705,8 +890,11 @@ const liveEvents = computed<CatalogItem[]>(() => {
 
 const logsQuery = useQuery<PagedCursorPage<CatalogItem>>({
   queryKey: computed(() => ["logs", logPage.value, debouncedLogSearch.value]),
-  queryFn: ({ signal }) => resources.logs(logPage.value, 100, debouncedLogSearch.value, signal),
-  enabled: computed(() => activeMode.value === "logs" && logSection.value === "history"),
+  queryFn: ({ signal }) =>
+    resources.logs(logPage.value, 100, debouncedLogSearch.value, signal),
+  enabled: computed(
+    () => activeMode.value === "logs" && logSection.value === "history",
+  ),
 });
 
 const clearLogsMutation = useMutation({
@@ -716,19 +904,22 @@ const clearLogsMutation = useMutation({
 function navigateLogSection(sec: string) {
   router.push(`/operations/logs/${sec}`);
 }
-function setLogPage(nextPage: number) { logPage.value = nextPage; }
+function setLogPage(nextPage: number) {
+  logPage.value = nextPage;
+}
 
 const currentLogRows = computed(() => {
   if (logSection.value === "live") return liveEvents.value;
   return logsQuery.data.value?.items ?? [];
 });
 
-function getLogLevelTone(lvl: unknown): "ok" | "warn" | "error" | "running" | "unknown" {
+function getLogLevelTone(
+  lvl: unknown,
+): "ok" | "warn" | "error" | "running" | "unknown" {
   const s = String(lvl || "").toLowerCase();
   if (s === "error" || s === "critical") return "error";
   if (s === "warn" || s === "warning") return "warn";
   if (s === "info" || s === "ok" || s === "success") return "ok";
   return "unknown";
 }
-
 </script>

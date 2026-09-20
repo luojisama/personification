@@ -57,6 +57,17 @@ def test_mimo_runtime_rejects_paths_instead_of_registered_tokens(tmp_path: Path)
         runtime._resolve_media_token(str(tmp_path / "voice.wav"))
 
 
+def test_mimo_runtime_configure_updates_browser_idle_timeout(tmp_path: Path) -> None:
+    module = load_personification_module("plugin.personification.core.mimo_web_asr_runtime")
+    runtime = module.MiMoWebAsrRuntime(tmp_path)
+
+    status = runtime.configure({"idle_timeout_seconds": 120})
+
+    assert runtime.browser.runtime_status()["idle_timeout_seconds"] == 120.0
+    assert status["state"] == "login_required"
+    assert status["browser_running"] is False
+
+
 def test_mimo_runtime_detects_network_risk_without_clicking(tmp_path: Path) -> None:
     module = load_personification_module("plugin.personification.core.mimo_web_asr_runtime")
 

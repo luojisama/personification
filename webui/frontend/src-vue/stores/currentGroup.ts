@@ -84,5 +84,10 @@ export const useCurrentGroupStore = defineStore("current-group", () => {
     return groupIdForBot(next, botId);
   }
 
-  return { selectedGroupIds, groupIdFor, setGroupId, reconcileGroups };
+  function clear(): void {
+    selectedGroupIds.value = {};
+    writeStoredGroups({});
+  }
+
+  return { selectedGroupIds, groupIdFor, setGroupId, reconcileGroups, clear };
 });

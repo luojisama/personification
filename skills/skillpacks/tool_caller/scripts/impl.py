@@ -144,6 +144,9 @@ class ToolCallerResponse:
     wire_tools_count: int | None = None
     provider_history: Any | None = field(default=None, repr=False)
     route_key: str = field(default="", repr=False)
+    usage_event_id: str = field(default_factory=lambda: uuid.uuid4().hex, repr=False)
+    usage_route_id: str = field(default="", repr=False)
+    usage_provider: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)
@@ -178,6 +181,7 @@ class BufferedToolResponseAssembler:
         self._provider_history: Any | None = None
         self._raw_events: list[Any] = []
         self._completed = False
+        self._usage_event_id = uuid.uuid4().hex
         self._error: BaseException | None = None
         self.chunk_count = 0
         self.first_chunk_ms: int | None = None
@@ -217,6 +221,11 @@ class BufferedToolResponseAssembler:
                 target["arguments"] += str(arguments)
             return
         if event.type == "usage":
+            if payload.get("usage_complete") is not False and all(
+                type(payload.get(key)) is int and payload[key] >= 0
+                for key in ("prompt_tokens", "completion_tokens")
+            ):
+                self._usage.pop("usage_complete", None)
             self._usage.update({key: value for key, value in payload.items() if value is not None})
             return
         if event.type == "error":
@@ -253,10 +262,30 @@ class BufferedToolResponseAssembler:
             tool_calls=tool_calls,
             raw={"stream": list(self._raw_events)},
             usage=dict(self._usage),
+            usage_event_id=self._usage_event_id,
             model_used=self.model_used,
             wire_tools_count=self.wire_tools_count,
             provider_history=copy.deepcopy(self._provider_history),
         )
+
+    def record_interrupted_usage(self) -> None:
+        """Keep valid metering from a failed wire attempt without exposing output."""
+        if not self._usage:
+            return
+        try:
+            from plugin.personification.core.llm_context import current_llm_context
+            from plugin.personification.core.token_ledger import record_response_usage
+
+            context = current_llm_context()
+            if not context.get("usage_route_id"):
+                return
+            response = ToolCallerResponse(finish_reason="error", content="", tool_calls=[], raw=None,
+                                          model_used=self.model_used, usage=dict(self._usage),
+                                          usage_event_id=self._usage_event_id)
+            record_response_usage(response, route_id=str(context["usage_route_id"]),
+                                  provider=str(context.get("usage_provider") or ""))
+        except Exception:
+            pass
 
     def snapshot(self, *, mode: str, route_supported: bool) -> dict[str, Any]:
         return {
@@ -410,11 +439,13 @@ async def _assemble_openai_chat_stream(
         _PROVIDER_STREAMING_TELEMETRY.finished(assembler.snapshot(mode="buffered", route_supported=True))
         return result
     except asyncio.CancelledError:
+        assembler.record_interrupted_usage()
         _PROVIDER_STREAMING_TELEMETRY.finished(
             assembler.snapshot(mode="buffered", route_supported=True), fallback=False
         )
         raise
     except BaseException:
+        assembler.record_interrupted_usage()
         _PROVIDER_STREAMING_TELEMETRY.finished(
             assembler.snapshot(mode="buffered", route_supported=True), fallback=True
         )
@@ -516,11 +547,13 @@ async def _assemble_openai_responses_stream(
         _PROVIDER_STREAMING_TELEMETRY.finished(assembler.snapshot(mode="buffered", route_supported=True))
         return result
     except asyncio.CancelledError:
+        assembler.record_interrupted_usage()
         _PROVIDER_STREAMING_TELEMETRY.finished(
             assembler.snapshot(mode="buffered", route_supported=True), fallback=False
         )
         raise
     except BaseException:
+        assembler.record_interrupted_usage()
         _PROVIDER_STREAMING_TELEMETRY.finished(
             assembler.snapshot(mode="buffered", route_supported=True), fallback=True
         )
@@ -639,11 +672,13 @@ async def _assemble_gemini_sse_stream(
         _PROVIDER_STREAMING_TELEMETRY.finished(assembler.snapshot(mode="buffered", route_supported=True))
         return result
     except asyncio.CancelledError:
+        assembler.record_interrupted_usage()
         _PROVIDER_STREAMING_TELEMETRY.finished(
             assembler.snapshot(mode="buffered", route_supported=True), fallback=False
         )
         raise
     except BaseException:
+        assembler.record_interrupted_usage()
         _PROVIDER_STREAMING_TELEMETRY.finished(
             assembler.snapshot(mode="buffered", route_supported=True), fallback=True
         )
@@ -1678,6 +1713,93 @@ def _read_usage_value(source: Any, keys: tuple[str, ...]) -> int:
     return 0
 
 
+def _read_optional_usage_value(source: Any, keys: tuple[str, ...]) -> int | None:
+    """Read a provider counter without conflating absence with an explicit zero."""
+    for key in keys:
+        if isinstance(source, dict):
+            if key not in source or source[key] is None:
+                continue
+            value = source[key]
+        else:
+            value = getattr(source, key, None)
+            if value is None:
+                continue
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            return None
+        if isinstance(value, str) and not value.strip().isdigit():
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed >= 0 else None
+    return None
+
+
+def _read_usage_child(source: Any, keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if isinstance(source, dict):
+            if key in source and source[key] is not None:
+                return source[key]
+        else:
+            value = getattr(source, key, None)
+            if value is not None:
+                return value
+    return None
+
+
+def _extract_cache_usage(usage_obj: Any) -> dict[str, Any]:
+    """Normalize only cache counters explicitly reported by the provider.
+
+    A missing field stays missing so downstream telemetry cannot turn an
+    unsupported response shape into a false cache miss.  An explicit zero is
+    retained because it is a provider-confirmed miss for that response.
+    """
+
+    openai_details = _read_usage_child(
+        usage_obj,
+        ("prompt_tokens_details", "input_tokens_details", "promptTokensDetails", "inputTokensDetails"),
+    )
+    openai_read = _read_optional_usage_value(openai_details, ("cached_tokens", "cachedTokens"))
+    if openai_read is not None:
+        return {
+            "cache_provider": "openai",
+            "cache_read_input_tokens": openai_read,
+        }
+
+    anthropic_read = _read_optional_usage_value(
+        usage_obj, ("cache_read_input_tokens", "cacheReadInputTokens")
+    )
+    anthropic_create = _read_optional_usage_value(
+        usage_obj, ("cache_creation_input_tokens", "cacheCreationInputTokens")
+    )
+    if anthropic_read is not None or anthropic_create is not None:
+        result: dict[str, Any] = {"cache_provider": "anthropic"}
+        if anthropic_read is not None:
+            result["cache_read_input_tokens"] = anthropic_read
+        if anthropic_create is not None:
+            result["cache_creation_input_tokens"] = anthropic_create
+        creation = _read_usage_child(usage_obj, ("cache_creation",))
+        for source_key, target_key in (
+            ("ephemeral_5m_input_tokens", "cache_creation_5m_input_tokens"),
+            ("ephemeral_1h_input_tokens", "cache_creation_1h_input_tokens"),
+        ):
+            count = _read_optional_usage_value(creation, (source_key,))
+            if count is not None:
+                result[target_key] = count
+        return result
+
+    gemini_read = _read_optional_usage_value(
+        usage_obj, ("cachedContentTokenCount", "cached_content_token_count")
+    )
+    if gemini_read is not None:
+        return {
+            "cache_provider": "gemini",
+            "cache_read_input_tokens": gemini_read,
+        }
+    return {}
+
+
 def _extract_usage(response: Any) -> dict:
     """从任意 LLM provider 响应提取 token 用量。
 
@@ -1708,13 +1830,21 @@ def _extract_usage(response: Any) -> dict:
         prompt = _read_usage_value(usage_obj, _USAGE_PROMPT_KEYS)
         completion = _read_usage_value(usage_obj, _USAGE_COMPLETION_KEYS)
         total = _read_usage_value(usage_obj, _USAGE_TOTAL_KEYS) or (prompt + completion)
-        if prompt == 0 and completion == 0 and total == 0:
+        cache_usage = _extract_cache_usage(usage_obj)
+        if prompt == 0 and completion == 0 and total == 0 and not cache_usage:
             return {}
-        return {
+        result = {
             "prompt_tokens": prompt,
             "completion_tokens": completion,
             "total_tokens": total,
         }
+        # Keep legacy numeric fields for telemetry, but never price a missing or
+        # malformed required counter as a provider-confirmed zero.
+        if (_read_optional_usage_value(usage_obj, _USAGE_PROMPT_KEYS) is None
+                or _read_optional_usage_value(usage_obj, _USAGE_COMPLETION_KEYS) is None):
+            result["usage_complete"] = False
+        result.update(cache_usage)
+        return result
     except Exception:
         return {}
 
@@ -2409,6 +2539,7 @@ class AnthropicToolCaller(ToolCaller):
                     return streamed_response
                 except (asyncio.CancelledError, KeyboardInterrupt):
                     if assembler is not None:
+                        assembler.record_interrupted_usage()
                         _PROVIDER_STREAMING_TELEMETRY.finished(
                             assembler.snapshot(mode="buffered", route_supported=True), fallback=False
                         )
@@ -2417,6 +2548,7 @@ class AnthropicToolCaller(ToolCaller):
                     # The tool loop has not observed a response yet, therefore
                     # the existing complete request can safely take over.
                     if assembler is not None:
+                        assembler.record_interrupted_usage()
                         _PROVIDER_STREAMING_TELEMETRY.finished(
                             assembler.snapshot(mode="buffered", route_supported=True), fallback=True
                         )

@@ -416,6 +416,7 @@ _UI_CONTROL_KINDS: frozenset[str] = frozenset(
         "string_list",
         "key_value",
         "provider_list",
+        "purpose_binding",
         "level_table",
         "behavior_band_table",
         "json_advanced",
@@ -653,6 +654,8 @@ def _build_ui_schema(entry: ConfigEntry, *, secret: bool) -> dict[str, Any]:
     """Return the registry-owned edit contract for one configuration field."""
 
     field_name = entry.field_name
+    if field_name == "personification_model_purpose_bindings":
+        return {"control_kind": "purpose_binding"}
     if field_name == "personification_api_pools":
         return _provider_list_ui_schema()
     if field_name == "personification_model_overrides":
@@ -953,6 +956,10 @@ def _enrich_entry(entry: ConfigEntry) -> ConfigEntry:
 
 def _build_entries() -> list[ConfigEntry]:
     entries = [
+        ConfigEntry(key="model_purpose_bindings", field_name="personification_model_purpose_bindings",
+                    display_name="用途模型绑定", value_type="dict", default={},
+                    scope=GLOBAL_SCOPE, category="config", group="模型路由", description="以供应商 ID 和模型 ID 绑定用途；空项继承已有默认路由。",
+                    parser=_json_object_parser),
         ConfigEntry(
             key="model_overrides",
             field_name="personification_model_overrides",

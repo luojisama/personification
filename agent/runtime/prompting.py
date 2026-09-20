@@ -20,6 +20,13 @@ from ...core.reply_style_policy import (
 from ...core.reply_length_policy import render_reply_length_prompt_hint, resolve_reply_length_policy
 from ...core.turn_media import render_turn_media_grounding
 from ...core.bot_avatar_context import render_bot_avatar_vision_prompt
+from .context_segments import (
+    PromptSegment,
+    PromptSegmentReport,
+    PromptStability,
+    validate_prompt_segments,
+    with_preceding_messages,
+)
 from .planner import render_output_mode_length_guidance
 from .tool_selection import _semantic_tool_guidance
 
@@ -42,89 +49,82 @@ def append_agent_system_prompts(
     plugin_config: Any = None,
     budget_profile: Any = None,
     bot_avatar_context: Any = None,
-) -> None:
+    segment_sink: list[PromptSegment] | None = None,
+) -> PromptSegmentReport:
+    had_preceding_messages = bool(messages)
+    segments: list[PromptSegment] = []
+
+    def append_segment(content: str, *, stability: PromptStability, source: str) -> None:
+        message = {"role": "system", "content": content}
+        messages.append(message)
+        segment = PromptSegment(role="system", content=content, stability=stability, source=source)
+        segments.append(segment)
+        if segment_sink is not None:
+            segment_sink.append(segment)
+
     if not any(
         isinstance(message, dict)
         and message.get("role") == "system"
         and PROMPT_INJECTION_GUARD_MARKER in str(message.get("content", "") or "")
         for message in messages
     ):
-        messages.append({"role": "system", "content": build_prompt_injection_guard()})
+        append_segment(build_prompt_injection_guard(), stability="stable", source="prompt_injection_guard")
     group_context = bool(is_group) if is_group is not None else any(
         isinstance(message, dict)
         and message.get("role") == "system"
         and any(marker in str(message.get("content", "") or "") for marker in ("群聊", "群里", "群友", "群成员"))
         for message in list(messages or [])
     )
-    messages.append(
-        {
-            "role": "system",
-            "content": _semantic_tool_guidance(),
-        }
-    )
-    messages.append({"role": "system", "content": render_command_runtime_prompt()})
+    append_segment(_semantic_tool_guidance(), stability="stable", source="semantic_tool_guidance")
+    append_segment(render_command_runtime_prompt(), stability="dynamic", source="command_runtime")
     if reply_required:
-        messages.append(
-            {
-                "role": "system",
-                "content": (
+        append_segment(
+                (
                     "当前是结构上必须回应的强交互轮次（私聊、明确 @/回复 bot 或其它直接指向）。"
                     "除非发送型工具已经成功排队、安全边界要求拒绝，或空证据且无法形成具体补充请求，"
                     "否则禁止输出 [NO_REPLY] 或 [SILENCE]。"
                     "如果只缺一个对方能提供的必要条件，就具体索取这一项；"
                     "不要用无法确认、没有理解或查证无结果的状态播报顶替回答。"
-                ),
-            }
+                ), stability="dynamic", source="reply_required"
         )
     if surface:
-        messages.append(
-            {
-                "role": "system",
-                "content": (
+        append_segment(
+                (
                     f"当前任务属于非聊天生成面：{surface}。"
                     "严格遵守最新用户消息要求的输出格式；不要套用群聊接话、追问、@、引用、"
                     "[NO_REPLY] 或聊天短句质量规则。需要事实查证时可以使用工具，"
                     "但不得把工具过程写进最终结果。"
-                ),
-            }
+                ), stability="dynamic", source="surface"
         )
         if rewritten_query.primary_query:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": (
+            append_segment(
+                    (
                         f"当前任务主查询：{rewritten_query.primary_query}\n"
                         + (
                             f"候选查询：{'；'.join(rewritten_query.query_candidates[:4])}\n"
                             if rewritten_query.query_candidates else ""
                         )
                         + "仅在任务确实需要外部事实时使用这些查询；创作与审阅任务不要为了调用工具而调用。"
-                    ),
-                }
+                    ), stability="dynamic", source="surface_query"
             )
-        return
+        return with_preceding_messages(validate_prompt_segments(segments), had_preceding_messages=had_preceding_messages)
     length_policy = resolve_reply_length_policy(
         plugin_config,
         turn_plan=turn_plan,
         budget_profile=budget_profile,
         media_context=turn_media_context,
     )
-    messages.append({"role": "system", "content": render_reply_length_prompt_hint(length_policy)})
+    append_segment(render_reply_length_prompt_hint(length_policy), stability="dynamic", source="reply_length")
     if turn_plan is not None and length_policy.mode != "bypass":
-        messages.append(
-            {
-                "role": "system",
-                "content": render_output_mode_length_guidance(
+        append_segment(
+                render_output_mode_length_guidance(
                     str(getattr(turn_plan, "output_mode", "") or "chat_short"),
                     reply_shape=str(getattr(turn_plan, "reply_shape", "auto") or "auto"),
                     max_chars_override=length_policy.max_chars,
-                ),
-            }
+                ), stability="dynamic", source="output_mode"
         )
-    messages.append(
-        {
-            "role": "system",
-            "content": (
+    append_segment(
+            (
                 "最终对用户的回复必须自然、像群聊里的活人接话。"
                 "默认以讨论和闲聊为主基调：给一点具体态度、接住一个点，或顺着话题往前聊半步；"
                 "不要只附和、感叹，也不要把群友刚说过的内容换一种说法转述。"
@@ -138,33 +138,29 @@ def append_agent_system_prompts(
                 "轻松调侃时允许一句不索要信息的反击式反问。信息不足但能给具体态度时再短答，否则按空证据纪律收口。"
                 "涉及本地天气、出行、城市或附近状态时，如果用户没明说地点，先看已注入的用户档案；仍不确定可调用记忆工具确认，不能猜城市。"
                 "最终只输出纯文本，不要 markdown、标题、项目符号列表、编号列表、URL 列表，也不要说“我需要确认一下”“根据搜索结果”。"
-            ),
-        }
+            ), stability="stable", source="chat_reply_policy"
     )
     if turn_plan is not None:
-        messages.append(
-            {
-                "role": "system",
-                "content": build_speech_act_policy_prompt(
+        append_segment(
+                build_speech_act_policy_prompt(
                     speech_act=str(getattr(turn_plan, "speech_act", "") or ""),
                     output_mode=str(getattr(turn_plan, "output_mode", "") or ""),
                     session_goal=str(getattr(turn_plan, "session_goal", "") or ""),
                     is_group=group_context,
-                ),
-            }
+                ), stability="dynamic", source="speech_act"
         )
         domain_prompt = build_domain_evidence_policy_prompt(
             domain_focus=str(getattr(turn_plan, "domain_focus", "general") or "general"),
             evidence_policy=str(getattr(turn_plan, "evidence_policy", "none") or "none"),
         )
         if domain_prompt:
-            messages.append({"role": "system", "content": domain_prompt})
+            append_segment(domain_prompt, stability="dynamic", source="domain_evidence")
         support_prompt = build_emotional_support_policy_prompt(getattr(turn_plan, "emotional_support", None))
         if support_prompt:
-            messages.append({"role": "system", "content": support_prompt})
+            append_segment(support_prompt, stability="dynamic", source="emotional_support")
         meme_prompt = format_meme_turn_prompt(getattr(turn_plan, "meme_turn_context", None))
         if meme_prompt:
-            messages.append({"role": "system", "content": meme_prompt})
+            append_segment(meme_prompt, stability="dynamic", source="meme_context")
     directed_exchange_prompt = build_directed_exchange_policy_prompt(
         is_direct_mention=is_direct_mention,
         is_group=group_context,
@@ -172,11 +168,9 @@ def append_agent_system_prompts(
         output_mode=str(getattr(turn_plan, "output_mode", "") or ""),
     )
     if directed_exchange_prompt:
-        messages.append({"role": "system", "content": directed_exchange_prompt})
-    messages.append(
-        {
-            "role": "system",
-            "content": (
+        append_segment(directed_exchange_prompt, stability="dynamic", source="directed_exchange")
+    append_segment(
+            (
                 "群聊里通常多个话题并行：A 群友讨论地震、B 群友讨论自己的近况、C 群友在闲扯，"
                 "时间相近不代表语义相关。\n"
                 "硬性规则：\n"
@@ -186,46 +180,36 @@ def append_agent_system_prompts(
                 "当 C 问「这次地震严重吗」时，你只能基于 A 的位置信息回答，绝不能说「浙江有震感」。\n"
                 "3. 引用某人状态前先问自己：这个状态是不是当前消息的语境？如果不是，就不要写进去。\n"
                 "4. 拿不准时不要把无关上下文糊上去；没有具体内容可说就按空证据纪律收口。"
-            ),
-        }
+            ), stability="stable", source="multi_topic_boundary"
     )
     if runtime_chat_intent == "banter":
-        messages.append(
-            {
-                "role": "system",
-                "content": (
+        append_segment(
+                (
                     "当前更像接梗、吐槽、复读或顺嘴接话场景，优先短句自然接话。"
                     "但如果群友分享了你看不懂的内容、梗、专有名词、节目名或外号（比如配图配文、视频/链接分享），"
                     "且可用工具里有 web_search、search_web、wiki_lookup 或 resolve_acg_entity，必须先快速查清楚那是什么，再用自己的口吻接住——"
                     "尤其是“这个动画牛逼/这个角色好帅/这图太强”这类指代最近 ACG 上下文的评价，要查角色/作品/剧情锚点，"
                     "不要直接在群里问『这是什么梗/哪个游戏/什么意思』，也不要凭记忆猜。"
                     "查证只为听懂梗，别变成解释、定义、考据或百科腔，查完一句话接住即可。"
-                ),
-            }
+                ), stability="dynamic", source="intent_banter"
         )
     elif runtime_chat_intent == "image_generation":
-        messages.append(
-            {
-                "role": "system",
-                "content": (
+        append_segment(
+                (
                     "当前用户是在要求生成图片。必须调用 generate_image 工具，"
                     "不要只回复提示词、描述或制作步骤。"
-                ),
-            }
+                ), stability="dynamic", source="intent_image_generation"
         )
     elif runtime_chat_intent == "expression":
-        messages.append(
-            {
-                "role": "system",
-                "content": (
+        append_segment(
+                (
                     "当前用户是在要求你发送 QQ 表情，或这轮最适合只用 QQ 表情回应。"
                     "必须从可用的 send_qq_face、send_qq_favorite_expression、send_qq_recommended_expression 中选择合适工具；"
                     "工具成功后最终只输出 [SILENCE]，不要再说“已发送”、不要解释工具。"
                     "如果用户明确说小黄脸/系统表情，优先 send_qq_face；"
                     "明确说收藏表情时用 send_qq_favorite_expression；"
                     "需要按情绪或场景匹配图片表情时用 send_qq_recommended_expression。"
-                ),
-            }
+                ), stability="dynamic", source="intent_expression"
         )
     elif runtime_chat_intent == "plugin_question":
         if plugin_query_intent == "runtime_capability":
@@ -252,43 +236,31 @@ def append_agent_system_prompts(
                 "确认后按本轮受信任运行时命令配置，用 invoke_plugin 传入完整命令文本代为执行，再用你自己的语气转述结果，"
                 "不要让用户自己去发命令。"
             )
-        messages.append(
-            {
-                "role": "system",
-                "content": plugin_hint,
-            }
-        )
-    messages.append(
-        {
-            "role": "system",
-            "content": build_media_understanding_output_policy_prompt(),
-        }
+        append_segment(plugin_hint, stability="dynamic", source="intent_plugin_question")
+    append_segment(
+        build_media_understanding_output_policy_prompt(),
+        stability="stable",
+        source="media_output_policy",
     )
-    messages.append(
-        {
-            "role": "system",
-            "content": build_empty_evidence_output_policy_prompt(),
-        }
+    append_segment(
+        build_empty_evidence_output_policy_prompt(),
+        stability="stable",
+        source="empty_evidence_policy",
     )
     media_grounding = render_turn_media_grounding(turn_media_context)
     if media_grounding:
-        messages.append({"role": "system", "content": media_grounding})
+        append_segment(media_grounding, stability="dynamic", source="media_grounding")
     if getattr(intent_decision, "ambiguity_level", "") == "high":
-        messages.append(
-            {
-                "role": "system",
-                "content": (
+        append_segment(
+                (
                     "当前这句里有高歧义名词/对象，容易误解。"
                     "如果有可用查证工具，先查证再说；上下文和工具证据仍不足时，"
                     "非强交互直接 [NO_REPLY]，强交互只索取一个明确且对方能提供的必要条件。"
-                ),
-            }
+                ), stability="dynamic", source="ambiguity"
         )
     if rewritten_query.primary_query:
-        messages.append(
-            {
-                "role": "system",
-                "content": (
+        append_segment(
+                (
                     f"当前检索意图主查询：{rewritten_query.primary_query}\n"
                     + (
                         f"候选查询：{'；'.join(rewritten_query.query_candidates[:4])}\n"
@@ -305,8 +277,7 @@ def append_agent_system_prompts(
                     + "如果需要调用 web_search/wiki_lookup/resolve_acg_entity/vision_analyze，优先使用这些检索词，"
                     + "不要直接拿用户最后一句口语补充当 query。"
                     + "工具优先级由你结合这份计划和当前证据自主判断。"
-                ),
-            }
+                ), stability="dynamic", source="rewritten_query"
         )
     if user_images:
         if direct_image_input:
@@ -329,20 +300,15 @@ def append_agent_system_prompts(
                 "如果没有可见摘要、文字 cue 或明确提问，不要泛泛评价图片/表情，也不要追问“看到什么了”；"
                 "群聊没人 cue 你时可以输出 [NO_REPLY]。"
             )
-        messages.append(
-            {
-                "role": "system",
-                "content": image_prompt,
-            }
-        )
+        append_segment(image_prompt, stability="dynamic", source="user_images")
     bot_avatar_prompt = render_bot_avatar_vision_prompt(bot_avatar_context)
     if bot_avatar_prompt:
-        messages.append(
-            {
-                "role": "system",
-                "content": bot_avatar_prompt,
-            }
-        )
+        append_segment(bot_avatar_prompt, stability="dynamic", source="bot_avatar")
+
+    return with_preceding_messages(
+        validate_prompt_segments(segments),
+        had_preceding_messages=had_preceding_messages,
+    )
 
 
 __all__ = ["append_agent_system_prompts"]

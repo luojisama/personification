@@ -1,6 +1,6 @@
 import { mount } from "@vue/test-utils";
 import { nextTick } from "vue";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import ConfirmDialog from "@vue-app/components/ConfirmDialog.vue";
 import Drawer from "@vue-app/components/Drawer.vue";
@@ -65,7 +65,9 @@ describe("通用表单控件的可访问性合同", () => {
   });
 
   it("可搜索下拉框保留组合框语义，并支持方向键和回车选择", async () => {
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
     const wrapper = mount(SearchableSelect, {
+      attachTo: document.body,
       props: {
         modelValue: "primary",
         label: "选择 Bot",
@@ -77,14 +79,80 @@ describe("通用表单控件的可访问性合同", () => {
       },
     });
     const input = wrapper.get("input[role=combobox]");
-    expect(input.attributes("aria-controls")).toBe("bot-choice-options");
     await input.trigger("focus");
+    await nextTick();
+    const listboxId = input.attributes("aria-controls");
+    expect(listboxId).toBeTruthy();
+    expect(document.getElementById(listboxId!)?.getAttribute("role")).toBe("listbox");
     expect(input.attributes("aria-expanded")).toBe("true");
     await input.trigger("keydown", { key: "ArrowDown" });
-    expect(wrapper.get("#bot-choice-options-1").classes()).toContain("active");
+    expect(document.querySelector('[data-highlighted]')?.textContent).toContain("测试副号");
     await input.trigger("keydown", { key: "Enter" });
     expect(wrapper.emitted("update:modelValue")?.[0]).toEqual(["secondary"]);
     expect(input.attributes("aria-expanded")).toBe("false");
+    wrapper.unmount();
+    Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+  });
+
+  it("可搜索下拉框通过 Portal 展开，并在过滤和选项刷新时保留当前值", async () => {
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+    const wrapper = mount(SearchableSelect, {
+      attachTo: document.body,
+      props: {
+        modelValue: "saved-alias",
+        label: "选择模型",
+        id: "model-choice",
+        options: [
+          { value: "saved-alias", label: "已保存别名" },
+          { value: "gemini-flash", label: "Gemini Flash", description: "快速模型" },
+          { value: "disabled", label: "停用模型", disabled: true },
+        ],
+      },
+    });
+    const input = wrapper.get("input[role=combobox]");
+    expect((input.element as HTMLInputElement).value).toBe("已保存别名");
+    await input.trigger("focus");
+    await nextTick();
+    const portal = document.querySelector(".searchable-select-options");
+    expect(portal).not.toBeNull();
+    expect(wrapper.element.contains(portal)).toBe(false);
+    expect(portal?.textContent).not.toContain("停用模型");
+
+    await input.setValue("快速");
+    await nextTick();
+    expect(portal?.textContent).toContain("Gemini Flash");
+    expect(portal?.textContent).not.toContain("已保存别名");
+    await input.setValue("不存在");
+    await nextTick();
+    expect(portal?.textContent).toContain("没有匹配的选项");
+    expect(wrapper.emitted("update:modelValue")).toBeUndefined();
+
+    await wrapper.setProps({ options: [{ value: "gemini-flash", label: "Gemini Flash" }] });
+    expect(wrapper.props("modelValue")).toBe("saved-alias");
+    expect(wrapper.emitted("update:modelValue")).toBeUndefined();
+    await input.trigger("keydown", { key: "Escape" });
+    await new Promise((resolve) => window.setTimeout(resolve, 5));
+    expect((input.element as HTMLInputElement).value).toBe("");
+    wrapper.unmount();
+    Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+  });
+
+  it("可搜索下拉框保留空值，整体禁用时不能展开", async () => {
+    const wrapper = mount(SearchableSelect, {
+      props: {
+        modelValue: "",
+        label: "用途模型",
+        id: "purpose-model",
+        disabled: true,
+        options: [{ value: "model-a", label: "模型 A" }],
+      },
+    });
+    const input = wrapper.get("input[role=combobox]");
+    expect((input.element as HTMLInputElement).value).toBe("");
+    expect(input.attributes("disabled")).toBeDefined();
+    await input.trigger("focus");
+    expect(input.attributes("aria-expanded")).toBe("false");
+    expect(wrapper.emitted("update:modelValue")).toBeUndefined();
   });
 
   it("开关与结构化列表保留键盘可达的原生控件和逐项标签", async () => {

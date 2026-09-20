@@ -84,6 +84,7 @@ def test_corrupted_usage_value_falls_back_to_zero() -> None:
     # "abc" 解析失败应当返 0；5 仍读到 → 但 prompt=0 完成度不够 → 实际 total=5 不为 0，所以返回 dict
     assert out["completion_tokens"] == 5
     assert out["prompt_tokens"] == 0
+    assert out["usage_complete"] is False
 
 
 def test_usage_metadata_snake_case_variant() -> None:
@@ -97,3 +98,119 @@ def test_usage_metadata_snake_case_variant() -> None:
     }
     out = impl._extract_usage(response)
     assert out == {"prompt_tokens": 11, "completion_tokens": 22, "total_tokens": 33}
+
+
+def test_openai_cache_usage_preserves_explicit_zero() -> None:
+    response = {
+        "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 5,
+            "total_tokens": 125,
+            "prompt_tokens_details": {"cached_tokens": 0},
+        }
+    }
+    out = impl._extract_usage(response)
+    assert out["cache_provider"] == "openai"
+    assert out["cache_read_input_tokens"] == 0
+    assert out["total_tokens"] == 125
+
+
+def test_openai_responses_cache_usage_object_shape() -> None:
+    usage = SimpleNamespace(
+        input_tokens=80,
+        output_tokens=7,
+        total_tokens=87,
+        input_tokens_details=SimpleNamespace(cached_tokens=64),
+    )
+    out = impl._extract_usage(SimpleNamespace(usage=usage))
+    assert out["cache_provider"] == "openai"
+    assert out["cache_read_input_tokens"] == 64
+
+
+def test_anthropic_cache_usage_keeps_read_and_creation_separate() -> None:
+    out = impl._extract_usage(
+        {
+            "usage": {
+                "input_tokens": 20,
+                "output_tokens": 4,
+                "cache_read_input_tokens": 100,
+                "cache_creation_input_tokens": 50,
+            }
+        }
+    )
+    assert out["cache_provider"] == "anthropic"
+    assert out["cache_read_input_tokens"] == 100
+    assert out["cache_creation_input_tokens"] == 50
+    assert out["total_tokens"] == 24
+
+
+def test_gemini_cache_usage_supports_sdk_snake_case() -> None:
+    usage = SimpleNamespace(
+        promptTokenCount=90,
+        candidatesTokenCount=10,
+        totalTokenCount=100,
+        cached_content_token_count=72,
+    )
+    out = impl._extract_usage(SimpleNamespace(usage_metadata=usage))
+    assert out["cache_provider"] == "gemini"
+    assert out["cache_read_input_tokens"] == 72
+
+
+def test_missing_cache_usage_stays_unknown_instead_of_zero() -> None:
+    out = impl._extract_usage(
+        {"usage": {"prompt_tokens": 9, "completion_tokens": 1, "total_tokens": 10}}
+    )
+    assert "cache_provider" not in out
+    assert "cache_read_input_tokens" not in out
+
+
+def test_cache_usage_rejects_bool_float_negative_and_malformed_values() -> None:
+    for value in (True, 1.5, -1, "-1", "1.5", "bad"):
+        out = impl._extract_usage(
+            {
+                "usage": {
+                    "prompt_tokens": 4,
+                    "completion_tokens": 1,
+                    "prompt_tokens_details": {"cached_tokens": value},
+                }
+            }
+        )
+        assert "cache_provider" not in out
+        assert "cache_read_input_tokens" not in out
+
+
+def test_cache_only_explicit_usage_is_not_discarded() -> None:
+    out = impl._extract_usage(
+        {
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 32,
+            }
+        }
+    )
+    assert out == {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cache_provider": "anthropic",
+        "cache_read_input_tokens": 32,
+    }
+
+
+def test_anthropic_cache_creation_duration_is_preserved() -> None:
+    result = impl._extract_usage({"usage": {
+        "input_tokens": 10, "output_tokens": 2,
+        "cache_read_input_tokens": 100, "cache_creation_input_tokens": 80,
+        "cache_creation": {"ephemeral_5m_input_tokens": 30, "ephemeral_1h_input_tokens": 50},
+    }})
+    assert result["cache_creation_input_tokens"] == 80
+    assert result["cache_creation_5m_input_tokens"] == 30
+    assert result["cache_creation_1h_input_tokens"] == 50
+
+
+def test_response_usage_identity_is_unique_and_not_route_affinity() -> None:
+    first = impl.ToolCallerResponse("stop", "", [], None)
+    second = impl.ToolCallerResponse("stop", "", [], None)
+    assert first.usage_event_id != second.usage_event_id
+    assert first.usage_route_id == second.usage_route_id == ""

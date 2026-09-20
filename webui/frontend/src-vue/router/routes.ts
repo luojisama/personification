@@ -1,26 +1,26 @@
 import type { RouteRecordRaw } from "vue-router";
 
 import { FLAT_ROUTE_REDIRECTS } from "@/app/navigation";
-import AgentStatusPage from "@vue-app/pages/AgentStatusPage.vue";
-import CapabilityBusinessPages from "@vue-app/pages/CapabilityBusinessPages.vue";
-import ConfigOperationsPages from "@vue-app/pages/ConfigOperationsPages.vue";
-import FunctionalTestsPage from "@vue-app/pages/FunctionalTestsPage.vue";
-import GroupSwitchesPage from "@vue-app/pages/GroupSwitchesPage.vue";
-import ManagementDataPage from "@vue-app/pages/ManagementDataPage.vue";
-import MemoryPages from "@vue-app/pages/MemoryPages.vue";
-import ControlledModerationPage from "@vue-app/pages/ControlledModerationPage.vue";
-import ModelTestsPage from "@vue-app/pages/ModelTestsPage.vue";
-import NotFoundPage from "@vue-app/pages/NotFoundPage.vue";
-import OverviewPage from "@vue-app/pages/OverviewPage.vue";
-import OperationsBusinessPages from "@vue-app/pages/OperationsBusinessPages.vue";
-import PersonaFeaturePages from "@vue-app/pages/PersonaFeaturePages.vue";
-import ProactiveDiagnosticsPage from "@vue-app/pages/ProactiveDiagnosticsPage.vue";
-import QzoneCapabilitiesPage from "@vue-app/pages/QzoneCapabilitiesPage.vue";
-import RecoveryPage from "@vue-app/pages/RecoveryPage.vue";
-import RouteCapabilitiesPage from "@vue-app/pages/RouteCapabilitiesPage.vue";
-import SystemDiagnosticsPage from "@vue-app/pages/SystemDiagnosticsPage.vue";
-import TokenStatisticsPage from "@vue-app/pages/TokenStatisticsPage.vue";
-import TracesPage from "@vue-app/pages/TracesPage.vue";
+const AgentStatusPage = () => import("@vue-app/pages/AgentStatusPage.vue");
+const CapabilityBusinessPages = () => import("@vue-app/pages/CapabilityBusinessPages.vue");
+const ConfigOperationsPages = () => import("@vue-app/pages/ConfigOperationsPages.vue");
+const ControlledModerationPage = () => import("@vue-app/pages/ControlledModerationPage.vue");
+const FunctionalTestsPage = () => import("@vue-app/pages/FunctionalTestsPage.vue");
+const GroupSwitchesPage = () => import("@vue-app/pages/GroupSwitchesPage.vue");
+const ManagementDataPage = () => import("@vue-app/pages/ManagementDataPage.vue");
+const MemoryPages = () => import("@vue-app/pages/MemoryPages.vue");
+const ModelTestsPage = () => import("@vue-app/pages/ModelTestsPage.vue");
+const NotFoundPage = () => import("@vue-app/pages/NotFoundPage.vue");
+const OperationsBusinessPages = () => import("@vue-app/pages/OperationsBusinessPages.vue");
+const OverviewPage = () => import("@vue-app/pages/OverviewPage.vue");
+const PersonaFeaturePages = () => import("@vue-app/pages/PersonaFeaturePages.vue");
+const ProactiveDiagnosticsPage = () => import("@vue-app/pages/ProactiveDiagnosticsPage.vue");
+const QzoneCapabilitiesPage = () => import("@vue-app/pages/QzoneCapabilitiesPage.vue");
+const RecoveryPage = () => import("@vue-app/pages/RecoveryPage.vue");
+const RouteCapabilitiesPage = () => import("@vue-app/pages/RouteCapabilitiesPage.vue");
+const SystemDiagnosticsPage = () => import("@vue-app/pages/SystemDiagnosticsPage.vue");
+const TokenStatisticsPage = () => import("@vue-app/pages/TokenStatisticsPage.vue");
+const TracesPage = () => import("@vue-app/pages/TracesPage.vue");
 
 const flatRedirectRoutes: RouteRecordRaw[] = Object.entries(FLAT_ROUTE_REDIRECTS).map(
   ([path, target]) => ({

@@ -1,4 +1,4 @@
-import { API_BASE } from "../api/client";
+import { API_BASE, ApiError, notifyAuthenticationInvalid } from "../api/client";
 import type { RuntimeEvent } from "../api/types";
 
 export const EVENT_CURSOR_KEY = "personification.console.last-event-id";
@@ -13,6 +13,7 @@ export interface RuntimeEventClientOptions {
   onEvent: (event: RuntimeEvent) => void;
   onResync: (latestId: number) => void;
   onState: (state: "connecting" | "open" | "retrying" | "closed") => void;
+  onUnauthorized?: (error: ApiError) => void;
   fetcher?: typeof fetch;
   storage?: Pick<Storage, "getItem" | "setItem">;
 }
@@ -111,6 +112,13 @@ export class RuntimeEventClient {
       credentials: "include",
       signal: this.controller.signal,
     });
+    if (response.status === 401) {
+      const error = new ApiError(401, { detail: "UNAUTHORIZED" });
+      this.stopped = true;
+      notifyAuthenticationInvalid(error);
+      this.options.onUnauthorized?.(error);
+      throw error;
+    }
     if (!response.ok || !response.body) throw new Error(`SSE 不可用（sse_http_${response.status}）`);
     this.options.onState("open");
 
@@ -124,12 +132,13 @@ export class RuntimeEventClient {
       buffer = blocks.pop() ?? "";
       for (const block of blocks) {
         const frame = parseSseBlock(block);
-        if (frame) this.handleFrame(frame);
+        if (frame && !this.stopped) this.handleFrame(frame);
       }
     }
   }
 
   private handleFrame(frame: SseFrame): void {
+    if (this.stopped) return;
     let payload: unknown = {};
     try {
       payload = frame.data ? JSON.parse(frame.data) : {};

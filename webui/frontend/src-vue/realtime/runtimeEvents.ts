@@ -1,6 +1,7 @@
 import { inject, ref, shallowRef, type App, type InjectionKey, type Ref, type ShallowRef } from "vue";
 import type { QueryClient } from "@tanstack/vue-query";
 
+import { onAuthenticationInvalid } from "@/api/client";
 import type { RuntimeEvent } from "@/api/types";
 import { RuntimeEventClient, type RuntimeEventClientOptions } from "@/realtime/sse";
 
@@ -51,6 +52,7 @@ export function createRuntimeEventsManager(
   const state = ref<ConnectionState>("connecting");
   const resyncCount = ref(0);
   const client = shallowRef<RuntimeEventClientLike | null>(null);
+  let generation = 0;
 
   function handleEvent(event: RuntimeEvent): void {
     events.value = [...events.value, event].slice(-500);
@@ -67,22 +69,31 @@ export function createRuntimeEventsManager(
 
   function start(): void {
     if (client.value) return;
+    const currentGeneration = ++generation;
+    const active = () => generation === currentGeneration && client.value === instance;
     const instance = clientFactory({
-      onEvent: handleEvent,
-      onResync: handleResync,
+      onEvent: (event) => { if (active()) handleEvent(event); },
+      onResync: (latestId) => { if (active()) handleResync(latestId); },
       onState: (nextState) => {
-        state.value = nextState;
+        if (active()) state.value = nextState;
       },
+      onUnauthorized: () => stop(),
     });
     client.value = instance;
     void instance.start();
   }
 
   function stop(): void {
+    generation += 1;
     client.value?.stop();
     client.value = null;
+    events.value = [];
+    resyncCount.value = 0;
+    try { window.sessionStorage.removeItem("personification.console.last-event-id"); } catch { /* 忽略不可用存储 */ }
     state.value = "closed";
   }
+
+  onAuthenticationInvalid(() => stop());
 
   return { events, state, resyncCount, client, start, stop };
 }

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 import threading
+import uuid
+from decimal import Decimal, localcontext
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -15,6 +17,7 @@ _WINDOW_ALIASES = {
     "week": "week",
     "30d": "month",
     "month": "month",
+    "all": "all",
 }
 _GENERATION_LOCK = threading.Lock()
 _LEDGER_GENERATION = 0
@@ -36,7 +39,9 @@ def record_response_usage(
     *,
     purpose: str = "",
     model_fallback: str = "",
-) -> None:
+    route_id: str = "",
+    provider: str = "",
+) -> bool:
     """便捷 helper：拿到 ToolCallerResponse 后调一次，自动从 llm_context 取 group/user/purpose。
 
     用法：
@@ -56,22 +61,52 @@ def record_response_usage(
     try:
         usage = getattr(response, "usage", None) or {}
         if not isinstance(usage, dict):
-            return
-        prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
-        completion_tokens = int(usage.get("completion_tokens", 0) or 0)
-        if prompt_tokens == 0 and completion_tokens == 0:
-            return
+            return False
+        if usage.get("usage_complete") is False:
+            return False
+        prompt_tokens = _required_token_count(usage.get("prompt_tokens", 0))
+        completion_tokens = _required_token_count(usage.get("completion_tokens", 0))
+        if prompt_tokens is None or completion_tokens is None:
+            return False
+        cache_read = _optional_token_count(usage.get("cache_read_input_tokens"))
+        cache_create = _optional_token_count(usage.get("cache_creation_input_tokens"))
+        cache_5m = _optional_token_count(usage.get("cache_creation_5m_input_tokens"))
+        cache_1h = _optional_token_count(usage.get("cache_creation_1h_input_tokens"))
+        if prompt_tokens == 0 and completion_tokens == 0 and not any(
+            value is not None and value > 0 for value in (cache_read, cache_create, cache_5m, cache_1h)
+        ):
+            return False
         ctx = current_llm_context()
-        record_llm_call(
+        return record_llm_call(
             model=str(getattr(response, "model_used", "") or model_fallback or ""),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             group_id=str(ctx.get("group_id", "") or ""),
             user_id=str(ctx.get("user_id", "") or ""),
             purpose=str(purpose or ctx.get("purpose", "") or "direct_call"),
+            bot_id=str(ctx.get("bot_id", "") or ""),
+            provider=str(usage.get("cache_provider") or getattr(response, "usage_provider", "") or provider or ""),
+            route_id=str(route_id or getattr(response, "usage_route_id", "") or ""),
+            event_id=str(getattr(response, "usage_event_id", "") or ""),
+            cache_read_tokens=cache_read,
+            cache_create_tokens=cache_create,
+            cache_create_5m_tokens=cache_5m,
+            cache_create_1h_tokens=cache_1h,
         )
     except Exception:
-        pass
+        return False
+
+
+def _required_token_count(value: Any) -> int | None:
+    if type(value) is not int or value < 0:
+        return None
+    return value
+
+
+def _optional_token_count(value: Any) -> int | None:
+    if type(value) is int and value >= 0:
+        return value
+    return None
 
 
 def _today() -> str:
@@ -147,9 +182,17 @@ def record_llm_call(
     user_id: str = "",
     purpose: str = "",
     provider: str = "",
+    route_id: str = "",
+    event_id: str = "",
+    bot_id: str = "",
+    cache_read_tokens: int | None = None,
+    cache_create_tokens: int | None = None,
+    cache_create_5m_tokens: int | None = None,
+    cache_create_1h_tokens: int | None = None,
+    observed_at: float | None = None,
     bucket_day: str | None = None,
     bucket_hour: str | None = None,
-) -> None:
+) -> bool:
     """记录一次 LLM 调用，按 (day, group, user, model, purpose) 桶累加。
     `provider` 显式提供时优先；否则从 model 名推导（anthropic/gemini/openai/codex）。
     purpose 内已编码 provider 信息：写入时实际 purpose=`{original}|provider={p}`，
@@ -159,18 +202,75 @@ def record_llm_call(
         bucket_day=bucket_day,
         bucket_hour=bucket_hour,
     )
-    pt = max(0, int(prompt_tokens or 0))
-    ct = max(0, int(completion_tokens or 0))
-    if pt == 0 and ct == 0:
-        return
-    tt = pt + ct
+    pt = _required_token_count(prompt_tokens)
+    ct = _required_token_count(completion_tokens)
+    if pt is None or ct is None:
+        return False
+    cache_read = _optional_token_count(cache_read_tokens)
+    cache_create = _optional_token_count(cache_create_tokens)
+    cache_5m = _optional_token_count(cache_create_5m_tokens)
+    cache_1h = _optional_token_count(cache_create_1h_tokens)
+    if pt == 0 and ct == 0 and not any(
+        value is not None and value > 0 for value in (cache_read, cache_create, cache_5m, cache_1h)
+    ):
+        return False
     resolved_provider = _infer_provider(model, provider)
+    # OpenAI/Gemini prompt totals include cached input; Anthropic reports cache
+    # read/creation separately from input_tokens.
+    input_includes_cache = resolved_provider != "anthropic"
+    normalized_prompt = pt
+    if not input_includes_cache:
+        normalized_prompt += cache_read or 0
+        normalized_prompt += cache_create if cache_create is not None else (cache_5m or 0) + (cache_1h or 0)
+    tt = normalized_prompt + ct
     # 把 provider 编码到 purpose 字段（向后兼容，不改 schema）
     purpose_str = str(purpose or "")
     if resolved_provider and "provider=" not in purpose_str:
         purpose_str = f"{purpose_str}|provider={resolved_provider}" if purpose_str else f"provider={resolved_provider}"
-    now = time.time()
+    now = float(time.time() if observed_at is None else observed_at)
+    if now < 0 or now == float("inf") or now == float("-inf") or now != now:
+        return False
+    event_key = str(event_id or "").strip()[:128] or f"usage_{uuid.uuid4().hex}"
+    route_key = str(route_id or "").strip()[:240]
+    price: dict[str, Any] | None = None
+    priced: dict[str, Any] | None = None
+    if route_key:
+        from .token_pricing import calculate_cost, resolve_price_version
+        price = resolve_price_version(route=route_key, model=str(model or ""), observed_at=now)
+        if price is not None:
+            priced = calculate_cost(
+                {
+                    "input_tokens": pt,
+                    "output_tokens": ct,
+                    "cache_read_tokens": cache_read,
+                    "cache_create_tokens": cache_create,
+                    "cache_create_5m_tokens": cache_5m,
+                    "cache_create_1h_tokens": cache_1h,
+                    "input_includes_cache": input_includes_cache,
+                    "provider": resolved_provider,
+                },
+                price,
+            )
     with connect_sync() as conn:
+        cursor = conn.execute(
+            """INSERT OR IGNORE INTO token_usage_events(
+                event_id,observed_at,bucket_day,bucket_hour,provider,route,model,purpose,
+                bot_id,group_id,user_id,input_tokens,output_tokens,cache_read_tokens,
+                cache_create_tokens,cache_create_5m_tokens,cache_create_1h_tokens,
+                input_includes_cache,price_version_id,currency,cost_decimal,pricing_complete
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                event_key, now, bucket, hour_bucket, resolved_provider, route_key,
+                str(model or ""), purpose_str, str(bot_id or ""), str(group_id or ""),
+                str(user_id or ""), pt, ct, cache_read, cache_create, cache_5m, cache_1h,
+                int(input_includes_cache), str(price.get("version_id") or "") if price else None,
+                str(priced.get("currency") or "") if priced else None,
+                str(priced.get("cost_decimal") or "") if priced else None,
+                int(bool(priced and priced.get("pricing_complete"))),
+            ),
+        )
+        if cursor.rowcount == 0:
+            return False
         conn.execute(
             """
             INSERT INTO token_usage_ledger
@@ -185,7 +285,7 @@ def record_llm_call(
                 updated_at = excluded.updated_at
             """,
             (bucket, str(group_id or ""), str(user_id or ""), str(model or ""),
-             purpose_str, pt, ct, tt, now),
+             purpose_str, normalized_prompt, ct, tt, now),
         )
         conn.execute(
             """
@@ -201,10 +301,11 @@ def record_llm_call(
                 updated_at = excluded.updated_at
             """,
             (hour_bucket, bucket, str(group_id or ""), str(user_id or ""), str(model or ""),
-             purpose_str, pt, ct, tt, now),
+             purpose_str, normalized_prompt, ct, tt, now),
         )
         conn.commit()
     _advance_generation()
+    return True
 
 
 def query_provider_summary(window: str = "month") -> dict[str, Any]:
@@ -826,6 +927,248 @@ def _aggregate_purpose_rows(rows: list[Any]) -> list[dict[str, Any]]:
     ]
 
 
+def query_usage_insights(
+    window: str = "month",
+    *,
+    bot_id: str | None = None,
+    group_id: str | None = None,
+    provider: str | None = None,
+    route_id: str | None = None,
+    model: str | None = None,
+    purpose: str | None = None,
+) -> dict[str, Any]:
+    """Query call-level cache and custom-price telemetry.
+
+    Nullable cache values remain unknown; they are never coalesced to zero.
+    Costs are grouped by currency and therefore never summed across currencies.
+    """
+    window_key = normalize_window(window)
+    start = None if window_key == "all" else (
+        _hour_range_start().timestamp() if window_key == "day" else _range_start(window_key).timestamp()
+    )
+    clauses: list[str] = []
+    params: list[Any] = []
+    if start is not None:
+        clauses.append("observed_at>=?")
+        params.append(start)
+    for column, value in (
+        ("bot_id", bot_id), ("group_id", group_id), ("provider", provider),
+        ("route", route_id), ("model", model),
+    ):
+        if value is not None:
+            clauses.append(f"{column}=?")
+            params.append(str(value))
+    if purpose is not None:
+        # purpose is persisted as `functional|provider=x` for legacy aggregate
+        # compatibility. Compare the functional prefix exactly; do not use LIKE
+        # because `%` and `_` are valid literal purpose characters.
+        clauses.append("CASE WHEN instr(purpose, '|')>0 THEN substr(purpose, 1, instr(purpose, '|')-1) ELSE purpose END=?")
+        params.append(str(purpose))
+    with connect_sync() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM token_usage_events{(' WHERE ' + ' AND '.join(clauses)) if clauses else ''} ORDER BY observed_at ASC",
+            tuple(params),
+        ).fetchall()
+
+    calls = len(rows)
+    def normalized_input(row: Any) -> int:
+        value = int(row["input_tokens"] or 0)
+        if not bool(row["input_includes_cache"]):
+            value += int(row["cache_read_tokens"] or 0)
+            if row["cache_create_tokens"] is not None:
+                value += int(row["cache_create_tokens"] or 0)
+            else:
+                value += int(row["cache_create_5m_tokens"] or 0) + int(row["cache_create_1h_tokens"] or 0)
+        return value
+
+    input_tokens = sum(normalized_input(row) for row in rows)
+    output_tokens = sum(int(row["output_tokens"] or 0) for row in rows)
+    cache_read_reported = [row for row in rows if row["cache_read_tokens"] is not None]
+    cache_read_tokens = sum(int(row["cache_read_tokens"] or 0) for row in cache_read_reported)
+    cache_create_known = [row for row in rows if any(
+        row[name] is not None for name in ("cache_create_tokens", "cache_create_5m_tokens", "cache_create_1h_tokens")
+    )]
+    cache_create_tokens = sum(
+        int(row["cache_create_tokens"] or 0) if row["cache_create_tokens"] is not None
+        else int(row["cache_create_5m_tokens"] or 0) + int(row["cache_create_1h_tokens"] or 0)
+        for row in cache_create_known
+    )
+    def cache_classification_complete(row: Any) -> bool:
+        if row["cache_read_tokens"] is None:
+            return False
+        creation_known = row["cache_create_tokens"] is not None or (
+            row["cache_create_5m_tokens"] is not None and row["cache_create_1h_tokens"] is not None
+        )
+        if str(row["provider"] or "").lower() not in {"openai", "gemini", "codex", "official"} and not creation_known:
+            return False
+        read = int(row["cache_read_tokens"] or 0)
+        ttl_total = int(row["cache_create_5m_tokens"] or 0) + int(row["cache_create_1h_tokens"] or 0)
+        creation = int(row["cache_create_tokens"] or 0) if row["cache_create_tokens"] is not None else ttl_total
+        if row["cache_create_tokens"] is not None and ttl_total > creation:
+            return False
+        if bool(row["input_includes_cache"]) and read + creation > int(row["input_tokens"] or 0):
+            return False
+        return True
+
+    cache_complete = [row for row in rows if cache_classification_complete(row)]
+    cache_eligible_input = sum(normalized_input(row) for row in cache_complete)
+    eligible_cache_read_tokens = sum(int(row["cache_read_tokens"] or 0) for row in cache_complete)
+    costs: dict[str, Decimal] = {}
+    priced_calls: dict[str, int] = {}
+    incomplete_priced_calls = 0
+    unpriced_calls = 0
+    for row in rows:
+        currency = str(row["currency"] or "")
+        raw_cost = row["cost_decimal"]
+        if not currency or raw_cost is None:
+            unpriced_calls += 1
+            continue
+        with localcontext() as context:
+            context.prec = 60
+            costs[currency] = costs.get(currency, Decimal("0")) + Decimal(str(raw_cost))
+        priced_calls[currency] = priced_calls.get(currency, 0) + 1
+        if not bool(row["pricing_complete"]):
+            incomplete_priced_calls += 1
+    # Old aggregate-only rows cannot be attributed to a bot/route/cache/price.
+    # Report the gap explicitly instead of projecting them into the filtered view.
+    legacy_total = int(query_total_consumption()["total"].get("call_count", 0) or 0) if window_key == "all" else int(
+        query_summary(window_key)["total"].get("call_count", 0) or 0
+    )
+    with connect_sync() as conn:
+        all_event_calls = int(conn.execute(
+            "SELECT COUNT(*) FROM token_usage_events" + (" WHERE observed_at>=?" if start is not None else ""),
+            (start,) if start is not None else (),
+        ).fetchone()[0] or 0)
+    legacy_unattributed = max(0, legacy_total - all_event_calls)
+    series_map: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        bucket = str(row["bucket_day"] or "")
+        item = series_map.setdefault(bucket, {
+            "bucket": bucket, "input_tokens": 0, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_creation_tokens": 0,
+            "cache_read_known_calls": 0, "cache_usage_complete_calls": 0, "call_count": 0,
+        })
+        item["input_tokens"] += normalized_input(row)
+        item["output_tokens"] += int(row["output_tokens"] or 0)
+        item["call_count"] += 1
+        if row["cache_read_tokens"] is not None:
+            item["cache_read_tokens"] += int(row["cache_read_tokens"] or 0)
+            item["cache_read_known_calls"] += 1
+        if cache_classification_complete(row):
+            item["cache_usage_complete_calls"] = int(item.get("cache_usage_complete_calls", 0)) + 1
+        if row["cache_create_tokens"] is not None:
+            item["cache_creation_tokens"] += int(row["cache_create_tokens"] or 0)
+        else:
+            item["cache_creation_tokens"] += int(row["cache_create_5m_tokens"] or 0) + int(row["cache_create_1h_tokens"] or 0)
+    recent_events = [
+        {
+            "event_id": str(row["event_id"]), "observed_at": float(row["observed_at"]),
+            "provider": str(row["provider"] or ""), "route_id": str(row["route"] or ""),
+            "model": str(row["model"] or ""), "purpose": str(row["purpose"] or "").split("|", 1)[0],
+            "bot_id": str(row["bot_id"] or ""), "group_id": str(row["group_id"] or ""),
+            "input_tokens": normalized_input(row), "output_tokens": int(row["output_tokens"] or 0),
+            "cache_read_tokens": row["cache_read_tokens"],
+            "cache_creation_tokens": (
+                row["cache_create_tokens"] if row["cache_create_tokens"] is not None
+                else (
+                    int(row["cache_create_5m_tokens"] or 0) + int(row["cache_create_1h_tokens"] or 0)
+                    if row["cache_create_5m_tokens"] is not None or row["cache_create_1h_tokens"] is not None
+                    else None
+                )
+            ),
+            "cache_creation_5m_tokens": row["cache_create_5m_tokens"],
+            "cache_creation_1h_tokens": row["cache_create_1h_tokens"],
+            "price_version_id": str(row["price_version_id"] or ""),
+            "currency": str(row["currency"] or ""), "cost_decimal": row["cost_decimal"],
+            "pricing_complete": bool(row["pricing_complete"]),
+        }
+        for row in reversed(rows[-100:])
+    ]
+    dimensions = {
+        key: sorted({str(row[column] or "") for row in rows if str(row[column] or "")})
+        for key, column in (
+            ("bot_ids", "bot_id"), ("group_ids", "group_id"), ("providers", "provider"),
+            ("route_ids", "route"), ("models", "model"),
+            ("purposes", "purpose"),
+        )
+    }
+    dimensions["purposes"] = sorted({value.split("|", 1)[0] for value in dimensions["purposes"]})
+    return {
+        "window": window_key,
+        "call_count": calls,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_creation_tokens": cache_create_tokens,
+        "cache_read_known_calls": len(cache_read_reported),
+        "cache_creation_known_calls": len(cache_create_known),
+        "cache_usage_complete_calls": len(cache_complete),
+        "cache_usage_coverage": round(len(cache_complete) / calls, 6) if calls else 0.0,
+        "cache_read_input_ratio": round(eligible_cache_read_tokens / cache_eligible_input, 6)
+        if cache_eligible_input else None,
+        "costs": [
+            {"currency": currency, "cost_decimal": format(total, "f"),
+             "priced_call_count": priced_calls[currency]}
+            for currency, total in sorted(costs.items())
+        ],
+        "unpriced_call_count": unpriced_calls,
+        "incomplete_priced_call_count": incomplete_priced_calls,
+        "legacy_unattributed_call_count": legacy_unattributed,
+        "legacy_unattributed": legacy_unattributed,
+        "series": [series_map[key] for key in sorted(series_map)],
+        "recent_events": recent_events,
+        "dimensions": dimensions,
+        "filters": {
+            "bot_id": bot_id, "group_id": group_id, "provider": provider,
+            "route_id": route_id, "model": model, "purpose": purpose,
+        },
+    }
+
+
+def reprice_usage_preview(
+    *,
+    version_id: str,
+    event_ids: list[str],
+) -> dict[str, Any]:
+    """Explicitly reprice selected calls without rewriting their historical price snapshot."""
+    from .token_pricing import calculate_cost, get_price_version
+
+    price = get_price_version(version_id)
+    if price is None:
+        raise ValueError("unknown price version")
+    ids = [str(item or "").strip()[:128] for item in event_ids if str(item or "").strip()]
+    if not ids:
+        return {"version_id": version_id, "currency": price["currency"], "cost_decimal": "0", "items": []}
+    placeholders = ",".join("?" for _ in ids)
+    with connect_sync() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM token_usage_events WHERE event_id IN ({placeholders}) ORDER BY observed_at",
+            tuple(ids),
+        ).fetchall()
+    items: list[dict[str, Any]] = []
+    total = Decimal("0")
+    for row in rows:
+        if str(row["route"] or "") != str(price["route"] or ""):
+            raise ValueError("price version route does not match usage event")
+        price_model = str(price["model"] or "")
+        if price_model and str(row["model"] or "") != price_model:
+            raise ValueError("price version model does not match usage event")
+        result = calculate_cost(dict(row), price)
+        with localcontext() as context:
+            context.prec = 60
+            total += Decimal(result["cost_decimal"])
+        items.append({"event_id": str(row["event_id"]), **result})
+    return {
+        "version_id": str(price["version_id"]),
+        "currency": str(price["currency"]),
+        "cost_decimal": format(total, "f"),
+        "event_count": len(items),
+        "items": items,
+        "persisted": False,
+    }
+
+
 __all__ = [
     "ledger_generation",
     "record_llm_call",
@@ -834,4 +1177,7 @@ __all__ = [
     "query_provider_summary",
     "query_total_consumption",
     "normalize_window",
+    "record_response_usage",
+    "query_usage_insights",
+    "reprice_usage_preview",
 ]

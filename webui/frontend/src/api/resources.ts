@@ -338,6 +338,13 @@ export const resources = {
   patchConfig(revision: string, values: Record<string, unknown>): Promise<ConfigPatchResult> {
     return api.patch("/config/values", { revision, values });
   },
+  /**
+   * Read-only provider catalogue lookup.  The provider carries its stable
+   * `_secret_ref`; the server restores the credential without returning it.
+   */
+  providerModels(provider: Record<string, unknown>): Promise<{ models?: unknown[]; source?: string; manual_allowed?: boolean }> {
+    return api.post("/config/provider-models", { provider });
+  },
   searchEngineSpeedTest(): Promise<OperationDiagnostic> {
     return api.post("/config-tools/search-engines/speed-test", {});
   },
@@ -492,7 +499,7 @@ export const resources = {
   memoryBusiness(section: "recent" | "inner-state" | "graph" | "palace-zones" | "vector-index", signal?: AbortSignal): Promise<Record<string, unknown>> {
     return api.get(`/memory/${section}`, undefined, signal);
   },
-  memoryPage(page = 1, pageSize = 20, filters: { search?: string; status?: string; group_id?: string; user_id?: string; palace_zone?: string } = {}, signal?: AbortSignal): Promise<Page<CatalogItem>> {
+  memoryPage(page = 1, pageSize = 20, filters: { search?: string; status?: string; group_id?: string; user_id?: string; palace_zone?: string; source_kind?: string; memory_type?: string } = {}, signal?: AbortSignal): Promise<Page<CatalogItem>> {
     return api.get("/memory/page", { page, page_size: pageSize, ...filters }, signal);
   },
   memoryZonePage(palaceZone: string, page = 1, pageSize = 20, filters: { search?: string; status?: string } = {}, signal?: AbortSignal): Promise<Page<CatalogItem>> {

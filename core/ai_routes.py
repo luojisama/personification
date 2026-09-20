@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .provider_catalog import normalize_purpose_bindings, stable_provider_id
+
 import asyncio
 import hashlib
 import inspect
@@ -1127,6 +1129,9 @@ class RoutedToolCaller:
                 "provider": str(source.get("name") or f"route-{index + 1}")[:80],
                 "api_type": str(source.get("api_type") or "")[:48],
                 "model": str(source.get("model") or "")[:120],
+                "provider_id": str(source.get("provider_id") or "")[:128],
+                "usage_route_id": stable_provider_id(source) if source else "",
+                "purpose": str(source.get("route_purpose") or "main")[:32],
                 "auth_mode": str(source.get("gemini_auth_mode") or "")[:48],
                 "caller": type(caller).__name__[:80],
                 "route_fingerprint": capability_key.fingerprint,
@@ -1254,7 +1259,7 @@ class RoutedToolCaller:
                 status=status,
                 detail=(
                     f"provider={descriptor.get('provider', '-')} api={descriptor.get('api_type', '-')} "
-                    f"model={descriptor.get('model', '-')} route={descriptor.get('route_fingerprint', '-')} "
+                    f"model={descriptor.get('model', '-')} purpose={descriptor.get('purpose', 'main')} route={descriptor.get('route_fingerprint', '-')} "
                     f"tools={shape.get('tools_count', 0)}/{shape.get('input_tools_count', shape.get('tools_count', 0))} "
                     f"schema={shape.get('tool_schema_hash', '-')} "
                     f"excluded={shape.get('schema_excluded_count', 0)} "
@@ -1289,6 +1294,24 @@ class RoutedToolCaller:
         reframe: bool = False,
     ) -> None:
         """Emit one content-free trace event for a real Provider request."""
+
+        # Record each completed wire attempt, including rejected responses,
+        # before retry/fallback decisions can discard its reported usage.
+        try:
+            if response is not None:
+                from .token_ledger import record_response_usage
+
+                usage_route = self._caller_route_descriptors.get(id(caller), {})
+                response.usage_route_id = str(usage_route.get("usage_route_id") or "")
+                response.usage_provider = str(usage_route.get("api_type") or "")
+                record_response_usage(
+                    response,
+                    model_fallback=str(usage_route.get("model") or ""),
+                    route_id=response.usage_route_id,
+                    provider=response.usage_provider,
+                )
+        except Exception:
+            pass
 
         try:
             descriptor = self._caller_route_descriptors.get(
@@ -1336,7 +1359,7 @@ class RoutedToolCaller:
                 status=status,
                 detail=(
                     f"provider={descriptor.get('provider', '-')} api={descriptor.get('api_type', '-')} "
-                    f"model={descriptor.get('model', '-')} route={descriptor.get('route_fingerprint', '-')} "
+                    f"model={descriptor.get('model', '-')} purpose={descriptor.get('purpose', 'main')} route={descriptor.get('route_fingerprint', '-')} "
                     f"phase={'safety_reframe' if reframe else 'initial'} status={status} code={code} "
                     f"http={status_code} request_kind={shape.get('request_kind', 'text')} "
                     f"messages={max(0, int(shape.get('message_count') or 0))} "
@@ -1369,10 +1392,16 @@ class RoutedToolCaller:
         reframe: bool = False,
     ) -> ToolCallerResponse:
         started_at = time.monotonic()
+        from .generation_fence import assert_current_generation
+        assert_current_generation()
         response: ToolCallerResponse | None = None
         error: BaseException | None = None
         cancelled = False
-        wire_retry_token = set_wire_retry_disabled()
+        usage_descriptor = self._caller_route_descriptors.get(id(caller), {})
+        wire_retry_token = set_wire_retry_disabled(
+            usage_route_id=str(usage_descriptor.get("usage_route_id") or ""),
+            usage_provider=str(usage_descriptor.get("api_type") or ""),
+        )
         try:
             descriptor = self._caller_route_descriptors.get(id(caller), {})
             if descriptor.get("context_budget_enabled", True) is not False:
@@ -1397,11 +1426,13 @@ class RoutedToolCaller:
                 self._record_context_budget_stage(descriptor, budget_detail)
             else:
                 bounded_messages = messages
+            assert_current_generation()
             response = await caller.chat_with_tools(
                 self._strip_route_markers(bounded_messages),
                 wire_tools,
                 use_builtin_search,
             )
+            assert_current_generation()
             return response
         except asyncio.CancelledError:
             cancelled = True
@@ -1616,6 +1647,24 @@ class RoutedToolCaller:
         tools: list[dict],
         use_builtin_search: bool,
     ) -> ToolCallerResponse:
+        from .generation_fence import assert_current_generation
+        assert_current_generation()
+        source = getattr(self, "_dynamic_source_config", None)
+        if source is not None:
+            from .generation_fence import active_config, generation_route_cache
+            config = active_config(source)
+            options = self._dynamic_build_options
+            cache = generation_route_cache()
+            selected = cache.get(id(self)) if cache is not None else None
+            if selected is None:
+                selected = build_routed_tool_caller(config, self._logger, **options, _dynamic=False)
+                if cache is not None:
+                    cache[id(self)] = selected
+            response = await selected.chat_with_tools(messages, tools, use_builtin_search)
+            # Tool-result rendering must use the same provider/protocol that
+            # produced this response, even when a new turn changes its model.
+            response._routed_origin = selected
+            return response
         last_error: Exception | None = None
         route_attempts: list[dict[str, Any]] = []
         saw_vision_unavailable = False
@@ -1748,6 +1797,9 @@ class RoutedToolCaller:
         raise RuntimeError("routed tool results require the originating response")
 
     def build_assistant_tool_calls_message(self, response: ToolCallerResponse) -> dict[str, Any]:
+        origin = getattr(response, "_routed_origin", None)
+        if origin is not None and origin is not self:
+            return origin.build_assistant_tool_calls_message(response)
         caller = self._caller_from_response(response)
         if caller is None:
             raise RuntimeError("no routed tool caller available")
@@ -1761,6 +1813,9 @@ class RoutedToolCaller:
         response: ToolCallerResponse,
         results: list[tuple[Any, str]],
     ) -> list[dict[str, Any]]:
+        origin = getattr(response, "_routed_origin", None)
+        if origin is not None and origin is not self:
+            return origin.build_tool_result_messages(response, results)
         caller = self._caller_from_response(response)
         if caller is None:
             raise RuntimeError("no routed tool caller available")
@@ -1787,6 +1842,9 @@ class RoutedToolCaller:
         tool_args: dict[str, Any],
         result: str,
     ) -> dict[str, Any]:
+        origin = getattr(response, "_routed_origin", None)
+        if origin is not None and origin is not self:
+            return origin.build_synthetic_tool_evidence_message(response, tool_name, tool_args, result)
         message = _tool_caller_impl().build_synthetic_tool_evidence_message(
             tool_name,
             tool_args,
@@ -1804,8 +1862,24 @@ def build_routed_tool_caller(
     *,
     thinking_mode_override: str = "",
     model_override: str = "",
+    purpose: str = "main",
+    _dynamic: bool = True,
 ) -> ToolCaller:
-    providers = _get_primary_provider_list(plugin_config, logger)
+    from .generation_fence import active_config
+    from .provider_router import get_configured_api_providers
+    source_config = plugin_config
+    build_options = {"purpose": purpose, "thinking_mode_override": thinking_mode_override,
+                     "model_override": model_override}
+    plugin_config = active_config(plugin_config)
+    if purpose == "lite" and bool(getattr(plugin_config, "personification_strict_main_model", False)):
+        purpose = "main"
+        model_override = ""
+    if normalize_purpose_bindings(getattr(plugin_config, "personification_model_purpose_bindings", {})).get(purpose):
+        model_override = ""
+    providers = (get_configured_api_providers(plugin_config, logger, purpose=purpose)
+                 if purpose != "main" else _get_primary_provider_list(plugin_config, logger))
+    if not providers and normalize_purpose_bindings(getattr(plugin_config, "personification_model_purpose_bindings", {})).get(purpose):
+        raise ValueError("model_purpose_binding_unavailable")
     primary_callers = [
         _build_tool_caller(
             _ProviderConfigProxy(
@@ -1835,18 +1909,23 @@ def build_routed_tool_caller(
             route_descriptors.append(fallback_resolution.provider)
     if not primary_callers and fallback_caller is None:
         legacy_caller = _build_tool_caller(plugin_config)
-        return RoutedToolCaller(
+        result = RoutedToolCaller(
             primary_callers=[legacy_caller],
             fallback_caller=None,
             logger=logger,
             route_descriptors=[get_primary_provider_config(plugin_config, logger)],
         )
-    return RoutedToolCaller(
-        primary_callers=primary_callers,
-        fallback_caller=fallback_caller,
-        logger=logger,
-        route_descriptors=route_descriptors,
-    )
+    else:
+        result = RoutedToolCaller(
+            primary_callers=primary_callers,
+            fallback_caller=fallback_caller,
+            logger=logger,
+            route_descriptors=route_descriptors,
+        )
+    if _dynamic:
+        result._dynamic_source_config = source_config
+        result._dynamic_build_options = build_options
+    return result
 
 
 def build_fallback_vision_caller(
@@ -1855,10 +1934,34 @@ def build_fallback_vision_caller(
     *,
     warn: bool = False,
     model_override: str = "",
+    purpose: str = "vision",
 ) -> Any:
-    resolution = resolve_global_fallback_provider(plugin_config, logger, warn=warn)
-    if resolution is None:
-        return None
+    # This caller is also consumed directly by legacy/image tools.  Resolve
+    # the configured visual purpose here rather than only in the newer
+    # primary-route path.  The generation snapshot freezes it for an active
+    # supplement/retry chain.
+    from .generation_fence import active_config
+    from .provider_catalog import normalize_purpose_bindings
+    from .provider_router import get_configured_api_providers
+
+    config = active_config(plugin_config)
+    normalized_purpose = str(purpose or "vision").strip().lower() or "vision"
+    bindings = normalize_purpose_bindings(
+        getattr(config, "personification_model_purpose_bindings", {}) or {}
+    )
+    explicit_binding = bindings.get(normalized_purpose)
+    if explicit_binding:
+        providers = get_configured_api_providers(config, logger, purpose=normalized_purpose)
+        # get_configured_api_providers returns [] for an unavailable explicit
+        # pair.  Do not fall back across suppliers in that case.
+        if not providers:
+            return None
+        resolution = ProviderResolution(provider=dict(providers[0]), source=f"catalog_{normalized_purpose}")
+        model_override = ""
+    else:
+        resolution = resolve_global_fallback_provider(config, logger, warn=warn)
+        if resolution is None:
+            return None
 
     class _FallbackVisionConfig:
         def __init__(self, original: Any, provider: dict[str, Any]) -> None:
@@ -1867,6 +1970,10 @@ def build_fallback_vision_caller(
             self._model_override = str(model_override or "").strip()
 
         def __getattr__(self, name: str) -> Any:
+            if name == "personification_proxy":
+                return self._provider.get("proxy", "")
+            if name == "personification_provider_timeout":
+                return self._provider.get("timeout", 200)
             if name == "personification_labeler_api_type":
                 return self._provider.get("api_type", "openai")
             if name == "personification_labeler_api_url":
@@ -1893,7 +2000,7 @@ def build_fallback_vision_caller(
                 return False
             return getattr(self._original, name)
 
-    return _build_vision_caller(_FallbackVisionConfig(plugin_config, resolution.provider))
+    return _build_vision_caller(_FallbackVisionConfig(config, resolution.provider))
 
 
 __all__ = [

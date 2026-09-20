@@ -237,6 +237,12 @@ def _label(mapping: dict[str, str], value: Any, fallback: str) -> str:
 
 def _decorate_memory_item(item: dict[str, Any]) -> dict[str, Any]:
     rendered = dict(item)
+    group_id = str(rendered.get("group_id", "") or "").strip()
+    user_id = str(rendered.get("user_id", "") or "").strip()
+    # Describe storage attribution, not inferred permission to recall elsewhere.
+    scope = "group_user" if group_id and user_id else "group" if group_id else "user" if user_id else "unknown"
+    rendered["scope_kind"] = scope
+    rendered["scope_label"] = {"group_user": "群内用户", "group": "群聊", "user": "用户", "unknown": "未标注归属"}[scope]
     rendered["memory_type_label"] = _label(_MEMORY_TYPE_LABELS, rendered.get("memory_type"), "其他记忆")
     rendered["source_kind_label"] = _label(_SOURCE_KIND_LABELS, rendered.get("source_kind"), "其他来源")
     rendered["tier_label"] = _label(_TIER_LABELS, rendered.get("tier"), "未分层")
@@ -721,7 +727,8 @@ def build_memory_router(*, runtime) -> APIRouter:
         ).to_dict()
         payload.update({
             "available": True, "hidden_self_count": hidden, "include_self": include_self,
-            "filters": {"search": search, "status": status, "group_id": group_id, "user_id": user_id, "palace_zone": palace_zone},
+            "filters": {"search": search, "status": status, "group_id": group_id, "user_id": user_id, "palace_zone": palace_zone,
+                        "source_kind": source_kind, "memory_type": memory_type},
         })
         return payload
 

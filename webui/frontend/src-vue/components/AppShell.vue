@@ -1,18 +1,10 @@
 <template>
   <a class="skip-link" href="#main-content">跳到主要内容</a>
-  <button v-if="isMobile && drawerOpen" class="drawer-scrim" type="button" aria-label="关闭导航" @click="closeDrawer" />
-
-  <div :class="['app-frame', { 'rail-collapsed': railCollapsed }]">
-    <aside
+  <SidebarProvider :open="!railCollapsed" :class="['app-frame', { 'rail-collapsed': railCollapsed }]" @update:open="setRailOpen">
+    <Sidebar
       id="admin-navigation"
-      ref="drawerElement"
-      :class="['evidence-rail', { 'is-open': drawerOpen }]"
-      :inert="isMobile && !drawerOpen ? true : undefined"
-      :aria-hidden="isMobile && !drawerOpen ? 'true' : undefined"
-      :role="isMobile && drawerOpen ? 'dialog' : undefined"
-      :aria-modal="isMobile && drawerOpen ? 'true' : undefined"
+      class="evidence-rail"
       aria-label="管理台一级导航"
-      @keydown="onDrawerKeydown"
     >
       <div class="brand-plate">
         <IdentityAvatar :src="selectedBot?.avatar_url" :label="selectedBot?.nickname || 'P/F'" size="large" square />
@@ -80,17 +72,18 @@
         </button>
         <a class="legacy-entry rail-expandable" href="/personification/">进入旧版管理台</a>
         <ThemeSwitcher :compact="railCollapsed" />
+        <button class="legacy-entry rail-expandable" type="button" @click="logout">退出登录</button>
         <div class="rail-expandable">
           <StateBadge :tone="realtimeTone" :raw="realtime.state.value">{{ realtimeLabel }}</StateBadge>
         </div>
       </div>
-    </aside>
+    </Sidebar>
 
-    <div class="workbench">
+    <SidebarInset class="workbench">
       <header class="top-status-line">
-        <button ref="menuButton" class="mobile-nav-trigger" type="button" :aria-expanded="drawerOpen" aria-controls="admin-navigation" @click="openDrawer">
-          <Icon :name="drawerOpen ? 'close' : 'data'" /> 菜单
-        </button>
+        <SidebarTrigger class="mobile-nav-trigger" aria-controls="admin-navigation" label="打开导航">
+          <Icon name="data" /> 菜单
+        </SidebarTrigger>
         <span>{{ selectedBot?.online ? "Bot 在线" : "Bot 未连接" }}{{ selectedBot?.bot_id ? ` · ${selectedBot.bot_id}` : "" }}</span>
         <StateBadge :tone="realtimeTone" :raw="realtime.state.value">{{ realtimeLabel }}</StateBadge>
         <details class="top-status-details">
@@ -116,14 +109,14 @@
       </div>
 
       <main id="main-content" class="main-workspace" tabindex="-1"><slot /></main>
-    </div>
-  </div>
+    </SidebarInset>
+  </SidebarProvider>
   <div id="operation-live-region" class="sr-only" role="status" aria-live="polite" aria-atomic="true" />
 </template>
 
 <script setup lang="ts">
 import { useQuery } from "@tanstack/vue-query";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import { resources } from "@/api/resources";
@@ -136,23 +129,19 @@ import SelectField from "@vue-app/components/forms/SelectField.vue";
 import TextField from "@vue-app/components/forms/TextField.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
 import ThemeSwitcher from "@vue-app/components/ThemeSwitcher.vue";
+import { Sidebar, SidebarInset, SidebarProvider, SidebarTrigger } from "@vue-app/components/ui/sidebar";
 import { useRuntimeEvents } from "@vue-app/realtime/runtimeEvents";
 import { resolveSelectedBot, useBotStore } from "@vue-app/stores/bot";
 import { useUiStore } from "@vue-app/stores/ui";
+import { useAuthStore } from "@vue-app/stores/auth";
 
 const route = useRoute();
 const router = useRouter();
 const botStore = useBotStore();
 const uiStore = useUiStore();
+const authStore = useAuthStore();
 const realtime = useRuntimeEvents();
-const drawerOpen = ref(false);
 const searchQuery = ref("");
-const drawerElement = ref<HTMLElement | null>(null);
-const menuButton = ref<HTMLButtonElement | null>(null);
-const isMobile = ref(false);
-let mediaQuery: MediaQueryList | null = null;
-let updateMobileQuery: (() => void) | null = null;
-let previousBodyOverflow = "";
 
 try {
   uiStore.setSidebarCollapsed(window.localStorage.getItem("personification.nav.collapsed") === "1");
@@ -203,94 +192,22 @@ watch(() => currentContext.value?.leaf.path, (leafPath) => {
   }
 });
 
-watch(() => route.fullPath, closeDrawer);
-
-watch([drawerOpen, isMobile], async ([isOpen, mobile]) => {
-  const shouldLock = mobile && isOpen;
-  if (shouldLock) {
-    previousBodyOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    await nextTick();
-    const focusTarget = drawerElement.value?.querySelector<HTMLElement>(".global-page-search input:not([disabled])")
-      ?? drawerElement.value?.querySelector<HTMLElement>("input:not([disabled]), button:not([disabled]), select:not([disabled]), [href]");
-    focusTarget?.focus();
-  } else {
-    restoreBodyScroll();
-  }
-});
-
-onMounted(() => {
-  if (typeof window.matchMedia !== "function") return;
-  mediaQuery = window.matchMedia("(max-width: 760px)");
-  updateMobileQuery = () => {
-    isMobile.value = mediaQuery?.matches ?? false;
-    if (!isMobile.value) drawerOpen.value = false;
-  };
-  mediaQuery.addEventListener("change", updateMobileQuery);
-  updateMobileQuery();
-});
-
-onBeforeUnmount(() => {
-  if (mediaQuery && updateMobileQuery) mediaQuery.removeEventListener("change", updateMobileQuery);
-  restoreBodyScroll();
-});
-
-function restoreBodyScroll(): void {
-  if (document.body.style.overflow === "hidden") document.body.style.overflow = previousBodyOverflow;
-}
-
-function openDrawer(): void {
-  if (isMobile.value) drawerOpen.value = true;
-}
-
-function closeDrawer(): void {
-  if (!drawerOpen.value) return;
-  drawerOpen.value = false;
-  void nextTick(() => menuButton.value?.focus());
-}
-
-function drawerFocusableElements(): HTMLElement[] {
-  const root = drawerElement.value;
-  if (!root) return [];
-  return Array.from(root.querySelectorAll<HTMLElement>(
-    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-  )).filter((element) => !element.closest("[inert]") && getComputedStyle(element).visibility !== "hidden" && getComputedStyle(element).display !== "none");
-}
-
-function onDrawerKeydown(event: KeyboardEvent): void {
-  if (!isMobile.value || !drawerOpen.value) return;
-  if (event.key === "Escape") {
-    event.preventDefault();
-    closeDrawer();
-    return;
-  }
-  if (event.key !== "Tab") return;
-  const focusable = drawerFocusableElements();
-  if (!focusable.length) {
-    event.preventDefault();
-    drawerElement.value?.focus();
-    return;
-  }
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-  if (!first || !last) return;
-  if (event.shiftKey && document.activeElement === first) {
-    event.preventDefault();
-    last.focus();
-  } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault();
-    first.focus();
-  }
-}
 
 function toggleRail(): void {
-  uiStore.toggleSidebar();
+  setRailOpen(railCollapsed.value);
+}
+
+function setRailOpen(open: boolean): void {
+  uiStore.setSidebarCollapsed(!open);
   try { window.localStorage.setItem("personification.nav.collapsed", railCollapsed.value ? "1" : "0"); } catch { /* 页面内状态仍然有效 */ }
+}
+
+async function logout(): Promise<void> {
+  await authStore.logout();
 }
 
 function visit(path: string): void {
   searchQuery.value = "";
-  closeDrawer();
   void router.push(path);
 }
 

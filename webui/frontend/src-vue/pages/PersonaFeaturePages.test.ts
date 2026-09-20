@@ -31,6 +31,7 @@ vi.mock("@/api/resources", () => ({
     deleteSticker: vi.fn(),
     updateSticker: vi.fn(),
     personaPromptPreview: vi.fn(),
+    config: vi.fn(),
     personaBuilderGet: vi.fn(),
     personaBuilderPost: vi.fn(),
   },
@@ -113,13 +114,30 @@ describe("PersonaFeaturePages.vue", () => {
     mockRoute.params.section = "prompt";
 
     vi.mocked(resources.personaPromptPreview).mockResolvedValue({
-      prompt: "System Persona Prompt Mock",
+      content: "System Persona Prompt Mock",
+      exists: true,
+      is_file: true,
+      source: "prompt_path / system_path",
       warnings: [],
+    });
+    vi.mocked(resources.config).mockResolvedValue({
+      items: [
+        { key: "prompt_path", field_name: "personification_prompt_path", display_name: "人设文件路径", description: "", group: "人设提示词", category: "config", scope: "global", kind: "text", value_type: "str", value: "persona.md", default: "", secret: false, advanced: false, hot_reloadable: true, restart_required: false, required: false, modified: true, aliases: [], choices: [], min_value: null, max_value: null },
+        { key: "context_budget_enabled", field_name: "personification_context_budget_enabled", display_name: "上下文 Token 预算", description: "", group: "记忆", category: "config", scope: "global", kind: "toggle", value_type: "bool", value: true, default: true, secret: false, advanced: false, hot_reloadable: true, restart_required: false, required: false, modified: false, aliases: [], choices: [], min_value: null, max_value: null },
+        { key: "model_purpose_bindings", field_name: "personification_model_purpose_bindings", display_name: "用途模型绑定", description: "", group: "模型路由", category: "config", scope: "global", kind: "object", value_type: "dict", value: { reply: { provider_id: "main", model_id: "chat" } }, default: {}, secret: false, advanced: false, hot_reloadable: true, restart_required: false, required: false, modified: true, aliases: [], choices: [], min_value: null, max_value: null },
+      ], page: 1, page_size: 200, total: 3, total_pages: 1, revision: "r1", groups: [], group_counts: {}, modified_counts: {},
     });
 
     const wrapper = createWrapper();
     await wrapper.vm.$nextTick();
     expect(resources.personaPromptPreview).toHaveBeenCalled();
+    await vi.waitFor(() => expect(wrapper.text()).toContain("System Persona Prompt Mock"));
+    expect(wrapper.text()).toContain("全局（所有人格回复入口）");
+    expect(wrapper.text()).toContain("文件路径配置优先于内联 system_prompt");
+    expect(wrapper.text()).toContain("prompt_path / system_path · 文件 · 显式配置");
+    expect(wrapper.text()).toContain("已启用 · 注册默认值");
+    expect(wrapper.text()).toContain("main");
+    expect(wrapper.text()).toContain("chat");
   });
 
   it("renders persona builder history when on persona-builder route", async () => {

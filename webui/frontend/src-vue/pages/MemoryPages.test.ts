@@ -60,7 +60,7 @@ describe("MemoryPages.vue", () => {
 
     expect(wrapper.text()).toContain("Agent 记忆与记忆宫殿");
     await flushPromises();
-    expect(resources.memoryPage).toHaveBeenCalledWith(1, 20, { search: "" }, expect.anything());
+    expect(resources.memoryPage).toHaveBeenCalledWith(1, 20, expect.objectContaining({ search: "" }), expect.anything());
     expect(wrapper.text()).toContain("群聊");
     expect(wrapper.text()).toContain("聊天对话");
     expect(wrapper.text()).toContain("有效");

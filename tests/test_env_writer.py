@@ -171,6 +171,22 @@ def test_write_many_merges_all_fields_in_one_atomic_payload(tmp_path: Path, monk
     assert writes[0]["personification_video_max_bytes"] == 320 * 1024 * 1024
 
 
+def test_webui_catalog_save_keeps_existing_legacy_env_json_once(tmp_path: Path) -> None:
+    cfg = _make_plugin_config(tmp_path)
+    path = tmp_path / "env.json"
+    legacy = '{\n  "personification_api_pools": [{"name":"legacy","model":"old"}]\n}'
+    path.write_text(legacy, encoding="utf-8")
+    catalog = [{
+        "provider_id": "p1", "name": "legacy", "model": "old",
+        "models": [{"model_id": "old"}], "default_model_id": "old",
+    }]
+    assert env_writer.write_many({"personification_api_pools": catalog}, cfg)["errors"] == []
+    backup = tmp_path / "env.json.provider-catalog-v1.bak"
+    assert backup.read_text(encoding="utf-8") == legacy
+    env_writer.write_many({"personification_api_pools": catalog}, cfg)
+    assert backup.read_text(encoding="utf-8") == legacy
+
+
 def test_write_both_keeps_env_file_read_only_when_key_exists(tmp_path: Path) -> None:
     # WebUI 保存只写 env.json；.env.prod 中已有同名字段也不再被改写。
     env_file = tmp_path / ".env.prod"

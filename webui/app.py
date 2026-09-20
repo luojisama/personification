@@ -24,6 +24,7 @@ from .routes.memory_routes import build_memory_router
 from .routes.mcp_routes import build_mcp_router
 from .routes.consumer_web_routes import build_consumer_web_router
 from .routes.metrics_routes import build_metrics_router
+from .routes.token_billing_routes import build_token_billing_router
 from .routes.persona_routes import build_persona_router
 from .routes.persona_template_routes import build_persona_template_router
 from .routes.health_routes import build_health_router
@@ -103,6 +104,7 @@ def build_router() -> APIRouter:
     router.include_router(build_auth_router(runtime=runtime))
     router.include_router(build_config_router(runtime=runtime))
     router.include_router(build_metrics_router(runtime=runtime))
+    router.include_router(build_token_billing_router(runtime=runtime))
     router.include_router(build_persona_router(runtime=runtime))
     router.include_router(build_persona_template_router(runtime=runtime))
     router.include_router(build_group_router(runtime=runtime))

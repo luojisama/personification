@@ -745,6 +745,64 @@ def test_v2_config_patch_rejects_stale_revision_before_writing(monkeypatch) -> N
         raise AssertionError("stale revision must be rejected")
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_v2_catalog_rebind_and_delete_is_one_order_independent_save(monkeypatch, reverse: bool) -> None:  # noqa: ANN001
+    config = load_personification_module("plugin.personification.config").Config(
+        personification_api_pools=[
+            {
+                "provider_id": "p1", "name": "one", "api_type": "openai",
+                "api_url": "https://one.test/v1", "api_key": "secret-one",
+                "models": [{"model_id": "old"}, {"model_id": "new"}],
+                "default_model_id": "old", "model": "old",
+            }
+        ],
+        personification_model_purpose_bindings={"lite": {"provider_id": "p1", "model_id": "old"}},
+    )
+    runtime = SimpleNamespace(plugin_config=config, runtime_bundle=None)
+    env_writer = load_personification_module("plugin.personification.core.env_writer")
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        env_writer, "write_many",
+        lambda values, *_args: (calls.append(dict(values)) or {"env_json_path": "test/env.json", "errors": []}),
+    )
+    pools = [{**config.personification_api_pools[0], "models": [{"model_id": "new"}], "default_model_id": "new", "model": "new"}]
+    bindings = {"lite": {"provider_id": "p1", "model_id": "new"}}
+    values = (
+        {"personification_api_pools": pools, "personification_model_purpose_bindings": bindings}
+        if not reverse else
+        {"personification_model_purpose_bindings": bindings, "personification_api_pools": pools}
+    )
+    result = asyncio.run(v2_services.apply_config_patch(
+        runtime, revision=v2_services.config_revision(config), values=values,
+    ))
+    assert result["updated_keys"] == sorted(values)
+    assert len(calls) == 1
+    assert config.personification_model_purpose_bindings == bindings
+    assert config.personification_api_pools[0]["models"][0]["model_id"] == "new"
+
+
+def test_v2_catalog_invalid_binding_rejects_before_any_write(monkeypatch) -> None:  # noqa: ANN001
+    config = load_personification_module("plugin.personification.config").Config(
+        personification_api_pools=[
+            {"provider_id": "p1", "name": "one", "api_type": "openai", "api_url": "https://one.test/v1",
+             "api_key": "secret-one", "models": [{"model_id": "only"}], "default_model_id": "only", "model": "only"}
+        ],
+    )
+    runtime = SimpleNamespace(plugin_config=config, runtime_bundle=None)
+    env_writer = load_personification_module("plugin.personification.core.env_writer")
+    monkeypatch.setattr(env_writer, "write_many", lambda *_args: (_ for _ in ()).throw(AssertionError("must not persist")))
+    try:
+        asyncio.run(v2_services.apply_config_patch(
+            runtime,
+            revision=v2_services.config_revision(config),
+            values={"personification_model_purpose_bindings": {"lite": {"provider_id": "p1", "model_id": "gone"}}},
+        ))
+    except ValueError as exc:
+        assert str(exc) == "provider_catalog_reference_invalid"
+    else:
+        raise AssertionError("invalid provider/model pair must fail before write_many")
+
+
 def test_route_probe_target_matches_full_route_fingerprint(monkeypatch) -> None:  # noqa: ANN001
     registry = route_capabilities.RouteCapabilityRegistry()
     provider = {

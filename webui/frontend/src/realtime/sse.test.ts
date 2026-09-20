@@ -25,4 +25,17 @@ describe("SSE 客户端", () => {
     client.stop();
     expect(onState).toHaveBeenCalledWith("closed");
   });
+
+  it("收到 401 后停止重连并通知认证失效", async () => {
+    const onUnauthorized = vi.fn();
+    const onState = vi.fn();
+    const fetcher = vi.fn().mockResolvedValue(new Response("unauthorized", { status: 401 }));
+    const client = new RuntimeEventClient({
+      onEvent: vi.fn(), onResync: vi.fn(), onState, onUnauthorized, fetcher,
+      storage: { getItem: () => "0", setItem: vi.fn() },
+    });
+    await client.start();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+  });
 });

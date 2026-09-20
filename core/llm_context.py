@@ -59,7 +59,7 @@ def use_single_attempt_retry_policy() -> bool:
     return str(current_llm_context().get("retry_policy", "") or "") == LLM_RETRY_POLICY_SINGLE_ATTEMPT
 
 
-def set_wire_retry_disabled() -> contextvars.Token:
+def set_wire_retry_disabled(*, usage_route_id: str = "", usage_provider: str = "") -> contextvars.Token:
     """Disable SDK transport retries for exactly one outer wire attempt.
 
     This deliberately differs from ``single_attempt``: the latter also owns
@@ -69,6 +69,8 @@ def set_wire_retry_disabled() -> contextvars.Token:
     """
     value = dict(current_llm_context())
     value[_WIRE_RETRY_DISABLED] = True
+    value["usage_route_id"] = usage_route_id
+    value["usage_provider"] = usage_provider
     return _LLM_CONTEXT.set(value)
 
 
