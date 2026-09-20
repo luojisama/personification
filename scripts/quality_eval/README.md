@@ -19,10 +19,12 @@
 案例 ID 以 cases.jsonl 为准。无 --case 时选择 dev 集；holdout 必须显式选择。
 SQLite 额度全阶段复用同一文件，总限 1500；预扣且失败不退款，重开不可提高已有上限。stage-calls 是案例间停止阈值，单案例内部仍以全局1500为硬限。恢复运行跳过已有结果，包括失败记录，不自动重放。
 
-入口在隔离工作目录构造真实 run_agent + final_dialogue_gate、独立数据库和实际Trace。空工具注册表及不外发执行器不会访问QQ/QZone。报告保留各轮生成候选、最终回复、审阅动作、用量及Trace ID。fakecaller 结果明确标 simulated。
+默认入口为普通消息处理器，由人格类型进入普通/YAML路径，使用独立数据库、DataStore和捕获发送的 Bot。外部工具注册被隔离，所有模型用途共用同一请求额度。报告保留各轮输入、回复、合成回执、用量及Trace ID。合成确认仅标 capture_confirmed，不代表 QQ 实测。`--runtime-path agent_fragment` 保留早期 Agent + 最终审阅片段用于连通诊断。fakecaller 结果明确标 simulated。
 
 ## 当前覆盖限制
 
-80个场景、群私各40，dev60/holdout20。当前模型入口覆盖Agent与最终审阅，不等于完整 normal/YAML 处理器、真实媒体工具、记忆写入或发送回执行为。工具结果/媒体/送达类场景仍需真实隔离路径适配，不能仅凭模型读懂其文字就宣称行为通过。没有送达回执的结果一律不标 delivered。
+80个场景、群私各40，dev60/holdout20，普通/YAML各40。当前处理器适配覆盖纯文字多轮和合成回执。带 seed_memory 或 coverage_requires 的案例暂明确阻断，等待记忆、媒体、工具和社交fixture适配；不能仅凭模型读懂其文字就宣称行为通过。没有真实送达回执的结果一律不标 delivered。
+
+`grade_run.py` 对已保存的不同版本同案例进行两次反序盲评，沿用相同 budget-db；费用未配置时保持未知。`grading_provider.py` 只将已完成评分的 JSONL 提供给 Promptfoo 导出，不另外调用模型。模型评分是辅助证据，顺序不一致标未评分；真实平局单列。汇总未提供预期案例清单时不能宣布完整覆盖。
 
 批量评测前须检查案例语义、真实请求计数和每轮预期。脚本错误只保留机器码与异常类型，不输出请求 URL、Key 或原始异常正文。

@@ -19,8 +19,27 @@ def test_quality_corpus_has_balanced_versioned_splits() -> None:
     assert sum(case["surface"] == "group" for case in cases) == 40
     assert sum(case["split"] == "dev" for case in cases) == 60
     assert sum(case["split"] == "holdout" for case in cases) == 20
+    assert sum(case["split"] == "holdout" and case["surface"] == "group" for case in cases) == 10
+    assert sum(case["split"] == "holdout" and case["surface"] == "private" for case in cases) == 10
+    assert {case["pipeline"] for case in cases} == {"normal", "yaml"}
+    assert {case["schema_version"] for case in cases} == {"quality_v1"}
+    categories = {case["category"] for case in cases}
+    assert {"grounded_dialogue", "persona_relationship", "reply_discretion", "multiturn_continuity", "memory_scope", "provenance", "media_grounding", "tool_boundary", "delivery_contract"} <= categories
     for case in cases:
         assert case["events"] and case["trusted_persona"] and "expected" in case and "forbidden" in case
+        assert isinstance(case["coverage_requires"], list)
+        event_kinds = {event["kind"] for event in case["events"]}
+        required = set(case["coverage_requires"])
+        if "tool_result" in event_kinds:
+            assert "tool_fixture" in required
+        if "image" in event_kinds:
+            assert "image_fixture" in required
+        if "video" in event_kinds:
+            assert "video_fixture" in required
+        if "audio" in event_kinds:
+            assert "audio_fixture" in required
+        if "send_receipt" in event_kinds:
+            assert "delivery_fixture" in required
 
 
 class _FakeCaller:

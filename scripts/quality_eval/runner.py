@@ -80,13 +80,37 @@ class BudgetedCaller:
             self.exhausted = True
             raise
         try:
-            response = await self._caller.chat_with_tools(*args, **kwargs)
+            # Processors create their own LLM contexts. Reassert the route's
+            # single-attempt contract at the actual dispatch boundary.
+            from plugin.personification.core.llm_context import (
+                current_llm_context, reset_llm_context, set_llm_context,
+                set_wire_retry_disabled, LLM_RETRY_POLICY_SINGLE_ATTEMPT,
+            )
+            context = current_llm_context()
+            token = set_llm_context(
+                group_id=context.get("group_id", ""), user_id=context.get("user_id", ""),
+                purpose=context.get("purpose", "quality_eval"),
+                retry_policy=LLM_RETRY_POLICY_SINGLE_ATTEMPT,
+                deadline_monotonic=context.get("deadline_monotonic"),
+            )
+            wire = set_wire_retry_disabled(usage_route_id="quality_eval_pool_1", usage_provider="gemini")
+            try:
+                response = await self._caller.chat_with_tools(*args, **kwargs)
+            finally:
+                reset_llm_context(wire)
+                reset_llm_context(token)
         except (Exception, asyncio.CancelledError) as exc:
             self.failure_types.append(type(exc).__name__)
             raise
         raw_usage = getattr(response, "usage", None) or getattr(response, "token_usage", None)
         if raw_usage is not None:
             self.usages.append(_json_safe(raw_usage))
+            # Existing ledger deduplicates response.usage_event_id across the
+            # runner and review paths; the active database is case-local.
+            from plugin.personification.core.token_ledger import record_response_usage
+            record_response_usage(response, purpose="quality_eval",
+                                  model_fallback=str(getattr(self._caller, "model", "")),
+                                  route_id="quality_eval_pool_1", provider="gemini")
         return response
 
     def __getattr__(self, name: str) -> Any:
@@ -104,6 +128,10 @@ class EvalResult:
     error: str = ""
     turns: list[dict[str, Any]] | None = None
     coverage: str = "agent_and_final_gate"
+    synthetic_receipts: list[str] | None = None
+    send_attempt_count: int = 0
+    confirmed_history: int = 0
+    delivery: str = "not_sent"
 
 
 def _bootstrap_runtime() -> None:
@@ -151,6 +179,8 @@ def _load_fixed_gemini_route(config_path: str) -> dict[str, Any]:
     api_type = str(route.get("api_type", route.get("type", "")) or "").lower()
     model = str(route.get("model", route.get("model_id", "")) or "")
     endpoint = str(route.get("api_url", route.get("base_url", "")) or "")
+    if route.get("enabled") is False:
+        raise ValueError("quality route is disabled")
     if api_type not in {"gemini", "gemini_official"} or model != "gemini-3.8-flash-high":
         raise ValueError("quality run only permits pool[1] gemini-3.8-flash-high")
     if str(route.get("gemini_auth_mode", "") or "").lower() != "bearer":
@@ -162,6 +192,7 @@ def _load_fixed_gemini_route(config_path: str) -> dict[str, Any]:
     if "googleapis.com" in endpoint.lower() or not endpoint:
         raise ValueError("quality route requires a non-Google custom endpoint")
     route["api_type"] = "gemini"
+    route["api_url"] = endpoint
     route["model"] = model
     route["gemini_auth_mode"] = "bearer"
     return route
@@ -199,7 +230,7 @@ async def run_agent_case(case: dict[str, Any], config: dict[str, Any]) -> EvalRe
     _bootstrap_runtime()
     from plugin.personification.agent.runtime.runner import run_agent
     from plugin.personification.agent.tool_registry import ToolRegistry
-    from plugin.personification.core.db import init_db_sync
+    from plugin.personification.core.db import close_db, init_db_sync
     from plugin.personification.core import reply_turn_trace
     from plugin.personification.core.response_review import final_dialogue_gate
     from plugin.personification.core.llm_context import LLM_RETRY_POLICY_SINGLE_ATTEMPT, reset_llm_context, set_llm_context, set_wire_retry_disabled
@@ -208,6 +239,7 @@ async def run_agent_case(case: dict[str, Any], config: dict[str, Any]) -> EvalRe
     # This proxy contains no saved output and does not alter the loaded config.
     isolated_dir = Path(str(config["isolated_db_path"]))
     isolated_dir.mkdir(parents=True, exist_ok=True)
+    await close_db()
     init_db_sync(isolated_dir)
     plugin_config = SimpleNamespace(
         personification_model_builtin_search_enabled=False,
@@ -233,6 +265,27 @@ async def run_agent_case(case: dict[str, Any], config: dict[str, Any]) -> EvalRe
     wire_token = set_wire_retry_disabled(usage_route_id="quality_eval_pool_1", usage_provider="gemini")
     turns: list[dict[str, Any]] = []
     try:
+        if config.get("runtime_path") == "pipeline":
+            from scripts.quality_eval.pipeline_adapter import run_full_path_case
+            payload = await run_full_path_case(case, caller=caller, isolated_dir=str(isolated_dir))
+            status = str(payload.get("status", "failed"))
+            if caller.failure_types:
+                status = "failed"
+            if caller.exhausted:
+                status = "budget_exhausted"
+            reply_turn_trace.finish_trace(trace_id=trace_id, outcome="evaluation_" + status)
+            return EvalResult(
+                reply=str(payload.get("reply", "")), status=status, trace=str(payload.get("trace") or trace_id),
+                usage={"wire_calls": budget.snapshot()["reserved_calls"] - initial_calls, "responses": caller.usages},
+                elapsed_ms=round((time.monotonic() - started) * 1000),
+                execution_mode="simulated" if config.get("test_double") else "real",
+                error=caller.failure_types[-1] if caller.failure_types else "",
+                turns=payload.get("turns"), coverage=str(payload.get("coverage", "pipeline_unverified")),
+                synthetic_receipts=payload.get("synthetic_receipts"),
+                send_attempt_count=int(payload.get("send_attempt_count", 0)),
+                confirmed_history=int(payload.get("confirmed_history", 0)),
+                delivery=str(payload.get("delivery", "not_sent")),
+            )
         messages = _messages_from_case(case)
         final_result: Any = None
         async def review_call(review_messages):
@@ -300,6 +353,7 @@ async def run_agent_case(case: dict[str, Any], config: dict[str, Any]) -> EvalRe
         reset_llm_context(wire_token)
         reset_llm_context(llm_token)
         reply_turn_trace.reset_current_trace_id(trace_token)
+        await close_db()
 
 
 async def invoke_case(case: dict[str, Any], config: dict[str, Any]) -> EvalResult:
