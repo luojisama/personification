@@ -11,7 +11,33 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from runner import CallBudget, invoke_case, load_behavior_snapshot
+try:  # Script execution on VPS keeps the historical sibling import.
+    from runner import CallBudget, describe_behavior_snapshot, invoke_case
+except ModuleNotFoundError:  # Package import makes report projection testable.
+    from .runner import CallBudget, describe_behavior_snapshot, invoke_case
+
+
+_REPORT_REDACTED_BEHAVIOR_FIELDS = {
+    "personification_system_prompt",
+    "personification_core_values_prompt",
+}
+
+
+def project_behavior_for_report(
+    effective_fields: dict[str, object], sources: dict[str, str],
+) -> dict[str, object]:
+    """Keep behavior reproducible in reports without persisting prompt bodies."""
+    projected = dict(effective_fields)
+    for field in _REPORT_REDACTED_BEHAVIOR_FIELDS:
+        value = projected.get(field)
+        if not isinstance(value, str):
+            continue
+        projected[field] = {
+            "sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+            "length": len(value),
+            "source": str(sources.get(field, "defaults")),
+        }
+    return projected
 
 
 async def run(args):
@@ -28,10 +54,22 @@ async def run(args):
         raise ValueError("stage-calls must be positive")
     repo = Path(__file__).resolve().parents[2]
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    behavior_snapshot = describe_behavior_snapshot(args.config_path, args.behavior_snapshot) if args.behavior_source == "server" else {"effective_fields": {}, "sources": {}, "credentials_exported": False, "paths_exported": False}
+    frozen_behavior = dict(behavior_snapshot["effective_fields"])
+    report_behavior = project_behavior_for_report(frozen_behavior, behavior_snapshot["sources"])
+    report_behavior_snapshot = dict(behavior_snapshot)
+    report_behavior_snapshot["effective_fields"] = report_behavior
     manifest = {"revision": revision, "corpus_sha256": hashlib.sha256(Path(args.corpus).read_bytes()).hexdigest(),
                 "runtime_path": args.runtime_path, "model": "gemini-3.8-flash-high",
                 "behavior_source": args.behavior_source,
-                "behavior_config": load_behavior_snapshot(args.config_path) if args.behavior_source == "server" else {}}
+                "behavior_config": report_behavior,
+                "behavior_snapshot": report_behavior_snapshot,
+                "fixture_overrides": {
+                    "isolated_data_dir": True,
+                    "outbound_capture_bot": True,
+                    "external_tool_registration": "disabled",
+                    "remote_embedding": "hash_bow_forced",
+                }}
     manifest_path = artifact / "manifest.json"
     if manifest_path.exists() and json.loads(manifest_path.read_text(encoding="utf-8")) != manifest:
         raise ValueError("Artifact directory belongs to a different revision or corpus; use a new directory")
@@ -57,11 +95,13 @@ async def run(args):
             "execution_mode": "real", "config_path": str(config_path),
             "runtime_path": args.runtime_path,
             "behavior_source": args.behavior_source,
+            "behavior_config": frozen_behavior,
+            "behavior_snapshot_path": args.behavior_snapshot,
             "budget_db": str(budget_path), "isolated_db_path": str(artifact / case["id"]),
         })
         row = {"case_id": case["id"], "split": case["split"], "surface": case["surface"],
                "revision": revision, "corpus_sha256": manifest["corpus_sha256"],
-               "behavior_config": manifest["behavior_config"], "case": case, **asdict(result)}
+               "behavior_config": report_behavior, "case": case, **asdict(result)}
         with output.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(row, ensure_ascii=False) + "\n")
             stream.flush()
@@ -84,5 +124,6 @@ if __name__ == "__main__":
     parser.add_argument("--stage-calls", type=int, default=50)
     parser.add_argument("--runtime-path", choices=["pipeline", "agent_fragment"], default="pipeline")
     parser.add_argument("--behavior-source", choices=["defaults", "server"], default="server")
+    parser.add_argument("--behavior-snapshot", help="Explicit redacted JSON profile with a behavior object; never a production secret file")
     parser.add_argument("--continue-after-failure", action="store_true", help="Record a failed case and continue to other cases; never retry that case")
     asyncio.run(run(parser.parse_args()))

@@ -3,10 +3,60 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from ._loader import load_personification_module
 
 
 gate = load_personification_module("plugin.personification.core.memory_recall_gate")
+llm_context = load_personification_module("plugin.personification.core.llm_context")
+
+
+def test_gate_scopes_optional_purpose_and_propagates_external_cancellation() -> None:
+    seen = []
+    cancelled = []
+
+    class Caller:
+        async def chat_with_tools(self, **_kwargs):
+            seen.append(dict(llm_context.current_llm_context()))
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+    async def scenario():
+        outer = llm_context.set_llm_context(
+            group_id="g", user_id="u", platform="onebot", bot_id="bot",
+            purpose="reply", retry_policy=llm_context.LLM_RETRY_POLICY_SINGLE_ATTEMPT,
+            deadline_monotonic=123.0,
+        )
+        wire = llm_context.set_wire_retry_disabled(usage_route_id="route", usage_provider="gemini")
+        try:
+            task = asyncio.create_task(gate.gate_memory_candidates(
+                candidates=[{"memory_id": "m1", "summary": "当前问题", "score": 0.99}],
+                query="当前问题", tool_caller=Caller(), minimum_score=0.2, timeout_seconds=30,
+            ))
+            while not seen:
+                await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            restored = llm_context.current_llm_context()
+            assert restored["purpose"] == "reply"
+            assert restored["usage_route_id"] == "route"
+        finally:
+            llm_context.reset_llm_context(wire)
+            llm_context.reset_llm_context(outer)
+
+    asyncio.run(scenario())
+    assert cancelled == [True]
+    assert seen and seen[0]["purpose"] == "memory_recall_gate"
+    assert {key: seen[0][key] for key in ("group_id", "user_id", "platform", "bot_id", "retry_policy", "deadline_monotonic", "usage_route_id", "usage_provider")} == {
+        "group_id": "g", "user_id": "u", "platform": "onebot", "bot_id": "bot",
+        "retry_policy": llm_context.LLM_RETRY_POLICY_SINGLE_ATTEMPT,
+        "deadline_monotonic": 123.0, "usage_route_id": "route", "usage_provider": "gemini",
+    }
 
 
 def test_gate_filters_expired_unverified_social_and_limits_three() -> None:

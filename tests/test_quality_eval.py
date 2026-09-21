@@ -6,7 +6,16 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from scripts.quality_eval.runner import BudgetExhausted, BudgetedCaller, CallBudget, _load_fixed_gemini_route, invoke_case
+from scripts.quality_eval.runner import (
+    BEHAVIOR_KEYS,
+    BudgetExhausted,
+    BudgetedCaller,
+    CallBudget,
+    _load_fixed_gemini_route,
+    describe_behavior_snapshot,
+    invoke_case,
+    load_behavior_snapshot,
+)
 
 
 CORPUS = Path(__file__).parent / "replay_corpus" / "quality_v1" / "cases.jsonl"
@@ -103,6 +112,93 @@ def test_fixed_gemini_route_rejects_unsafe_or_wrong_config(tmp_path: Path) -> No
         pass
     else:
         raise AssertionError("wrong route must be rejected")
+
+
+def test_behavior_snapshot_uses_env_json_authority_defaults_and_never_exports_secret(tmp_path: Path) -> None:
+    config_path = tmp_path / "env.json"
+    config_path.write_text(json.dumps({
+        "personification_response_timeout": "301",
+        "personification_agent_max_steps": 8,
+        "personification_api_key": "must-not-be-copied",
+        "personification_api_pools": [{"api_key": "nested-secret"}],
+        "personification_skill_cache_dir": "D:/not-a-behavior-path",
+        "personification_qzone_enabled": True,
+    }), encoding="utf-8")
+
+    snapshot = describe_behavior_snapshot(str(config_path))
+    assert snapshot["effective_fields"]["personification_response_timeout"] == 301
+    assert snapshot["effective_fields"]["personification_agent_max_steps"] == 8
+    assert snapshot["effective_fields"]["personification_turn_planner_enabled"] is False
+    assert snapshot["sources"]["personification_response_timeout"] == "env.json"
+    assert snapshot["sources"]["personification_turn_planner_enabled"] == "defaults"
+    assert set(snapshot["effective_fields"]) == set(BEHAVIOR_KEYS)
+    rendered = json.dumps(snapshot, ensure_ascii=False)
+    assert "must-not-be-copied" not in rendered
+    assert "nested-secret" not in rendered
+    assert "not-a-behavior-path" not in rendered
+    assert "personification_qzone_enabled" not in rendered
+    assert snapshot["credentials_exported"] is False
+    assert snapshot["paths_exported"] is False
+
+
+def test_behavior_snapshot_description_uses_one_atomic_read(monkeypatch, tmp_path: Path) -> None:
+    import scripts.quality_eval.runner as quality
+
+    config_path = tmp_path / "env.json"
+    config_path.write_text(json.dumps({"personification_response_timeout": 301}), encoding="utf-8")
+    original = Path.read_text
+    reads = 0
+
+    def counting_read(path, *args, **kwargs):  # noqa: ANN001
+        nonlocal reads
+        if path == config_path:
+            reads += 1
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting_read)
+    snapshot = quality.describe_behavior_snapshot(str(config_path))
+    assert reads == 1
+    assert snapshot["effective_fields"]["personification_response_timeout"] == 301
+    assert snapshot["sources"]["personification_response_timeout"] == "env.json"
+
+
+
+
+def test_explicit_redacted_profile_is_the_only_opt_in_legacy_behavior_input(tmp_path: Path) -> None:
+    config_path = tmp_path / "env.json"
+    config_path.write_text(json.dumps({"personification_agent_max_steps": 3}), encoding="utf-8")
+    profile_path = tmp_path / "behavior-profile.json"
+    profile_path.write_text(json.dumps({
+        "behavior": {"personification_agent_max_steps": "9", "personification_response_timeout": 250},
+        "behavior_sources": {"personification_agent_max_steps": ".env.prod"},
+        "api_key": "must-not-be-read",
+    }), encoding="utf-8")
+
+    assert load_behavior_snapshot(str(config_path))["personification_agent_max_steps"] == 3
+    profile = describe_behavior_snapshot(str(config_path), str(profile_path))
+    assert profile["effective_fields"]["personification_agent_max_steps"] == 9
+    assert profile["sources"]["personification_agent_max_steps"] == "explicit_redacted_snapshot"
+    assert ".env.prod" not in json.dumps(profile)
+    assert "must-not-be-read" not in json.dumps(profile)
+
+
+def test_invoke_uses_the_manifest_frozen_behavior_config(monkeypatch, tmp_path: Path) -> None:
+    import scripts.quality_eval.runner as quality
+
+    seen: dict[str, object] = {}
+
+    async def fake_run_agent_case(_case, config):  # noqa: ANN001
+        seen["behavior"] = config["behavior_config"]
+        return quality.EvalResult(status="completed", execution_mode="real")
+
+    monkeypatch.setattr(quality, "run_agent_case", fake_run_agent_case)
+    frozen = {key: None for key in BEHAVIOR_KEYS}
+    result = asyncio.run(invoke_case({"id": "frozen"}, {
+        "execution_mode": "real", "config_path": str(tmp_path / "route.json"),
+        "behavior_source": "server", "behavior_config": frozen,
+    }))
+    assert result.status == "completed"
+    assert seen["behavior"] == frozen
 
 
 def test_run_agent_adapter_uses_real_runner_with_fake_caller(monkeypatch, tmp_path: Path) -> None:

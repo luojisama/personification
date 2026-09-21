@@ -11,6 +11,7 @@ from .test_api_embedding_memory import _store
 text_index = load_personification_module("plugin.personification.core.text_memory_index")
 query_module = load_personification_module("plugin.personification.core.memory_query")
 store_module = load_personification_module("plugin.personification.core.memory_store")
+llm_context = load_personification_module("plugin.personification.core.llm_context")
 
 
 def test_algorithm_never_calls_hash_or_remote(tmp_path, monkeypatch):
@@ -96,6 +97,77 @@ def test_existing_intent_plan_reuses_queries_without_extra_api():
     result = asyncio.run(query_module.plan_memory_query("早上好", [], Caller(), timeout=1, turn_plan=plan))
     assert result.status == "reused"
     assert result.queries == ["去年旅行", "最近假期"]
+
+
+def test_query_planner_scopes_optional_purpose_without_replacing_outer_context():
+    seen = []
+
+    class Caller:
+        async def chat_with_tools(self, **_kwargs):
+            seen.append(dict(llm_context.current_llm_context()))
+            llm_context.remember_successful_route("sticky-route")
+            return SimpleNamespace(content='{"queries":["睡眠"]}')
+
+    async def scenario():
+        outer = llm_context.set_llm_context(
+            group_id="g", user_id="u", platform="onebot", bot_id="bot",
+            purpose="reply", retry_policy=llm_context.LLM_RETRY_POLICY_SINGLE_ATTEMPT,
+            deadline_monotonic=123.0,
+        )
+        wire = llm_context.set_wire_retry_disabled(usage_route_id="route", usage_provider="gemini")
+        try:
+            result = await query_module.plan_memory_query("睡眠", [], Caller(), timeout=1)
+            assert result.status == "planned"
+            restored = llm_context.current_llm_context()
+            assert restored["purpose"] == "reply"
+            assert restored["usage_route_id"] == "route"
+            assert llm_context.successful_route_key() == "sticky-route"
+        finally:
+            llm_context.reset_llm_context(wire)
+            llm_context.reset_llm_context(outer)
+
+    asyncio.run(scenario())
+    assert seen and seen[0]["purpose"] == "memory_query_plan"
+    assert {key: seen[0][key] for key in ("group_id", "user_id", "platform", "bot_id", "retry_policy", "deadline_monotonic", "usage_route_id", "usage_provider")} == {
+        "group_id": "g", "user_id": "u", "platform": "onebot", "bot_id": "bot",
+        "retry_policy": llm_context.LLM_RETRY_POLICY_SINGLE_ATTEMPT,
+        "deadline_monotonic": 123.0, "usage_route_id": "route", "usage_provider": "gemini",
+    }
+
+
+def test_query_planner_timeout_and_external_cancellation_keep_existing_outcomes():
+    seen = []
+    cancelled = []
+
+    class Caller:
+        async def chat_with_tools(self, **_kwargs):
+            seen.append(dict(llm_context.current_llm_context()))
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+    async def scenario():
+        outer = llm_context.set_llm_context(purpose="reply", group_id="g", user_id="u")
+        try:
+            timed_out = await query_module.plan_memory_query("当前问题", [], Caller(), timeout=0.01)
+            assert timed_out.status == "timeout"
+            assert llm_context.current_llm_context()["purpose"] == "reply"
+
+            task = asyncio.create_task(query_module.plan_memory_query("当前问题", [], Caller(), timeout=30))
+            while len(seen) < 2:
+                await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert llm_context.current_llm_context()["purpose"] == "reply"
+        finally:
+            llm_context.reset_llm_context(outer)
+
+    asyncio.run(scenario())
+    assert cancelled == [True, True]
+    assert [context["purpose"] for context in seen] == ["memory_query_plan", "memory_query_plan"]
 
 
 def test_disabled_hybrid_api_never_generates_hash_vectors(tmp_path, monkeypatch):

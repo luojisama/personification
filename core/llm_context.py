@@ -74,6 +74,26 @@ def set_wire_retry_disabled(*, usage_route_id: str = "", usage_provider: str = "
     return _LLM_CONTEXT.set(value)
 
 
+def set_llm_purpose(purpose: str) -> contextvars.Token:
+    """Temporarily label one nested LLM operation without replacing its scope.
+
+    Nested optional stages still belong to the enclosing reply for identity,
+    deadline, retry, wire, and successful-route-affinity purposes.  Copying
+    the mapping (rather than calling :func:`set_llm_context`) deliberately
+    keeps the shared ``turn_state`` object intact.
+    """
+    value = dict(current_llm_context())
+    value["purpose"] = str(purpose or "")
+    return _LLM_CONTEXT.set(value)
+
+
+def set_llm_retry_policy(retry_policy: str) -> contextvars.Token:
+    """Temporarily override retry policy without replacing the current scope."""
+    value = dict(current_llm_context())
+    value["retry_policy"] = str(retry_policy or "")
+    return _LLM_CONTEXT.set(value)
+
+
 def use_single_wire_attempt_policy() -> bool:
     context = current_llm_context()
     return bool(context.get(_WIRE_RETRY_DISABLED)) or use_single_attempt_retry_policy()
@@ -118,6 +138,8 @@ __all__ = [
     "current_llm_context",
     "use_single_attempt_retry_policy",
     "set_wire_retry_disabled",
+    "set_llm_purpose",
+    "set_llm_retry_policy",
     "use_single_wire_attempt_policy",
     "remaining_llm_deadline_seconds",
     "successful_route_key",

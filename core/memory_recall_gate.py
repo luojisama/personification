@@ -170,6 +170,8 @@ async def _semantic_gate(
             ),
         },
     ]
+    from .llm_context import reset_llm_context, set_llm_purpose
+    purpose_token = set_llm_purpose("memory_recall_gate")
     try:
         response = await asyncio.wait_for(
             tool_caller.chat_with_tools(messages=messages, tools=[], use_builtin_search=False),
@@ -183,6 +185,8 @@ async def _semantic_gate(
         if on_diagnostic is not None:
             on_diagnostic("memory_semantic_gate_rejected", {"reason": "model_error"})
         return []
+    finally:
+        reset_llm_context(purpose_token)
     try:
         from ..agent.runtime.planner import extract_json_payload
 

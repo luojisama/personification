@@ -90,6 +90,25 @@ def test_fixture_event_carries_explicit_memory_identity() -> None:
     assert event.platform == "onebot"
 
 
+def test_full_path_memory_fixture_receives_behavior_config_and_isolated_store(tmp_path: Path) -> None:
+    caller = _LoopbackCaller()
+    case = _case("private")
+    case["seed_memory"] = [{
+        "owner": "小明", "fact": "喜欢薄荷巧克力", "scope": "private",
+        "trust": "private", "bot_id": "quality-eval-bot",
+    }]
+    db.init_db_sync(tmp_path)
+    try:
+        result = asyncio.run(run_full_path_case(
+            case, caller=caller, isolated_dir=str(tmp_path),
+            behavior_config={"personification_memory_recall_top_k": 12},
+        ))
+    finally:
+        asyncio.run(db.close_db())
+    assert result["status"] == "completed"
+    assert (tmp_path / "private-normal" / "memory").exists()
+
+
 @pytest.mark.parametrize(("surface", "pipeline"), [
     ("private", "normal"), ("private", "yaml"),
     ("group", "normal"), ("group", "yaml"),

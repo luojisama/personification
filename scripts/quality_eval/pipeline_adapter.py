@@ -80,8 +80,8 @@ class _PrivateEvent(_MessageEvent):
 
 
 class _CaptureBot:
-    def __init__(self, receipt: str) -> None:
-        self.self_id = "quality-eval-bot"
+    def __init__(self, bot_id: str, receipt: str) -> None:
+        self.self_id = bot_id
         self.receipt = receipt
         self.sent: list[Any] = []
 
@@ -97,6 +97,9 @@ class _CaptureBot:
 def _event_from(case: dict[str, Any], current: dict[str, Any], bot_id: str, index: int) -> Any:
     if str(current.get("kind", "message")) not in {"message", "mention"}:
         raise ValueError("unsupported_fixture:trigger_kind")
+    event_bot_id = str(current.get("bot_id", bot_id) or "").strip()
+    if event_bot_id != bot_id:
+        raise ValueError("unsupported_fixture:event_bot_id")
     common = dict(user_id=str(current.get("user_id", current.get("sender", "user"))), message_id=str(current.get("message_id", f"eval-{case.get('id', 'case')}-{index}")), sender=str(current.get("sender", "user")), text=str(current.get("text", "")), mention=str(current.get("kind")) == "mention", bot_id=bot_id, platform="onebot")
     if str(case.get("surface", "group")) == "private":
         return _PrivateEvent(**common)
@@ -106,6 +109,98 @@ def _event_from(case: dict[str, Any], current: dict[str, Any], bot_id: str, inde
 async def _caller_text(caller: Any, messages: list[dict[str, Any]]) -> str:
     response = await caller.chat_with_tools(messages, [], False)
     return str(getattr(response, "content", "") or "")
+
+
+def _fixture_bot_id(case: dict[str, Any]) -> str:
+    bot_id = str(case.get("bot_id", "quality-eval-bot") or "").strip()
+    if not bot_id:
+        raise ValueError("unsupported_fixture:bot_id")
+    return bot_id
+
+
+def _fixture_current_time(case: dict[str, Any]) -> datetime:
+    raw = case.get("current_time")
+    if raw is None:
+        return datetime(2026, 1, 1, 12, 0, 0)
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("unsupported_fixture:current_time")
+    try:
+        return datetime.fromisoformat(raw.strip())
+    except ValueError as exc:
+        raise ValueError("unsupported_fixture:current_time") from exc
+
+
+def _seed_session_history(
+    *,
+    seed: dict[str, Any],
+    event: Any,
+    surface: str,
+    bot_id: str,
+    append: Any,
+    group_window: list[dict[str, Any]] | None = None,
+) -> None:
+    """Load only fixture-owned, identity-scoped conversation history.
+
+    This deliberately does not emulate a store import.  A quality fixture may
+    supply only user/assistant turns for its current session; system/tool data
+    and unconfirmed or foreign-bot replies are rejected before the processor
+    can render them into a prompt.
+    """
+    if "session_history" not in seed:
+        return
+    history = seed["session_history"]
+    if not isinstance(history, list):
+        raise ValueError("unsupported_fixture:session_history")
+    expected_session = f"private_{event.user_id}" if surface == "private" else str(event.group_id)
+    expected_group = "" if surface == "private" else str(event.group_id)
+    current_user_id = str(event.user_id)
+    for item in history:
+        if not isinstance(item, dict):
+            raise ValueError("unsupported_fixture:session_history_item")
+        role = str(item.get("role", "") or "")
+        content = item.get("content")
+        if role not in {"user", "assistant"} or not isinstance(content, str):
+            raise ValueError("unsupported_fixture:session_history_role")
+        if str(item.get("session_id", "") or "") != expected_session:
+            raise ValueError("unsupported_fixture:session_history_session")
+        if str(item.get("group_id", "") or "") != expected_group:
+            raise ValueError("unsupported_fixture:session_history_group")
+        user_id = str(item.get("user_id", "") or "")
+        if role == "user":
+            if (
+                not user_id
+                or user_id == bot_id
+                or (surface == "private" and user_id != current_user_id)
+            ):
+                raise ValueError("unsupported_fixture:session_history_user")
+        else:
+            if (
+                user_id != bot_id
+                or str(item.get("bot_id", "") or "") != bot_id
+                or str(item.get("delivery", "") or "") != "confirmed"
+                or item.get("is_bot") is not True
+                or str(item.get("source_kind", "") or "") != "bot_reply"
+            ):
+                raise ValueError("unsupported_fixture:session_history_assistant")
+        metadata = {
+            key: item[key]
+            for key in ("message_id", "user_id", "bot_id", "delivery", "source_kind", "is_bot")
+            if key in item
+        }
+        if surface != "private":
+            metadata["group_id"] = expected_group
+        append(expected_session, role, content, **metadata)
+        if group_window is not None:
+            group_window.append(
+                {
+                    "message_id": str(item.get("message_id", "") or ""),
+                    "user_id": user_id,
+                    "sender_name": str(item.get("sender", item.get("sender_name", "")) or ""),
+                    "text": content,
+                    "source_kind": "bot_reply" if role == "assistant" else "user",
+                    "is_bot": role == "assistant",
+                }
+            )
 
 
 async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir: str, behavior_config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -122,6 +217,8 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
     if not events:
         raise ValueError("unsupported_fixture:no_events")
     seed = case.get("seed") if isinstance(case.get("seed"), dict) else {}
+    bot_id = _fixture_bot_id(case)
+    current_time = _fixture_current_time(case)
     if seed.get("memory") or seed.get("seed_memory") or case.get("coverage_requires"):
         raise ValueError("blocked_fixture:memory_or_coverage_requires")
     if any(str(item.get("kind", "")) in {"tool_result", "send_receipt", "memory_update"} for item in events):
@@ -173,14 +270,16 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
     receipt = str(case.get("synthetic_receipt", "confirmed") or "confirmed")
     if receipt not in {"confirmed", "unknown", "failed"}:
         raise ValueError("unsupported_fixture:receipt")
-    bot = _CaptureBot(receipt)
+    bot = _CaptureBot(bot_id, receipt)
     logger = _Log()
     data_store = importlib.import_module("plugin.personification.core.data_store")
     data_store.init_data_store(config, logger=logger)
     memory_store = None
     if case.get("seed_memory"):
         from scripts.quality_eval.memory_fixtures import build_memory_store
-        memory_store = build_memory_store(case, {"isolated_data_dir": str(root)}, logger)
+        memory_fixture_config = dict(values)
+        memory_fixture_config["isolated_data_dir"] = str(root)
+        memory_store = build_memory_store(case, memory_fixture_config, logger)
         if memory_store.quality_fixture_unsupported:
             raise ValueError("blocked_fixture:memory_seed_incomplete")
 
@@ -189,6 +288,20 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
         session_data.setdefault(session_id, []).append(record)
         if role == "assistant":
             confirmed_history.append(record)
+
+    first_event = _event_from(case, events[0], bot.self_id, 0)
+    _seed_session_history(
+        seed=seed,
+        event=first_event,
+        surface=str(case.get("surface", "group")),
+        bot_id=bot.self_id,
+        append=append,
+        group_window=group_window if str(case.get("surface", "group")) != "private" else None,
+    )
+    # ``confirmed_history`` reports only replies confirmed during this capture.
+    # Seeded assistant turns are already validated above but must not inflate
+    # the legacy per-run counter used by existing evaluation reports.
+    confirmed_history.clear()
 
     def record_group_msg(
         group_id: str,
@@ -213,7 +326,7 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
         return await _caller_text(caller, messages)
 
     yaml_processor = yaml_mod.build_yaml_response_processor(
-        get_current_time=lambda: datetime(2026, 1, 1, 12, 0, 0), format_time_context=lambda _now: "2026-01-01 12:00",
+        get_current_time=lambda: current_time, format_time_context=lambda now: now.strftime("%Y-%m-%d %H:%M"),
         bot_statuses={}, get_group_config=lambda _gid: {"schedule_enabled": False}, plugin_config=config,
         get_schedule_prompt_injection=lambda: "", schedule_disabled_override_prompt=lambda: "", build_grounding_context=lambda _q: "",
         call_ai_api=primary, lite_call_ai_api=primary, review_call_ai_api=primary, parse_yaml_response=yaml_parse_mod.parse_yaml_response,
@@ -234,7 +347,7 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
     runtime = processor.RuntimeDeps(is_msg_processed=lambda _mid: False, logger=logger, superusers=set(),
         get_configured_api_providers=lambda: [{"name": "quality-injected"}], should_avoid_interrupting=lambda *_a: False,
         module_instance_id=1, process_yaml_response_logic=yaml_processor, plugin_config=config,
-        get_current_time=lambda: datetime(2026, 1, 1, 12, 0, 0), format_time_context=lambda _now: "2026-01-01 12:00",
+        get_current_time=lambda: current_time, format_time_context=lambda now: now.strftime("%Y-%m-%d %H:%M"),
         schedule_disabled_override_prompt=lambda: "", get_schedule_prompt_injection=lambda: "", build_grounding_context=lambda _q: "",
         update_private_interaction_time=lambda _uid: None, call_ai_api=primary, lite_call_ai_api=primary, review_call_ai_api=primary,
         save_plugin_runtime_config=None, user_blacklist={}, record_group_msg=record_group_msg,

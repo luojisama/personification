@@ -23,16 +23,103 @@ from typing import Any, Awaitable, Callable
 
 
 DEFAULT_LIMIT = 1500
+_OPTIONAL_PIPELINE_FAILURES = {
+    ("memory_query_plan", "CancelledError"),
+    ("memory_query_plan", "TimeoutError"),
+    ("memory_recall_gate", "CancelledError"),
+    ("memory_recall_gate", "TimeoutError"),
+}
+# This is deliberately a behavioural, not a runtime, configuration allowlist.
+# It excludes providers/credentials, URLs/proxies, filesystem paths, schedulers
+# and every feature which can contact an external service.
 BEHAVIOR_KEYS = (
-    "personification_semantic_frame_timeout", "personification_response_timeout",
     "personification_turn_planner_enabled", "personification_turn_planner_shadow_enabled",
-    "personification_agent_enabled", "personification_agent_max_steps",
+    "personification_semantic_frame_timeout", "personification_evidence_synthesizer_enabled",
+    "personification_agent_max_steps", "personification_agent_budget_mode",
+    "personification_memory_vector_backend", "personification_memory_rag_enabled",
+    "personification_memory_rag_candidate_limit", "personification_response_timeout",
+    "personification_reply_session_concurrency", "personification_reply_global_concurrency",
+    "personification_agent_enabled", "personification_semantic_equivalence_min_confidence",
+    "personification_memory_enabled", "personification_memory_palace_enabled",
+    "personification_memory_decay_enabled", "personification_memory_consolidation_enabled",
+    "personification_memory_recall_top_k", "personification_memory_search_scan_limit",
+    "personification_memory_capture_policy", "personification_agent_memory_write_enabled",
+    "personification_memory_context_enabled", "personification_context_budget_enabled",
+    "personification_private_history_days", "personification_private_history_max_messages",
+    "personification_group_history_days", "personification_group_history_max_messages",
+    "personification_memory_auto_recall_timeout_seconds",
+    "personification_memory_auto_recall_candidate_limit",
+    "personification_memory_auto_recall_inject_limit",
+    "personification_context_input_ratio", "personification_context_safety_margin_ratio",
+    "personification_timezone", "personification_system_prompt",
+    "personification_core_values_enabled", "personification_core_values_prompt",
+    "personification_include_thoughts", "personification_social_memory_enabled",
+    "personification_social_memory_summary_ttl_days", "personification_social_memory_auto_inject_top_k",
+    "personification_social_memory_auto_min_score", "personification_social_memory_semantic_gate_timeout",
+    "personification_reply_backoff_seconds", "personification_turn_trace_enabled",
 )
 
 
-def load_behavior_snapshot(config_path: str) -> dict[str, Any]:
-    payload = json.loads(Path(config_path).read_text(encoding="utf-8"))
-    return {key: payload[key] for key in BEHAVIOR_KEYS if key in payload}
+def _normalize_behavior_payload(payload: Any, *, explicit_snapshot: bool) -> tuple[dict[str, Any], dict[str, str]]:
+    """Normalize one already-read safe payload without retaining its raw form."""
+    if not isinstance(payload, dict):
+        raise ValueError("behavior snapshot must be a JSON object")
+    values = payload.get("behavior") if explicit_snapshot else payload
+    if not isinstance(values, dict):
+        raise ValueError("explicit behavior snapshot requires a behavior object")
+    _bootstrap_runtime()
+    config_mod = importlib.import_module("plugin.personification.config")
+    effective = config_mod.Config(**{key: values[key] for key in BEHAVIOR_KEYS if key in values})
+    source = "explicit_redacted_snapshot" if explicit_snapshot else "env.json"
+    return (
+        {key: getattr(effective, key) for key in BEHAVIOR_KEYS},
+        {key: source if key in values else "defaults" for key in BEHAVIOR_KEYS},
+    )
+
+
+def load_behavior_snapshot(config_path: str, snapshot_path: str | None = None) -> dict[str, Any]:
+    """Load a capture-safe effective behaviour profile.
+
+    ``env.json`` is the production managed authority after ConfigManager has
+    bootstrapped missing legacy environment values. This function only reads
+    its allowlisted keys; it never discovers or reads .env/.env.prod, runtime
+    configs, provider pools, or credentials. An explicit redacted profile may
+    supply a pre-resolved ``behavior`` object for legacy VPS values.
+    """
+    payload = json.loads(Path(snapshot_path or config_path).read_text(encoding="utf-8"))
+    effective, _sources = _normalize_behavior_payload(payload, explicit_snapshot=bool(snapshot_path))
+    return effective
+
+
+def describe_behavior_snapshot(config_path: str, snapshot_path: str | None = None) -> dict[str, Any]:
+    """Return manifest-safe values and provenance without retaining raw input."""
+    payload = json.loads(Path(snapshot_path or config_path).read_text(encoding="utf-8"))
+    effective, sources = _normalize_behavior_payload(payload, explicit_snapshot=bool(snapshot_path))
+    return {
+        "effective_fields": effective,
+        "sources": sources,
+        "credentials_exported": False,
+        "paths_exported": False,
+    }
+
+
+def resolve_behavior_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Use a frozen manifest snapshot when present, else resolve one once.
+
+    Promptfoo/in-process callers predate the manifest runner and may call
+    ``invoke_case`` directly. Preserve that entrypoint while making the normal
+    CLI path immutable for all cases in a run.
+    """
+    frozen = config.get("behavior_config")
+    if isinstance(frozen, dict):
+        _bootstrap_runtime()
+        config_mod = importlib.import_module("plugin.personification.config")
+        normalized = config_mod.Config(**{key: frozen[key] for key in BEHAVIOR_KEYS if key in frozen})
+        return {key: getattr(normalized, key) for key in BEHAVIOR_KEYS}
+    config_path = str(config.get("config_path", "") or "")
+    if not config_path:
+        raise ValueError("server behavior source requires config_path")
+    return load_behavior_snapshot(config_path, config.get("behavior_snapshot_path"))
 
 
 class BudgetExhausted(RuntimeError):
@@ -81,6 +168,7 @@ class BudgetedCaller:
     def __init__(self, caller: Any, budget: CallBudget) -> None:
         self._caller, self._budget, self.usages = caller, budget, []
         self.failure_types: list[str] = []
+        self.failure_events: list[dict[str, str]] = []
         self.exhausted = False
 
     async def chat_with_tools(self, *args: Any, **kwargs: Any) -> Any:
@@ -89,20 +177,17 @@ class BudgetedCaller:
         except BudgetExhausted:
             self.exhausted = True
             raise
+        purpose = "quality_eval"
         try:
             # Processors create their own LLM contexts. Reassert the route's
             # single-attempt contract at the actual dispatch boundary.
             from plugin.personification.core.llm_context import (
-                current_llm_context, reset_llm_context, set_llm_context,
+                current_llm_context, reset_llm_context, set_llm_retry_policy,
                 set_wire_retry_disabled, LLM_RETRY_POLICY_SINGLE_ATTEMPT,
             )
             context = current_llm_context()
-            token = set_llm_context(
-                group_id=context.get("group_id", ""), user_id=context.get("user_id", ""),
-                purpose=context.get("purpose", "quality_eval"),
-                retry_policy=LLM_RETRY_POLICY_SINGLE_ATTEMPT,
-                deadline_monotonic=context.get("deadline_monotonic"),
-            )
+            purpose = str(context.get("purpose", "") or "quality_eval")
+            token = set_llm_retry_policy(LLM_RETRY_POLICY_SINGLE_ATTEMPT)
             wire = set_wire_retry_disabled(usage_route_id="quality_eval_pool_1", usage_provider="gemini")
             try:
                 response = await self._caller.chat_with_tools(*args, **kwargs)
@@ -111,7 +196,9 @@ class BudgetedCaller:
                 reset_llm_context(token)
         except (Exception, asyncio.CancelledError) as exc:
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            self.failure_types.append(f"HTTP_{status_code}" if isinstance(status_code, int) else type(exc).__name__)
+            error = f"HTTP_{status_code}" if isinstance(status_code, int) else type(exc).__name__
+            self.failure_types.append(error)
+            self.failure_events.append({"purpose": purpose, "error": error})
             raise
         raw_usage = getattr(response, "usage", None) or getattr(response, "token_usage", None)
         if raw_usage is not None:
@@ -143,6 +230,26 @@ class EvalResult:
     send_attempt_count: int = 0
     confirmed_history: int = 0
     delivery: str = "not_sent"
+    failure_events: list[dict[str, str]] | None = None
+    optional_diagnostics: list[dict[str, str]] | None = None
+
+
+def _resolve_pipeline_status(payload_status: str, caller: BudgetedCaller) -> tuple[str, list[dict[str, str]], list[dict[str, str]]]:
+    """Keep delivery/generation evidence separate from explicitly optional work.
+
+    A completed or no-reply public pipeline result may retain a timed-out
+    optional memory planning/gating attempt.  Every other failed wire call is
+    critical, and budget exhaustion is always terminal.
+    """
+    events = [dict(item) for item in caller.failure_events]
+    optional = [item for item in events if (item.get("purpose", ""), item.get("error", "")) in _OPTIONAL_PIPELINE_FAILURES]
+    critical = [item for item in events if item not in optional]
+    status = str(payload_status or "failed")
+    if caller.exhausted:
+        return "budget_exhausted", optional, critical
+    if status in {"completed", "no_reply"} and critical:
+        return "failed", optional, critical
+    return status, optional, critical
 
 
 def _bootstrap_runtime() -> None:
@@ -278,25 +385,25 @@ async def run_agent_case(case: dict[str, Any], config: dict[str, Any]) -> EvalRe
     try:
         if config.get("runtime_path") == "pipeline":
             from scripts.quality_eval.pipeline_adapter import run_full_path_case
-            behavior = load_behavior_snapshot(str(config["config_path"])) if config.get("behavior_source") == "server" else {}
+            behavior = resolve_behavior_config(config) if config.get("behavior_source") == "server" else {}
             payload = await run_full_path_case(case, caller=caller, isolated_dir=str(isolated_dir), behavior_config=behavior)
-            status = str(payload.get("status", "failed"))
-            if caller.failure_types:
-                status = "failed"
-            if caller.exhausted:
-                status = "budget_exhausted"
+            status, optional_diagnostics, critical_failures = _resolve_pipeline_status(
+                str(payload.get("status", "failed")), caller,
+            )
             reply_turn_trace.finish_trace(trace_id=trace_id, outcome="evaluation_" + status)
             return EvalResult(
                 reply=str(payload.get("reply", "")), status=status, trace=str(payload.get("trace") or trace_id),
                 usage={"wire_calls": budget.snapshot()["reserved_calls"] - initial_calls, "responses": caller.usages},
                 elapsed_ms=round((time.monotonic() - started) * 1000),
                 execution_mode="simulated" if config.get("test_double") else "real",
-                error=caller.failure_types[-1] if caller.failure_types else "",
+                error=critical_failures[-1]["error"] if critical_failures else "",
                 turns=payload.get("turns"), coverage=str(payload.get("coverage", "pipeline_unverified")),
                 synthetic_receipts=payload.get("synthetic_receipts"),
                 send_attempt_count=int(payload.get("send_attempt_count", 0)),
                 confirmed_history=int(payload.get("confirmed_history", 0)),
                 delivery=str(payload.get("delivery", "not_sent")),
+                failure_events=list(caller.failure_events),
+                optional_diagnostics=optional_diagnostics,
             )
         messages = _messages_from_case(case)
         final_result: Any = None
@@ -351,7 +458,8 @@ async def run_agent_case(case: dict[str, Any], config: dict[str, Any]) -> EvalRe
             error=failure_code or (caller.failure_types[-1] if caller.failure_types else ""),
             trace=trace_id, usage={"wire_calls": budget.snapshot()["reserved_calls"]-initial_calls,
             "responses": caller.usages}, elapsed_ms=round((time.monotonic()-started)*1000),
-            execution_mode="simulated" if config.get("test_double") else "real", turns=turns)
+            execution_mode="simulated" if config.get("test_double") else "real", turns=turns,
+            failure_events=list(caller.failure_events))
     except Exception as exc:
         exhausted = isinstance(exc, BudgetExhausted) or caller.exhausted
         blocked = isinstance(exc, ValueError) and str(exc).startswith(("blocked_fixture:", "unsupported_fixture:"))
@@ -361,7 +469,8 @@ async def run_agent_case(case: dict[str, Any], config: dict[str, Any]) -> EvalRe
             usage={"wire_calls": budget.snapshot()["reserved_calls"] - initial_calls, "responses": caller.usages},
             elapsed_ms=round((time.monotonic() - started) * 1000),
             execution_mode="simulated" if config.get("test_double") else "real",
-            error="fixture_not_supported" if blocked else (caller.failure_types[-1] if caller.failure_types else f"{code}:{type(exc).__name__}"), turns=turns)
+            error="fixture_not_supported" if blocked else (caller.failure_types[-1] if caller.failure_types else f"{code}:{type(exc).__name__}"), turns=turns,
+            failure_events=list(caller.failure_events))
     finally:
         reset_llm_context(wire_token)
         reset_llm_context(llm_token)
