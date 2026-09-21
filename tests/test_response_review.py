@@ -411,6 +411,61 @@ def test_final_dialogue_gate_rewrites_bot_as_user_confusion_once_and_rechecks() 
     assert decision.text == "两组起步，洞里拐弯容易漏。"
 
 
+def test_final_dialogue_gate_rechecks_nested_example_provenance_without_extra_rewrite() -> None:
+    calls: list[list[dict]] = []
+    snapshot = dialogue_context.build_dialogue_context_snapshot(
+        [
+            {
+                "message_id": "bot-demo",
+                "user_id": "self",
+                "source_kind": "bot_reply",
+                "confirmed": True,
+                "content": "【示例演示】虚构来访者：今天很疲惫，只想轻松说几句。示例回复：先歇会儿。",
+            },
+            {
+                "message_id": "human-current",
+                "user_id": "guest",
+                "source_kind": "user",
+                "is_current_trigger": True,
+                "content": "你还记得刚才聊了什么吗？",
+            },
+        ]
+    )
+
+    async def _review(messages):  # noqa: ANN001
+        calls.append(messages)
+        if len(calls) == 1:
+            assert "引用、示例、演示、测试输入输出、转述或角色台词" in messages[0]["content"]
+            assert "虚构来访者：今天很疲惫" in messages[-1]["content"]
+            return (
+                '{"action":"rewrite","text":"刚才有一段示例演示，不是在说你的真实经历。",'
+                '"reason":"示例人物不能归为当前用户","flags":["speaker_provenance_confusion"],'
+                '"attribution_verdict":"current_human"}'
+            )
+        assert len(calls) == 2
+        assert "对话归属改写的最终复核器" in messages[0]["content"]
+        assert "引用、示例、演示、测试输入输出、转述或角色台词" in messages[0]["content"]
+        assert "虚构来访者：今天很疲惫" in messages[-1]["content"]
+        return (
+            '{"action":"accept","text":"","reason":"改写没有错归示例人物",'
+            '"flags":[],"attribution_verdict":"current_human"}'
+        )
+
+    decision = asyncio.run(
+        response_review.final_dialogue_gate(
+            _review,
+            candidate_text="刚才不是在说你今天很疲惫、想轻松聊几句吗？",
+            raw_message_text="你还记得刚才聊了什么吗？",
+            recent_context="人格 Bot 刚发过一段示例演示。",
+            dialogue_context=snapshot,
+        )
+    )
+
+    assert len(calls) == 2
+    assert decision.action == "rewrite"
+    assert decision.text == "刚才有一段示例演示，不是在说你的真实经历。"
+
+
 def test_final_dialogue_gate_allows_real_user_quote_of_persona_bot() -> None:
     snapshot = dialogue_context.build_dialogue_context_snapshot(
         [
