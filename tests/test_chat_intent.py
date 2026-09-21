@@ -306,9 +306,47 @@ def test_semantic_frame_treats_avatar_visibility_as_runtime_capability() -> None
     assert "runtime_capability 只覆盖" in system_prompt
     assert "头像中的可观察画面事实" in system_prompt
     assert "安全头像摘要" not in system_prompt
-    assert "其它用户资料、记忆、群信息或会话能力问题仍使用 plugin_question/capability" in system_prompt
+    assert "插件记忆机制、持久化存储、跨会话/跨群可用性、配置" in system_prompt
+    assert "具体未知的用户事实、群内事实或历史内容本身不是插件能力问题" in system_prompt
     assert frame.chat_intent == "plugin_question"
     assert frame.plugin_question_intent == "runtime_capability"
+
+
+def test_semantic_frame_prompt_separates_provided_chat_recap_from_plugin_memory_capability() -> None:
+    captured: dict[str, object] = {}
+
+    class _Caller:
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            captured["messages"] = messages
+            return type(
+                "Response",
+                (),
+                {
+                    "content": (
+                        '{"chat_intent":"banter","plugin_question_intent":"capability",'
+                        '"ambiguity_level":"low","recommend_silence":false,'
+                        '"evidence_policy":"none","confidence":0.95,"reason":"回顾已给出的聊天"}'
+                    )
+                },
+            )()
+
+    frame = asyncio.run(
+        chat_intent.infer_turn_semantic_frame_with_llm(
+            "你还记得聊了什么吗",
+            is_group=True,
+            is_direct_mention=True,
+            recent_context="[我] Python 里 list 可变，tuple 不可变；元素都不可变时 tuple 可作字典 key。",
+            tool_caller=_Caller(),
+        )
+    )
+
+    system_prompt = captured["messages"][0]["content"]  # type: ignore[index]
+    assert "当前消息和最近上下文已经提供的聊天内容" in system_prompt
+    assert "不要标 plugin_question、不要要求查询记忆或插件状态" in system_prompt
+    assert "跨会话/跨群可用性" in system_prompt
+    assert "具体未知的用户事实、群内事实或历史内容本身不是插件能力问题" in system_prompt
+    assert frame.chat_intent == "banter"
+    assert frame.evidence_policy == "none"
 
 
 def test_semantic_frame_prompt_uses_structured_favorability_signals() -> None:
