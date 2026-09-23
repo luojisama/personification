@@ -8,6 +8,7 @@ import pytest
 from ._loader import load_personification_module
 
 ai_routes = load_personification_module("plugin.personification.core.ai_routes")
+context_budget = load_personification_module("plugin.personification.core.context_budget")
 llm_context = load_personification_module("plugin.personification.core.llm_context")
 reply_turn_trace = load_personification_module("plugin.personification.core.reply_turn_trace")
 tool_impl = load_personification_module("plugin.personification.skills.skillpacks.tool_caller.scripts.impl")
@@ -351,6 +352,8 @@ def test_provider_route_trace_summary_is_allowlisted_and_redacted() -> None:
                 "request_count": 1,
                 "upstream_status": "INVALID_ARGUMENT",
                 "upstream_detail_code": "function_response_mismatch",
+                "exception_type": "GatewaySchemaError",
+                "schema_rejection_code": "schema_rejected",
                 "api_url": "https://private.example/v1beta?key=secret",
                 "prompt": "raw private prompt",
                 "response_body": "raw private response",
@@ -368,10 +371,64 @@ def test_provider_route_trace_summary_is_allowlisted_and_redacted() -> None:
     assert "schema:abcdef123456" in summary
     assert "requests:1" in summary
     assert "code:provider_request_rejected" in summary
+    assert "exception:GatewaySchemaError" in summary
+    assert "schema_rejection:schema_rejected" in summary
     assert "upstream:INVALID_ARGUMENT/function_response_mismatch" in summary
     assert "private.example" not in summary
     assert "secret" not in summary
     assert "raw private" not in summary
+
+
+def test_context_budget_error_keeps_canonical_code_and_safe_summary() -> None:
+    error = context_budget.ContextBudgetExceeded("required request exceeds route input budget")
+
+    _status, code, retryable, *_rest = ai_routes._exception_route_metadata(error)
+    summary = ai_routes.summarize_provider_route_attempts(
+        ai_routes.RoutedToolCallerError(
+            [
+                {
+                    "provider": "budget-route",
+                    "api_type": "openai",
+                    "status_code": 0,
+                    "code": code,
+                    "retryable": retryable,
+                    "exception_type": type(error).__name__,
+                    "schema_rejection_code": "provider_error_unknown",
+                }
+            ]
+        )
+    )
+
+    assert code == "provider_context_budget_exceeded"
+    assert retryable is False
+    assert "code:provider_context_budget_exceeded" in summary
+    assert "exception:ContextBudgetExceeded" in summary
+    assert "schema_rejection:provider_error_unknown" in summary
+
+
+def test_provider_request_trace_includes_safe_error_diagnostics(monkeypatch) -> None:  # noqa: ANN001
+    stages: list[dict[str, object]] = []
+    monkeypatch.setattr(reply_turn_trace, "record_stage", lambda **kwargs: stages.append(kwargs))
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[_FakeCaller("primary", [])],
+        fallback_caller=None,
+        logger=None,
+        route_descriptors=[{"name": "safe-route", "api_type": "openai", "model": "safe-model"}],
+    )
+    error = RuntimeError("private provider detail")
+    error.status_code = 400
+
+    routed._record_provider_request(
+        routed._primary_callers[0],
+        request_shape={"request_kind": "function_calling"},
+        elapsed_ms=1,
+        error=error,
+    )
+
+    detail = str(stages[-1]["detail"])
+    assert "exception_type=RuntimeError" in detail
+    assert "schema_rejection=provider_request_rejected" in detail
+    assert "private provider detail" not in detail
 
 
 @pytest.mark.parametrize(
@@ -615,6 +672,48 @@ def test_routed_tool_caller_traces_schema_prepare_and_real_multimodal_request(mo
     assert "ANTHROPIC_SECRET" not in detail
     assert "AUDIO_SECRET" not in detail
     assert "GEMINI_SECRET" not in detail
+
+
+def test_routed_tool_caller_records_budget_preflight_failures_for_each_route(monkeypatch) -> None:  # noqa: ANN001
+    stages: list[dict[str, object]] = []
+    monkeypatch.setattr(reply_turn_trace, "record_stage", lambda **kwargs: stages.append(kwargs))
+    gemini = _FakeCaller("gemini", [])
+    openai = _FakeCaller("openai", [])
+    routed = ai_routes.RoutedToolCaller(
+        primary_callers=[gemini, openai],
+        fallback_caller=None,
+        logger=None,
+        route_descriptors=[
+            {"name": "gemini-route", "api_type": "gemini", "model": "gemini-test", "context_window_tokens": 10_000, "max_output_tokens": 1_000},
+            {"name": "openai-route", "api_type": "openai", "model": "grok-test", "context_window_tokens": 10_000, "max_output_tokens": 1_000},
+        ],
+    )
+    messages = [{"role": "system", "content": "PRIVATE_SYSTEM_BODY " * 4_000}]
+    tools = [{"type": "function", "function": {"name": "safe_tool", "description": "PRIVATE_TOOL_BODY", "parameters": {"type": "object"}}}]
+
+    with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+        asyncio.run(routed.chat_with_tools(messages, tools, False))
+
+    error = caught.value
+    assert gemini.calls_seen == []
+    assert openai.calls_seen == []
+    assert error.code == "provider_context_budget_exceeded"
+    assert [item["code"] for item in error.route_attempts] == [
+        "provider_context_budget_exceeded",
+        "provider_context_budget_exceeded",
+    ]
+    assert [item["exception_type"] for item in error.route_attempts] == [
+        "ContextBudgetExceeded",
+        "ContextBudgetExceeded",
+    ]
+    request_details = [str(item["detail"]) for item in stages if item["key"] == "provider_request"]
+    assert len(request_details) == 2
+    for detail in request_details:
+        assert "http=0" in detail
+        assert "exception_type=ContextBudgetExceeded" in detail
+        assert "schema_rejection=provider_error_unknown" in detail
+        assert "PRIVATE_SYSTEM_BODY" not in detail
+        assert "PRIVATE_TOOL_BODY" not in detail
 
 
 def test_routed_tool_caller_keeps_safe_shape_across_503_then_400(monkeypatch) -> None:  # noqa: ANN001

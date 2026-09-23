@@ -38,6 +38,7 @@ _CANONICAL_PROVIDER_CODES = {
     "provider_auth_failed",
     "provider_call_failed",
     "provider_caller_unavailable",
+    "provider_context_budget_exceeded",
     "provider_invalid_response",
     "provider_model_candidate_unavailable",
     "provider_model_unavailable",
@@ -189,6 +190,8 @@ def summarize_provider_route_attempts(exc: BaseException, *, limit: int = 3) -> 
                 f"schema:{_route_trace_atom(attempt.get('tool_schema_hash') or attempt.get('tool_names_hash'), limit=16)}",
                 f"requests:{request_count}",
                 f"code:{code}",
+                f"exception:{_route_trace_atom(attempt.get('exception_type'), limit=80)}",
+                f"schema_rejection:{_route_trace_atom(attempt.get('schema_rejection_code'), limit=64)}",
             )
         )
         upstream_status = _route_trace_atom(attempt.get("upstream_status"), limit=48)
@@ -1328,12 +1331,18 @@ class RoutedToolCaller:
                 code = "provider_cancelled"
                 status_code = 0
                 wire_tools_count = max(0, int(shape.get("tools_count") or 0))
+                exception_type = ""
+                schema_rejection_code = ""
             elif error is not None:
                 attempt = self._route_attempt(caller, error, request_shape=shape)
                 status = "error"
                 code = str(attempt.get("code") or "provider_call_failed")
                 status_code = max(0, int(attempt.get("status_code") or 0))
                 wire_tools_count = max(0, int(attempt.get("wire_tools_count") or 0))
+                exception_type = _route_trace_atom(attempt.get("exception_type"), limit=80)
+                schema_rejection_code = _route_trace_atom(
+                    attempt.get("schema_rejection_code"), limit=64
+                )
             else:
                 if bool(getattr(response, "vision_unavailable", False)):
                     status = "warn"
@@ -1351,6 +1360,8 @@ class RoutedToolCaller:
                 wire_tools_count = _response_wire_tools_count(
                     response, max(0, int(shape.get("tools_count") or 0))
                 )
+                exception_type = ""
+                schema_rejection_code = ""
             from .reply_turn_trace import record_stage
 
             record_stage(
@@ -1374,6 +1385,11 @@ class RoutedToolCaller:
                     f"{max(0, int(shape.get('input_token_limit') or 0))} "
                     f"context_source={shape.get('budget_source') or 'unavailable'} "
                     f"context_calibration={calibration.get('usage_calibration', 'unavailable')}"
+                    + (
+                        f" exception_type={exception_type} schema_rejection={schema_rejection_code}"
+                        if error is not None
+                        else ""
+                    )
                 ),
                 hint="仅记录安全路由描述、枚举与计数；不记录正文、媒体引用、URL、Base64 或凭据。",
                 elapsed_ms=max(0, int(elapsed_ms)),
