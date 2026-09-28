@@ -11,6 +11,8 @@ from typing import Any
 import hashlib
 import re
 
+from .qq_outbound import SendReceipt, parse_onebot_message_id
+
 _EVENT_MAX_CHARS = 2000
 _BATCH_MAX_CHARS = 12000
 _MEDIA_KINDS = {"image", "sticker", "video", "audio", "file", "forward", "media"}
@@ -28,25 +30,23 @@ def is_confirmed_send_result(result: Any) -> bool:
     legacy adapter may represent success as a non-empty id/result, but None,
     explicit unknown and explicit failed results are never promoted to history.
     """
-    status = getattr(result, "status", None)
-    if status is None and isinstance(result, dict):
+    if isinstance(result, SendReceipt):
+        return result.status == "sent"
+    if isinstance(result, dict):
         status = result.get("status")
-    if status is not None:
-        if isinstance(result, dict) and str(status).strip().lower() == "ok":
-            data = result.get("data")
-            return (
-                result.get("retcode", 0) in (0, "0")
-                and isinstance(data, dict)
-                and bool(data.get("message_id"))
-            )
-        return str(status).strip().lower() == "sent"
-    if result is None or result is False:
+        if status is not None:
+            return str(status).strip().lower() == "ok" and isinstance(result.get("data"), dict) and parse_onebot_message_id(result) is not None
+        return parse_onebot_message_id(result) is not None
+    if getattr(result, "status", None) is not None:
+        return False
+    if result is None or isinstance(result, bool):
         return False
     if isinstance(result, (str, int)):
-        return bool(str(result).strip())
-    if isinstance(result, dict):
-        return bool(result.get("message_id") or result.get("msg_id") or result.get("id") or result.get("messageId"))
-    return bool(getattr(result, "message_id", None) or getattr(result, "msg_id", None) or getattr(result, "id", None))
+        return parse_onebot_message_id({"message_id": result}) is not None
+    for name in ("message_id", "msg_id", "id"):
+        if parse_onebot_message_id({"message_id": getattr(result, name, None)}) is not None:
+            return True
+    return False
 
 
 def _text(value: Any, limit: int) -> tuple[str, dict[str, int]]:

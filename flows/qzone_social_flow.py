@@ -2015,6 +2015,7 @@ async def scan_qzone_social_feeds(
                         continue
 
                     acted = False
+                    action_counted = False
                     liked = False
                     commented = False
                     like_dispatch = None
@@ -2099,6 +2100,10 @@ async def scan_qzone_social_feeds(
                                     getattr(plugin_config, "personification_qzone_min_interval_hours", 12.0) or 0
                                 ),
                             )
+                            friend_state["action_count"] = int(friend_state.get("action_count", 0) or 0) + 1
+                            action_counted = True
+                            _mark_reacted(state, feed_key, action="forward", comment=forward_text)
+                            get_data_store().save_sync(_STORE_NAME, state)
                             await _record_qzone_profile_evidence(
                                 persona_store=persona_store,
                                 user_id=str(candidate["user_id"]),
@@ -2145,6 +2150,11 @@ async def scan_qzone_social_feeds(
                             result["liked"] += 1
                             state["like_count"] = int(state.get("like_count", 0) or 0) + 1
                             friend_state["like_count"] = int(friend_state.get("like_count", 0) or 0) + 1
+                            if not action_counted:
+                                friend_state["action_count"] = int(friend_state.get("action_count", 0) or 0) + 1
+                                action_counted = True
+                            _mark_reacted(state, feed_key, action="like")
+                            get_data_store().save_sync(_STORE_NAME, state)
                             await _record_qzone_profile_evidence(
                                 persona_store=persona_store,
                                 user_id=str(candidate["user_id"]),
@@ -2207,6 +2217,15 @@ async def scan_qzone_social_feeds(
                                     "last_seen_ts": time.time(),
                                     "reply_chain_count": 0,
                                 }
+                            if not action_counted:
+                                friend_state["action_count"] = int(friend_state.get("action_count", 0) or 0) + 1
+                                action_counted = True
+                            _mark_reacted(
+                                state, feed_key,
+                                action="like_comment" if liked else "comment",
+                                comment=comment_text,
+                            )
+                            get_data_store().save_sync(_STORE_NAME, state)
                             await _record_qzone_profile_evidence(
                                 persona_store=persona_store,
                                 user_id=str(candidate["user_id"]),
@@ -2223,7 +2242,8 @@ async def scan_qzone_social_feeds(
                             result["last_error"] = comment_msg
                             logger.warning(f"[qzone_social] comment failed for {feed_key}: {comment_msg}")
                     if acted:
-                        friend_state["action_count"] = int(friend_state.get("action_count", 0) or 0) + 1
+                        if not action_counted:
+                            friend_state["action_count"] = int(friend_state.get("action_count", 0) or 0) + 1
                         actual_action = (
                             "forward"
                             if forwarded

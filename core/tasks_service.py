@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any, Callable
 
 from .db import connect_sync
+
+_logger = logging.getLogger(__name__)
 
 
 def get_user_tasks_path(data_dir: Path) -> Path:
@@ -162,16 +165,36 @@ def make_cancel_task_tool(scheduler: Any, data_dir: Path):
 
 async def _execute_task(task: dict, bot_caller: Callable[[dict], Any] | None) -> None:
     task["last_executed_at"] = time.time()
-    task["last_status"] = "sent"
-    if bot_caller is not None:
-        try:
+    task["last_status"] = "unknown"
+    primary_error: BaseException | None = None
+    try:
+        if bot_caller is not None:
             result = bot_caller(task)
             if asyncio.iscoroutine(result):
-                await result
-        except Exception:
+                result = await result
+            if isinstance(result, str) and result in {"sent", "unknown", "failed", "safety_blocked"}:
+                task["last_status"] = result
+            elif result is None:
+                task["last_status"] = "unknown"
+            else:
+                raise ValueError("invalid scheduled task delivery result")
+        else:
             task["last_status"] = "failed"
-            raise
-    _save_task(task, str(task.get("user_id", "") or ""))
+    except asyncio.CancelledError as exc:
+        task["last_status"] = "unknown"
+        primary_error = exc
+        raise
+    except Exception as exc:
+        task["last_status"] = "unknown"
+        primary_error = exc
+        raise
+    finally:
+        try:
+            _save_task(task, str(task.get("user_id", "") or ""))
+        except Exception as save_exc:
+            if primary_error is None:
+                raise
+            _logger.warning("scheduled task status persistence failed: %s", type(save_exc).__name__)
 
 
 def restore_tasks_on_startup(scheduler: Any, data_dir: Path, bot_caller: Callable[[dict], Any]) -> None:

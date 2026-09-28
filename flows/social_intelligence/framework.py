@@ -6,10 +6,14 @@ SocialTrigger 把"什么时候触发"（cron / interval / event）与"触发后�
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
 from ...core.social_decision import SocialDecision, claim_social_decision, settle_social_decision
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -56,30 +60,27 @@ async def dispatch_social_outbound(
         social_decision, channel=surface, scope=scope
     ):
         return False
-    if ctx.qq_outbound_ledger is None:
-        # A transport return is not a receipt.  The no-ledger path still needs
-        # a real OneBot message id before callers may record social success.
-        from ...core.qq_outbound import parse_onebot_message_id
-        confirmed = parse_onebot_message_id(await send()) is not None
-        if social_decision is not None:
-            settle_social_decision(social_decision, status="sent" if confirmed else "unknown", scope=scope)
-        return confirmed
-
-    from ...core.qq_outbound import build_outbound_context
-
-    outbound_context = build_outbound_context(
-        bot=bot,
-        event=event,
-        surface=surface,
-        user_target=user_target or (target if conversation_kind == "private" else ""),
-    )
     try:
-        receipt = await ctx.qq_outbound_ledger.dispatch(outbound_context, content, send)
-    except Exception:
+        if ctx.qq_outbound_ledger is None:
+            from ...core.qq_outbound import parse_onebot_message_id
+            confirmed = parse_onebot_message_id(await send()) is not None
+        else:
+            from ...core.qq_outbound import build_outbound_context
+            outbound_context = build_outbound_context(
+                bot=bot,
+                event=event,
+                surface=surface,
+                user_target=user_target or (target if conversation_kind == "private" else ""),
+            )
+            receipt = await ctx.qq_outbound_ledger.dispatch(outbound_context, content, send)
+            confirmed = receipt.status == "sent"
+    except (Exception, asyncio.CancelledError):
         if social_decision is not None:
-            settle_social_decision(social_decision, status="unknown", scope=scope)
+            try:
+                settle_social_decision(social_decision, status="unknown", scope=scope)
+            except Exception as settlement_exc:
+                _logger.warning("social outbound settlement failed: %s", type(settlement_exc).__name__)
         raise
-    confirmed = receipt.status == "sent"
     if social_decision is not None:
         settle_social_decision(social_decision, status="sent" if confirmed else "unknown", scope=scope)
     return confirmed

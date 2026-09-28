@@ -2,6 +2,7 @@ from ._loader import load_personification_module
 
 
 projection = load_personification_module("plugin.personification.core.history_projection")
+qq_outbound = load_personification_module("plugin.personification.core.qq_outbound")
 session_store = load_personification_module("plugin.personification.core.session_store")
 
 
@@ -36,18 +37,28 @@ def test_confirmed_sticker_projection_never_leaks_path() -> None:
 
 
 def test_part_receipt_confirmation_distinguishes_sent_unknown_failed_and_legacy() -> None:
-    class Receipt:
-        def __init__(self, status: str, message_id: str | None = None) -> None:
-            self.status, self.message_id = status, message_id
-    assert projection.is_confirmed_send_result(Receipt("sent", None))
-    assert not projection.is_confirmed_send_result(Receipt("unknown", "text-first"))
-    assert not projection.is_confirmed_send_result(Receipt("failed", "x"))
+    def receipt(status: str, message_id: str | None = None):  # noqa: ANN202
+        return qq_outbound.SendReceipt(
+            id=1, operation_id="op", part_index=0, bot_id="bot",
+            conversation_kind="group", conversation_id="group", message_id=message_id,
+            user_target="", surface="normal_reply", status=status, preview="",
+            content_hmac="", error_code="", created_at=0.0, updated_at=0.0,
+            recalled_at=0.0,
+        )
+    assert projection.is_confirmed_send_result(receipt("sent", None))
+    assert not projection.is_confirmed_send_result(receipt("unknown", "text-first"))
+    assert not projection.is_confirmed_send_result(receipt("failed", "x"))
     assert projection.is_confirmed_send_result({"message_id": "legacy-ok"})
     assert not projection.is_confirmed_send_result(None)
-    assert projection.is_confirmed_send_result({"status": "ok", "data": {"message_id": "legacy-ok"}})
+    assert projection.is_confirmed_send_result({"status": "ok", "retcode": 0, "data": {"message_id": "legacy-ok"}})
+    assert not projection.is_confirmed_send_result({"status": "ok", "data": {"message_id": "legacy-ok"}})
     assert not projection.is_confirmed_send_result({"status": "ok", "data": {}})
     assert not projection.is_confirmed_send_result({"status": "ok", "retcode": 1, "data": {"message_id": "x"}})
     assert not projection.is_confirmed_send_result({"status": "failed", "retcode": 0, "data": {"message_id": "x"}})
+    assert not projection.is_confirmed_send_result({"status": "sent", "message_id": "x"})
+    for invalid in (True, False, 0, "0", "", "\n"):
+        assert not projection.is_confirmed_send_result(invalid)
+    assert projection.is_confirmed_send_result("legacy-message-id")
 
 
 def test_sticker_metadata_uses_semantics_but_not_name_or_url() -> None:

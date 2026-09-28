@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import logging
 import inspect
 import json
 import re
@@ -16,6 +17,7 @@ from .db import connect_sync, get_db_path
 
 
 QQ_OUTBOUND_STATUSES = frozenset({"sent", "failed", "unknown"})
+_logger = logging.getLogger(__name__)
 DEFAULT_RECALL_WINDOW_SECONDS = 5 * 60
 DEFAULT_SOCIAL_RECALL_SURFACES = frozenset(
     {
@@ -136,7 +138,7 @@ def _preview_source(content: Any) -> str:
         return "[binary]"
     try:
         return str(content or "")
-    except Exception:
+    except (TypeError, ValueError):
         return f"[{type(content).__name__}]"
 
 
@@ -178,7 +180,7 @@ def _normalize_message_id(value: Any) -> str | None:
     if isinstance(value, bool) or not isinstance(value, (str, int)):
         return None
     normalized = str(value).strip()
-    if not normalized or len(normalized) > 160 or any(ord(char) < 32 for char in normalized):
+    if not normalized or normalized == "0" or len(normalized) > 160 or any(ord(char) < 32 for char in normalized):
         return None
     return normalized
 
@@ -194,6 +196,15 @@ def parse_onebot_message_id(result: Any) -> str | None:
             if identity in seen:
                 return None
             seen.add(identity)
+            # A message id carried by an explicit protocol failure is not an
+            # acknowledgement.  NoneBot may already have unwrapped a valid
+            # response, in which case neither field is present.
+            if "status" in value:
+                if str(value["status"]).strip().lower() != "ok" or "retcode" not in value:
+                    return None
+            retcode = value.get("retcode", 0)
+            if isinstance(retcode, bool) or retcode not in (0, "0"):
+                return None
             for key in _MESSAGE_ID_KEYS:
                 if key in value:
                     message_id = _normalize_message_id(value[key])
@@ -458,17 +469,17 @@ class QQOutboundLedger:
             if inspect.isawaitable(result):
                 result = await result
         except asyncio.CancelledError as exc:
-            updated = await asyncio.to_thread(
-                self._update_dispatch,
-                receipt,
-                status="unknown",
-                message_id=None,
-                error_code=_exception_error_code(exc),
-                now=now,
-            )
+            updated = receipt
+            try:
+                updated = await asyncio.to_thread(
+                    self._update_dispatch, receipt, status="unknown",
+                    message_id=None, error_code=_exception_error_code(exc), now=now,
+                )
+            except Exception as update_exc:  # noqa: BLE001 - preserve cancellation if the ledger update itself fails
+                _logger.warning("qq outbound cancellation update failed: %s", type(update_exc).__name__)
             try:
                 setattr(exc, "qq_outbound_receipt", updated)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - attaching a receipt must not replace cancellation
                 pass
             raise
         except Exception as exc:
@@ -478,19 +489,19 @@ class QQOutboundLedger:
                     candidate = str(failure_status_resolver(exc) or "").strip().lower()
                     if candidate in {"failed", "unknown"}:
                         failure_status = candidate
-                except Exception:
+                except Exception:  # noqa: BLE001 - an injected resolver must not mask the send failure
                     failure_status = "unknown"
-            updated = await asyncio.to_thread(
-                self._update_dispatch,
-                receipt,
-                status=failure_status,
-                message_id=None,
-                error_code=_exception_error_code(exc),
-                now=now,
-            )
+            updated = receipt
+            try:
+                updated = await asyncio.to_thread(
+                    self._update_dispatch, receipt, status=failure_status,
+                    message_id=None, error_code=_exception_error_code(exc), now=now,
+                )
+            except Exception as update_exc:  # noqa: BLE001 - preserve the original send failure
+                _logger.warning("qq outbound failure update failed: %s", type(update_exc).__name__)
             try:
                 setattr(exc, "qq_outbound_receipt", updated)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - preserve the original send exception
                 pass
             raise
 

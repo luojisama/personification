@@ -4,10 +4,12 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from personification.agent.tool_registry import ToolRegistry
 from personification.core import db
 from personification.core import qzone_agent_interaction as qzone_agent
-from personification.core.qzone_social_operations import QzoneSocialOperationCoordinator
+from personification.core.qzone_social_operations import QzoneSocialOperationCoordinator, coordinate_qzone_social_write
 
 
 def _coordinator(tmp_path, *, now: float = 2_000_000_000.0):  # noqa: ANN001
@@ -132,6 +134,99 @@ def test_snapshot_is_redacted_and_contains_no_target_or_content(tmp_path) -> Non
     assert "user-a" not in rendered
     assert "feed-a" not in rendered
     assert "私密评论正文" not in rendered
+
+
+def test_cancelled_qzone_write_is_durable_unknown(tmp_path) -> None:  # noqa: ANN001
+    coordinator = _coordinator(tmp_path)
+
+    class CancelledService:
+        async def like_feed(self, **_kwargs):  # noqa: ANN003, ANN202
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(coordinate_qzone_social_write(
+            coordinator=coordinator, service=CancelledService(),
+            bot_id="bot", group_id="group-a", target_uin="user-a",
+            feed={"feed_id": "feed-a"}, action="like",
+        ))
+    status = coordinator.snapshot(bot_id="bot", group_id="group-a")["operations"][0]["status"]
+    assert status == "unknown"
+
+
+def test_qzone_dispatch_claim_failure_releases_reserved_quota(tmp_path) -> None:  # noqa: ANN001
+    class ClaimFails(QzoneSocialOperationCoordinator):
+        def mark_dispatching(self, operation_id, *, now=None):  # noqa: ANN001, ANN201
+            return False
+
+    db_path = db.init_db_sync(tmp_path)
+    coordinator = ClaimFails(db_path=db_path)
+    outcome = asyncio.run(coordinate_qzone_social_write(
+        coordinator=coordinator, service=object(),
+        bot_id="bot", group_id="group-a", target_uin="user-a",
+        feed={"feed_id": "feed-a"}, action="like",
+    ))
+    assert outcome.status == "definite_failure"
+    assert coordinator.operation_status(outcome.operation_id) == "definite_failure"
+
+
+def test_qzone_dispatch_claim_exception_never_calls_service(tmp_path) -> None:  # noqa: ANN001
+    class ClaimRaises(QzoneSocialOperationCoordinator):
+        def mark_dispatching(self, operation_id, *, now=None):  # noqa: ANN001, ANN201
+            raise OSError("claim unavailable")
+
+    class Service:
+        calls = 0
+
+        async def like_feed(self, **_kwargs):  # noqa: ANN003, ANN202
+            self.calls += 1
+            return True, "ok"
+
+    service = Service()
+    coordinator = ClaimRaises(db_path=db.init_db_sync(tmp_path))
+    outcome = asyncio.run(coordinate_qzone_social_write(
+        coordinator=coordinator, service=service,
+        bot_id="bot", group_id="group-a", target_uin="user-a",
+        feed={"feed_id": "feed-a"}, action="like",
+    ))
+    assert outcome.status == "definite_failure"
+    assert service.calls == 0
+    assert coordinator.operation_status(outcome.operation_id) == "definite_failure"
+
+
+def test_qzone_confirmed_service_result_survives_finalize_failure(tmp_path) -> None:  # noqa: ANN001
+    class FinalizeFails(QzoneSocialOperationCoordinator):
+        def finalize(self, operation_id, *, status, result_code, now=None):  # noqa: ANN001, ANN201
+            return False
+
+    class Service:
+        async def like_feed(self, **_kwargs):  # noqa: ANN003, ANN202
+            return True, "ok"
+
+    coordinator = FinalizeFails(db_path=db.init_db_sync(tmp_path))
+    outcome = asyncio.run(coordinate_qzone_social_write(
+        coordinator=coordinator, service=Service(),
+        bot_id="bot", group_id="group-a", target_uin="user-a",
+        feed={"feed_id": "feed-a"}, action="like",
+    ))
+    assert outcome.status == "succeeded"
+    assert outcome.diagnostic_code == "qzone_social_dispatch_persistence_failed"
+    assert coordinator.operation_status(outcome.operation_id) == "dispatching"
+
+
+@pytest.mark.parametrize("malformed", ["ok", {"success": True}, None])
+def test_qzone_malformed_service_ack_remains_unknown(tmp_path, malformed) -> None:  # noqa: ANN001
+    class Service:
+        async def like_feed(self, **_kwargs):  # noqa: ANN003, ANN202
+            return malformed, "ok"
+
+    coordinator = _coordinator(tmp_path)
+    outcome = asyncio.run(coordinate_qzone_social_write(
+        coordinator=coordinator, service=Service(),
+        bot_id="bot", group_id="group-a", target_uin="user-a",
+        feed={"feed_id": "feed-a"}, action="like",
+    ))
+    assert outcome.status == "unknown"
+    assert coordinator.operation_status(outcome.operation_id) == "unknown"
 
 
 class _Adapter:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 import sqlite3
 import time
 import uuid
@@ -16,6 +18,7 @@ from .db import connect_sync, get_db_path
 
 COUNTED_STATUSES = ("reserved", "dispatching", "succeeded", "unknown")
 FINAL_STATUSES = frozenset({"succeeded", "definite_failure", "unknown"})
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -197,6 +200,28 @@ class QzoneSocialOperationCoordinator:
             conn.commit()
         return cursor.rowcount == 1
 
+    def abort_reserved(self, operation_id: str, *, now: float | None = None) -> bool:
+        """Release a reservation when no remote write was started."""
+        timestamp = float(self.clock() if now is None else now)
+        with connect_sync(self.db_path) as conn:
+            cursor = conn.execute(
+                """UPDATE qzone_social_operations
+                   SET status='definite_failure',result_code='dispatch_not_started',
+                       completed_at=?,updated_at=?
+                   WHERE operation_id=? AND status='reserved'""",
+                (timestamp, timestamp, str(operation_id or "")),
+            )
+            conn.commit()
+        return cursor.rowcount == 1
+
+    def operation_status(self, operation_id: str) -> str:
+        with connect_sync(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT status FROM qzone_social_operations WHERE operation_id=?",
+                (str(operation_id or ""),),
+            ).fetchone()
+        return str(row["status"] or "") if row is not None else ""
+
     def finalize(
         self,
         operation_id: str,
@@ -294,10 +319,30 @@ async def coordinate_qzone_social_write(
             reservation.diagnostic_code,
             reservation.operation_id,
         )
-    if not coordinator.mark_dispatching(reservation.operation_id):
+    claim_error: Exception | None = None
+    try:
+        claimed = coordinator.mark_dispatching(reservation.operation_id)
+    except Exception as exc:
+        claimed = False
+        claim_error = exc
+    if not claimed:
+        try:
+            aborted = coordinator.abort_reserved(reservation.operation_id)
+            current_status = "definite_failure" if aborted else coordinator.operation_status(reservation.operation_id)
+        except Exception as cleanup_exc:
+            aborted = False
+            current_status = "unknown"
+            _logger.warning("qzone_social dispatch claim cleanup failed: %s", type(cleanup_exc).__name__)
+        if claim_error is not None:
+            _logger.warning("qzone_social dispatch claim failed: %s", type(claim_error).__name__)
+        status = current_status if current_status in FINAL_STATUSES else "unknown"
         if social_decision is not None:
-            settle_social_decision(social_decision, status="unknown", scope=decision_scope)
-        return QzoneSocialDispatch("unknown", "qzone_social_dispatch_unknown", reservation.operation_id)
+            settle_social_decision(
+                social_decision,
+                status="sent" if status == "succeeded" else "failed" if status == "definite_failure" else "unknown",
+                scope=decision_scope,
+            )
+        return QzoneSocialDispatch(status, "qzone_social_dispatch_not_started" if aborted else "qzone_social_dispatch_unknown", reservation.operation_id)
     try:
         if action == "like":
             ok, message = await service.like_feed(feed=feed, bot_id=bot_id)
@@ -307,34 +352,59 @@ async def coordinate_qzone_social_write(
                 bot_id=bot_id,
                 content=comment_text,
             )
+    except asyncio.CancelledError:
+        try:
+            coordinator.finalize(reservation.operation_id, status="unknown", result_code="dispatch_cancelled")
+        except Exception as cleanup_exc:
+            _logger.warning("qzone_social cancellation finalize failed: %s", type(cleanup_exc).__name__)
+        if social_decision is not None:
+            try:
+                settle_social_decision(social_decision, status="unknown", scope=decision_scope)
+            except Exception as cleanup_exc:
+                _logger.warning("qzone_social cancellation settlement failed: %s", type(cleanup_exc).__name__)
+        raise
     except Exception as exc:
-        coordinator.finalize(
-            reservation.operation_id,
-            status="unknown",
-            result_code=f"dispatch_{type(exc).__name__}",
-        )
+        try:
+            coordinator.finalize(
+                reservation.operation_id, status="unknown",
+                result_code=f"dispatch_{type(exc).__name__}",
+            )
+        except Exception as finalize_exc:
+            _logger.warning("qzone_social failure finalize failed: %s", type(finalize_exc).__name__)
         if social_decision is not None:
             settle_social_decision(social_decision, status="unknown", scope=decision_scope)
         return QzoneSocialDispatch("unknown", "qzone_social_dispatch_unknown", reservation.operation_id)
     # A truthy string/dict from an adapter is not a protocol acknowledgement.
     # Only a real boolean True may make the durable operation replay-safe.
-    status = "succeeded" if type(ok) is bool and ok else (
-        "unknown" if "outcome_unknown" in str(message or "").lower() else "definite_failure"
-    )
-    coordinator.finalize(
-        reservation.operation_id,
-        status=status,
-        result_code="ok" if status == "succeeded" else status,
-    )
+    if type(ok) is bool and ok:
+        status = "succeeded"
+    elif type(ok) is bool and not ok and "outcome_unknown" not in str(message or "").lower():
+        status = "definite_failure"
+    else:
+        status = "unknown"
+    try:
+        finalized = coordinator.finalize(
+            reservation.operation_id,
+            status=status,
+            result_code="ok" if status == "succeeded" else status,
+        )
+    except Exception as finalize_exc:
+        finalized = False
+        _logger.warning("qzone_social dispatch finalize failed: %s", type(finalize_exc).__name__)
+    if not finalized:
+        _logger.warning("qzone_social dispatch finalize did not commit operation=%s", reservation.operation_id)
     if social_decision is not None:
         settle_social_decision(social_decision, status="sent" if status == "succeeded" else "unknown" if status == "unknown" else "failed", scope=decision_scope)
+    diagnostic_code = (
+        "qzone_social_dispatch_persistence_failed"
+        if not finalized else
+        "qzone_social_dispatch_succeeded" if status == "succeeded" else
+        "qzone_social_dispatch_unknown" if status == "unknown" else
+        "qzone_social_dispatch_failed"
+    )
     return QzoneSocialDispatch(
         status,
-        "qzone_social_dispatch_succeeded"
-        if status == "succeeded"
-        else "qzone_social_dispatch_unknown"
-        if status == "unknown"
-        else "qzone_social_dispatch_failed",
+        diagnostic_code,
         reservation.operation_id,
     )
 

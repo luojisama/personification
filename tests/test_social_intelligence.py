@@ -106,6 +106,31 @@ def test_social_outbound_requires_strict_ledger_confirmation(status: str, expect
     assert captured["context"].surface == "social_greeting"
 
 
+def test_social_outbound_no_ledger_preserves_send_failure_when_settlement_fails(monkeypatch) -> None:  # noqa: ANN001
+    class Bot:
+        self_id = "bot-social"
+
+        async def send_private_msg(self, **_kwargs):  # noqa: ANN003, ANN202
+            raise TimeoutError("original send timeout")
+
+    ctx = framework.SocialContext(
+        plugin_config=SimpleNamespace(), logger=MagicMock(), get_bots=lambda: {},
+        get_whitelisted_groups=lambda: [], tool_caller=None, persona_store=None,
+        data_dir=None, get_now=lambda: None,
+    )
+    monkeypatch.setattr(framework, "claim_social_decision", lambda *_a, **_k: True)
+
+    def broken_settle(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+        raise OSError("settlement unavailable")
+
+    monkeypatch.setattr(framework, "settle_social_decision", broken_settle)
+    with pytest.raises(TimeoutError, match="original send timeout"):
+        asyncio.run(framework.dispatch_social_outbound(
+            ctx, bot=Bot(), conversation_kind="private", conversation_id="10001",
+            surface="social_greeting", content="hello", social_decision=object(),
+        ))
+
+
 def test_social_text_agent_injects_complete_runtime_persona_once(monkeypatch) -> None:  # noqa: ANN001
     agent_bridge = load_personification_module("plugin.personification.core.agent_bridge")
     captured: dict[str, Any] = {}

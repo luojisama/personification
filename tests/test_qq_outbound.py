@@ -99,7 +99,12 @@ def test_begin_allocates_operation_parts_atomically(tmp_path) -> None:  # noqa: 
         ({"message_id": 12}, "12"),
         ({"msg_id": "13"}, "13"),
         ({"messageId": "adapter-id"}, "adapter-id"),
-        ({"status": "ok", "data": {"message_id": 14}}, "14"),
+        ({"status": "ok", "retcode": 0, "data": {"message_id": 14}}, "14"),
+        ({"status": "ok", "data": {"message_id": 14}}, None),
+        ({"status": "failed", "retcode": 0, "data": {"message_id": 14}}, None),
+        ({"status": "ok", "retcode": 1404, "data": {"message_id": 14}}, None),
+        ({"status": "ok", "retcode": None, "data": {"message_id": 14}}, None),
+        ({"status": "ok", "retcode": False, "data": {"message_id": 14}}, None),
         ({"data": [{"id": 99}, {"data": {"msg_id": 15}}]}, "15"),
         ([{"data": [{"messageId": 16}]}], "16"),
         ({"id": 17}, None),
@@ -239,7 +244,7 @@ def test_dispatch_persists_unknown_before_send_and_marks_strict_receipt_sent(tmp
             observed["row"] = conn.execute(
                 "SELECT status,message_id FROM qq_outbound_ledger WHERE operation_id='dispatch-success'"
             ).fetchone()
-        return {"status": "ok", "data": [{"msg_id": "message-42"}]}
+        return {"status": "ok", "retcode": 0, "data": [{"msg_id": "message-42"}]}
 
     receipt = asyncio.run(
         ledger.dispatch(_context("dispatch-success"), "visible content", send, now=100.0)
@@ -316,6 +321,36 @@ def test_invalid_normal_send_result_remains_unknown(tmp_path) -> None:  # noqa: 
     assert receipt.status == "unknown"
     assert receipt.message_id is None
     assert receipt.error_code == "message_id_missing"
+
+
+def test_explicit_failed_envelope_with_id_stays_unknown(tmp_path) -> None:  # noqa: ANN001
+    ledger, _db_path = _ledger(tmp_path)
+    receipt = asyncio.run(ledger.dispatch(
+        _context("failed-with-id"), "content",
+        lambda: {"status": "failed", "retcode": 0, "data": {"message_id": "ghost"}},
+    ))
+    assert receipt.status == "unknown"
+    assert receipt.message_id is None
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_dispatch_update_failure_preserves_primary_send_control(tmp_path, monkeypatch, cancel: bool) -> None:  # noqa: ANN001
+    ledger, _db_path = _ledger(tmp_path)
+
+    def broken_update(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise OSError("ledger write failed")
+
+    monkeypatch.setattr(ledger, "_update_dispatch", broken_update)
+
+    async def send():  # noqa: ANN202
+        if cancel:
+            raise asyncio.CancelledError("original cancellation")
+        raise TimeoutError("original send timeout")
+
+    expected = asyncio.CancelledError if cancel else TimeoutError
+    with pytest.raises(expected, match="original") as captured:
+        asyncio.run(ledger.dispatch(_context(f"update-failed-{cancel}"), "content", send))
+    assert getattr(captured.value, "qq_outbound_receipt").status == "unknown"
 
 
 def test_recall_candidates_are_scope_filtered_deduplicated_and_cas_marked(tmp_path) -> None:  # noqa: ANN001

@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
 from ..agent.inner_state import DEFAULT_STATE, load_inner_state
 from ..core.context_policy import strip_response_control_markers
 from ..core.agent_bridge import run_text_agent
+from ..core.call_compat import select_call_shape
 from ..core.visible_output import guard_visible_text
 from ..core.response_review import review_response_text
 from ..core.emotion_state import (
@@ -851,10 +852,9 @@ async def _send_group_idle_qq_expression(
             content=rendered.message,
             send=_send,
         )
-        logger.info(f"[group_idle] 群 {group_id} 发送 QQ 表情模式 {mode}: {rendered.history_text[:40]}")
         return rendered.history_text or content
     except Exception as e:
-        if qq_outbound_ledger is not None and send_invoked:
+        if send_invoked:
             raise
         logger.warning(f"[group_idle] qq expression send failed for group {group_id}: {e}")
         return ""
@@ -872,8 +872,8 @@ async def _try_send_idle_sticker(
     logger: Any,
     qq_outbound_ledger: Any = None,
     outbound_context: Any = None,
-) -> bool:
-    """发送前失败返回 False；ledger 已调用 send 后的异常必须向上传播。"""
+) -> str:
+    """Return the sent sticker name, or empty before dispatch; preserve send failures."""
     send_invoked = False
     try:
         from ..core.sticker_library import (
@@ -884,16 +884,15 @@ async def _try_send_idle_sticker(
         from ..core.sticker_feedback import (
             get_sticker_decay_multiplier,
             load_sticker_feedback,
-            record_sticker_sent,
         )
     except Exception as e:
         logger.debug(f"[group_idle] sticker imports failed: {e}")
-        return False
+        return ""
     try:
         sticker_dir = resolve_sticker_dir(getattr(plugin_config, "personification_sticker_path", None))
         files = list_local_sticker_files(sticker_dir, include_gif=True)
         if not files:
-            return False
+            return ""
         metadata = load_sticker_metadata(sticker_dir)
         # 拉一次 feedback state 算衰减倍数
         try:
@@ -923,12 +922,12 @@ async def _try_send_idle_sticker(
                 decay = 1.0
             scored.append((score * weight * decay, file_path.name))
         if not scored:
-            return False
+            return ""
         scored.sort(key=lambda x: x[0], reverse=True)
         best_name = scored[0][1]
         best_path = sticker_dir / best_name
         if not best_path.exists():
-            return False
+            return ""
         image_ref = await prepare_local_expression(
             path=best_path,
             config=plugin_config,
@@ -938,7 +937,7 @@ async def _try_send_idle_sticker(
             group_id=group_id,
         )
         if not image_ref:
-            return False
+            return ""
         # Send the checked immutable bytes, never the mutable library path.
         cq = f"[CQ:image,file=base64://{image_ref.split(',', 1)[1]}]"
 
@@ -953,17 +952,12 @@ async def _try_send_idle_sticker(
             content=cq,
             send=_send,
         )
-        try:
-            await record_sticker_sent(best_name)
-        except Exception:
-            pass
-        logger.info(f"[group_idle] 群 {group_id} 选发表情包 {best_name}（mood_hint='{mood_hint[:20]}'）")
-        return True
+        return best_name
     except Exception as e:
-        if qq_outbound_ledger is not None and send_invoked:
+        if send_invoked:
             raise
         logger.warning(f"[group_idle] sticker send failed for group {group_id}: {e}")
-        return False
+        return ""
 
 
 def resolve_group_idle_probability(base_probability: Any, signed_bias: Any = 0.0) -> float:
@@ -1018,10 +1012,14 @@ async def run_proactive_messaging(
             ),
         )
     )
-    try:
-        rest_ok = bool(is_rest_time(allow_unsuitable_prob=allow_unsuitable_prob))
-    except TypeError:
-        rest_ok = bool(is_rest_time())
+    rest_args, rest_kwargs = select_call_shape(
+        is_rest_time,
+        (
+            ((), {"allow_unsuitable_prob": allow_unsuitable_prob}),
+            ((), {}),
+        ),
+    )
+    rest_ok = bool(is_rest_time(*rest_args, **rest_kwargs))
     if not rest_ok:
         return False
 
@@ -1278,21 +1276,24 @@ async def run_proactive_messaging(
         save_proactive_state(proactive_state)
         return False
     except Exception:
-        settle_social_decision(social_decision, status="unknown", scope=decision_scope)
+        try:
+            settle_social_decision(social_decision, status="unknown", scope=decision_scope)
+        except Exception as settlement_exc:
+            logger.warning("[proactive] unknown settlement failed: %s", type(settlement_exc).__name__)
         raise
-    settle_social_decision(social_decision, status="sent", scope=decision_scope)
-    _diag.record(
-        scope="private",
-        outcome=_diag.OUTCOME_SENT,
-        target=target_user_id,
-        detail={"len": len(payload)},
-    )
-
-    user_state = _normalize_user_state(now, proactive_state.get(target_user_id, {}))
-    user_state["count"] = int(user_state.get("count", 0) or 0) + 1
-    user_state["last_proactive_at"] = now_ts
-    _append_proactive_history(user_state, message=payload, sent_at=now_ts)
-    proactive_state[target_user_id] = user_state
+    try:
+        user_state = _normalize_user_state(now, proactive_state.get(target_user_id, {}))
+        user_state["count"] = int(user_state.get("count", 0) or 0) + 1
+        user_state["last_proactive_at"] = now_ts
+        _append_proactive_history(user_state, message=payload, sent_at=now_ts)
+        proactive_state[target_user_id] = user_state
+        save_proactive_state(proactive_state)
+    except Exception as projection_exc:
+        logger.warning("[proactive] confirmed private projection failed: %s", type(projection_exc).__name__)
+    try:
+        settle_social_decision(social_decision, status="sent", scope=decision_scope)
+    except Exception as settlement_exc:
+        logger.warning("[proactive] confirmed private settlement failed: %s", type(settlement_exc).__name__)
     try:
         append_session_message(
             build_private_session_id(target_user_id),
@@ -1302,8 +1303,14 @@ async def run_proactive_messaging(
             speaker="你",
         )
     except Exception as e:
-        logger.warning(f"[proactive] append proactive private history failed: {e}")
-    save_proactive_state(proactive_state)
+        logger.warning("[proactive] confirmed private history failed: %s", type(e).__name__)
+    try:
+        _diag.record(
+            scope="private", outcome=_diag.OUTCOME_SENT, target=target_user_id,
+            detail={"len": len(payload)},
+        )
+    except Exception as diagnostic_exc:
+        logger.warning("[proactive] confirmed private diagnostic failed: %s", type(diagnostic_exc).__name__)
     return True
 
 
@@ -1627,9 +1634,12 @@ async def run_group_idle_topic(
                 logger.debug(f"[group_idle] duplicate or unknown motivation group={group_id}")
                 continue
 
+            # A composite send may confirm its text before the sticker fails.
+            sent_record_text = topic
+            confirmed_send = False
+            combo_sticker_pending = chosen_mode == "combo"
+            sent_sticker_name = ""
             try:
-                # 根据 chosen_mode 决定发送方式
-                sent_record_text = topic
                 outbound_context = None
                 if qq_outbound_ledger is not None:
                     outbound_context = build_outbound_context(
@@ -1658,11 +1668,11 @@ async def run_group_idle_topic(
                             content=topic,
                             send=lambda: bot.send_group_msg(group_id=int(group_id), message=topic),
                         )
-                    elif chosen_mode == "combo":
-                        # combo 已在 _try_send_idle_sticker 内发了表情，这里不再补
-                        pass
+                        confirmed_send = True
                     else:
                         sent_record_text = "[发送了一张表情包]"
+                        confirmed_send = True
+                        sent_sticker_name = sticker_sent
                 elif chosen_mode == "combo":
                     await _dispatch_proactive_outbound(
                         qq_outbound_ledger=qq_outbound_ledger,
@@ -1670,19 +1680,7 @@ async def run_group_idle_topic(
                         content=topic,
                         send=lambda: bot.send_group_msg(group_id=int(group_id), message=topic),
                     )
-                    # 异步追加 sticker（不阻塞回 sent_count 计数）
-                    await _try_send_idle_sticker(
-                        bot=bot,
-                        group_id=group_id,
-                        runtime_bundle=getattr(plugin_config, "_runtime_bundle_ref", None),
-                        plugin_config=plugin_config,
-                        mood_hint=sticker_mood_hint or topic,
-                        topic_text_fallback="",
-                        core_persona=system_prompt,
-                        logger=logger,
-                        qq_outbound_ledger=qq_outbound_ledger,
-                        outbound_context=outbound_context,
-                    )
+                    confirmed_send = True
                 elif chosen_mode in {"qq_face", "qq_face_combo", "qq_super", "text_qq_face"}:
                     qq_sent = await _send_group_idle_qq_expression(
                         bot=bot,
@@ -1699,6 +1697,7 @@ async def run_group_idle_topic(
                     )
                     if qq_sent:
                         sent_record_text = qq_sent
+                        confirmed_send = True
                     else:
                         await _dispatch_proactive_outbound(
                             qq_outbound_ledger=qq_outbound_ledger,
@@ -1706,6 +1705,7 @@ async def run_group_idle_topic(
                             content=topic,
                             send=lambda: bot.send_group_msg(group_id=int(group_id), message=topic),
                         )
+                        confirmed_send = True
                 else:
                     await _dispatch_proactive_outbound(
                         qq_outbound_ledger=qq_outbound_ledger,
@@ -1713,42 +1713,74 @@ async def run_group_idle_topic(
                         content=topic,
                         send=lambda: bot.send_group_msg(group_id=int(group_id), message=topic),
                     )
-                sent_now = get_now()
-                sent_now_ts = sent_now.timestamp()
-                sent_today = sent_now.strftime("%Y-%m-%d")
+                    confirmed_send = True
+            except Exception as e:
+                logger.warning("[group_idle] send failed group=%s error_type=%s", group_id, type(e).__name__)
+                if not confirmed_send:
+                    try:
+                        settle_social_decision(idle_decision, status="unknown", scope=decision_scope)
+                    except Exception as settlement_exc:
+                        logger.warning("[group_idle] unknown settlement failed: %s", type(settlement_exc).__name__)
+            if not confirmed_send:
+                break
+
+            sent_count += 1
+            # Project a confirmed side effect once. A broken projection must
+            # not change the delivery result or cause another outbound send.
+            try:
                 proactive_state[f"group_idle_active_{group_id}"] = {
-                    "until": sent_now_ts + 12 * 60,
+                    "until": now_ts + 12 * 60,
                     "topic": topic,
                 }
-                _increment_group_idle_count(group_id, proactive_state, sent_today, sent_now_ts)
-                _last_group_idle_sent_at = sent_now_ts
-                real_bot_nickname = bot_nickname
-                try:
-                    member_info = await bot.get_group_member_info(
-                        group_id=int(group_id),
-                        user_id=int(bot.self_id),
-                    )
-                    real_bot_nickname = str(
-                        member_info.get("card")
-                        or member_info.get("nickname")
-                        or bot_nickname
-                    ).strip() or bot_nickname
-                except Exception:
-                    pass
-                record_group_msg(group_id, real_bot_nickname, sent_record_text, is_bot=True)
-                sent_count += 1
-                logger.info(
-                    f"[group_idle] 已向群 {group_name}({group_id}) 发送话题：{topic[:30]}"
-                )
+                _increment_group_idle_count(group_id, proactive_state, today, now_ts)
+                _last_group_idle_sent_at = now_ts
+                save_proactive_state(proactive_state)
+            except Exception as projection_exc:
+                logger.warning("[group_idle] confirmed projection failed: %s", type(projection_exc).__name__)
+            try:
                 settle_social_decision(idle_decision, status="sent", scope=decision_scope)
-                break
-            except Exception as e:
-                settle_social_decision(idle_decision, status="unknown", scope=decision_scope)
-                logger.warning(f"[group_idle] send_group_msg failed for group {group_id}: {e}")
-                if qq_outbound_ledger is not None:
-                    break
+            except Exception as settlement_exc:
+                logger.warning("[group_idle] confirmed settlement failed: %s", type(settlement_exc).__name__)
+            if combo_sticker_pending:
+                # The text is already confirmed and projected. Cancellation or
+                # unknown delivery of the optional sticker cannot erase it.
+                try:
+                    sticker_result = await _try_send_idle_sticker(
+                        bot=bot, group_id=group_id,
+                        runtime_bundle=getattr(plugin_config, "_runtime_bundle_ref", None),
+                        plugin_config=plugin_config,
+                        mood_hint=sticker_mood_hint or topic,
+                        topic_text_fallback="", core_persona=system_prompt,
+                        logger=logger, qq_outbound_ledger=qq_outbound_ledger,
+                        outbound_context=outbound_context,
+                    )
+                    sent_sticker_name = sticker_result
+                except Exception as sticker_exc:
+                    logger.warning("[group_idle] optional sticker outcome unknown: %s", type(sticker_exc).__name__)
+            if sent_sticker_name:
+                try:
+                    from ..core.sticker_feedback import record_sticker_sent
+                    await record_sticker_sent(sent_sticker_name)
+                except Exception as feedback_exc:
+                    logger.warning("[group_idle] confirmed sticker feedback failed: %s", type(feedback_exc).__name__)
+            try:
+                member_info = await bot.get_group_member_info(
+                    group_id=int(group_id), user_id=int(bot.self_id),
+                )
+                real_bot_nickname = str(
+                    member_info.get("card") or member_info.get("nickname") or bot_nickname
+                ).strip() or bot_nickname
+            except Exception:
+                real_bot_nickname = bot_nickname
+            try:
+                record_group_msg(group_id, real_bot_nickname, sent_record_text, is_bot=True)
+            except Exception as history_exc:
+                logger.warning("[group_idle] confirmed history record failed: %s", type(history_exc).__name__)
+            logger.info("[group_idle] confirmed group=%s mode=%s", group_id, chosen_mode)
+            break
 
-    save_proactive_state(proactive_state)
+    if sent_count == 0:
+        save_proactive_state(proactive_state)
     if sent_count > 0:
         await _asyncio.sleep(random.uniform(0, 4 * 60))
     return sent_count

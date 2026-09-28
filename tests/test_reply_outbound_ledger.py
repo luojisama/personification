@@ -27,7 +27,7 @@ class _Bot:
 
     async def send(self, event: object, payload: object) -> dict[str, object]:
         self.sends.append((event, payload))
-        return {"status": "ok", "data": {"message_id": f"message-{len(self.sends)}"}}
+        return {"status": "ok", "retcode": 0, "data": {"message_id": f"message-{len(self.sends)}"}}
 
 
 def _event() -> SimpleNamespace:
@@ -51,7 +51,7 @@ def test_legacy_dispatch_without_receipt_is_unknown(result):
     assert calls == ["reviewed text"]
 
 
-@pytest.mark.parametrize("result", [False, {"status": "failed"}, {"message_id": "confirmed"}, {"status": "ok", "data": {"message_id": "confirmed"}}])
+@pytest.mark.parametrize("result", [False, {"status": "failed"}, {"message_id": "confirmed"}, {"status": "ok", "retcode": 0, "data": {"message_id": "confirmed"}}])
 def test_legacy_dispatch_preserves_known_results(result):
     async def send(event, payload):
         return result
@@ -147,7 +147,7 @@ def test_reply_dispatch_without_ledger_preserves_raw_bot_send_result() -> None:
         )
     )
 
-    assert result == {"status": "ok", "data": {"message_id": "message-1"}}
+    assert result == {"status": "ok", "retcode": 0, "data": {"message_id": "message-1"}}
     assert bot.sends == [(event, "legacy")]
 
 

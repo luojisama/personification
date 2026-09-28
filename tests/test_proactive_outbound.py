@@ -174,7 +174,7 @@ def test_private_proactive_send_records_ledger_receipt(
 
         async def send_private_msg(self, **kwargs):  # noqa: ANN003, ANN202
             sent.append(kwargs)
-            return {"status": "ok", "data": {"message_id": "private-message-1"}}
+            return {"status": "ok", "retcode": 0, "data": {"message_id": "private-message-1"}}
 
     async def _call_ai(_messages, **_kwargs):  # noqa: ANN001, ANN202
         if "persona_verdict" in str(_messages):
@@ -346,6 +346,7 @@ def _run_group_idle(
     agent_tool_caller=None,  # noqa: ANN001
     agent_tool_registry=None,  # noqa: ANN001
     review_result='{"action":"accept","persona_verdict":"consistent"}',
+    record_group_msg=None,  # noqa: ANN001
 ) -> int:
     now = datetime(2026, 7, 18, 10, 0, 0)
     response_iter = iter(responses)
@@ -381,7 +382,7 @@ def _run_group_idle(
             load_prompt=lambda _group_id: "persona",
             call_ai_api=_call_ai,
             get_now=lambda: now,
-            record_group_msg=lambda *args, **kwargs: records.append((*args, kwargs)),
+            record_group_msg=record_group_msg or (lambda *args, **kwargs: records.append((*args, kwargs))),
             logger=_logger(),
             agent_tool_caller=agent_tool_caller,
             agent_tool_registry=agent_tool_registry,
@@ -505,6 +506,98 @@ def test_group_idle_send_exception_stays_unknown_without_fallback(
     assert "group_idle_20001" not in state
     assert "group_idle_20002" not in state
     assert records == []
+
+
+def test_group_idle_confirmed_send_keeps_success_when_history_record_fails(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    _patch_common(monkeypatch)
+    proactive_flow._last_group_idle_sent_at = 0.0
+    ledger = _ledger(tmp_path)
+    state: dict = {}
+    sends: list[str] = []
+
+    class Bot:
+        self_id = "90001"
+
+        async def get_group_info(self, **_kwargs):  # noqa: ANN202
+            return {"group_name": "test group"}
+
+        async def get_group_member_info(self, **_kwargs):  # noqa: ANN202
+            return {"card": "bot"}
+
+        async def send_group_msg(self, **kwargs):  # noqa: ANN003, ANN202
+            sends.append(kwargs["message"])
+            return {"status": "ok", "retcode": 0, "data": {"message_id": "confirmed-1"}}
+
+    def broken_record(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise OSError("history unavailable")
+
+    result = _run_group_idle(
+        config=_group_config(tmp_path), ledger=ledger, bot=Bot(),
+        responses=["topic"], groups=["20001"], proactive_state=state,
+        records=[], record_group_msg=broken_record,
+    )
+    assert result == 1
+    assert len(sends) == 1
+    assert state["group_idle_20001"]["count"] == 1
+
+
+def test_group_idle_no_ledger_send_exception_stops_all_fallback(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    _patch_common(monkeypatch)
+    _patch_sticker(monkeypatch, tmp_path)
+    proactive_flow._last_group_idle_sent_at = 0.0
+    sends: list[str] = []
+
+    class Bot:
+        self_id = "90001"
+
+        async def get_group_info(self, **_kwargs):  # noqa: ANN202
+            return {"group_name": "test group"}
+
+        async def send_group_msg(self, **kwargs):  # noqa: ANN003, ANN202
+            sends.append(kwargs["message"])
+            raise TimeoutError("ambiguous send")
+
+    result = _run_group_idle(
+        config=_group_config(tmp_path), ledger=None, bot=Bot(),
+        responses=["topic", '{"mode":"sticker","mood":"sleepy"}'],
+        groups=["20001", "20002"], proactive_state={}, records=[],
+    )
+    assert result == 0
+    assert len(sends) == 1
+
+
+def test_group_idle_combo_sticker_cancellation_keeps_confirmed_text(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    _patch_common(monkeypatch)
+    proactive_flow._last_group_idle_sent_at = 0.0
+    ledger = _ledger(tmp_path)
+    state: dict = {}
+    sends: list[str] = []
+
+    class Bot:
+        self_id = "90001"
+
+        async def get_group_info(self, **_kwargs):  # noqa: ANN202
+            return {"group_name": "test group"}
+
+        async def send_group_msg(self, **kwargs):  # noqa: ANN003, ANN202
+            sends.append(kwargs["message"])
+            return {"message_id": "text-1"}
+
+    async def cancelled_sticker(**_kwargs):  # noqa: ANN003, ANN202
+        raise asyncio.CancelledError("sticker cancelled")
+
+    monkeypatch.setattr(proactive_flow, "_try_send_idle_sticker", cancelled_sticker)
+    with pytest.raises(asyncio.CancelledError, match="sticker cancelled"):
+        _run_group_idle(
+            config=_group_config(tmp_path), ledger=ledger, bot=Bot(),
+            responses=["topic", '{"mode":"combo","mood":"happy"}'],
+            groups=["20001"], proactive_state=state, records=[],
+        )
+    assert sends == ["topic"]
+    assert state["group_idle_20001"]["count"] == 1
+    with sqlite3.connect(ledger.db_path) as conn:
+        rows = conn.execute("SELECT status,message_id FROM qq_outbound_ledger").fetchall()
+    assert rows == [("sent", "text-1")]
 
 
 def test_group_idle_agent_keeps_visible_topic_quality_and_structures_mode(

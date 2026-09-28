@@ -23,7 +23,7 @@ from ..model_router import (
     MODEL_ROLE_INTENT,
     get_model_override_for_role,
 )
-from ..qq_outbound import build_outbound_context
+from ..qq_outbound import build_outbound_context, parse_onebot_message_id
 from ..session_store import init_session_store
 from ..tasks_service import make_cancel_task_tool, make_create_task_tool
 from ..visible_output import guard_visible_text
@@ -240,26 +240,30 @@ def build_agent_tool_registry(
         _bot_caller: Callable[[dict], Any] | None = None
         if get_bots is not None:
 
-            async def _bot_caller(task: dict) -> None:
+            async def _bot_caller(task: dict) -> str:
                 if not isinstance(task, dict):
-                    return
+                    return "failed"
                 params = task.get("params") or {}
                 if not isinstance(params, dict):
                     params = {}
                 user_id = task.get("user_id") or params.get("user_id")
                 message = params.get("message") or task.get("message", "")
                 if not user_id or not message:
-                    return
+                    return "failed"
                 message = guard_scheduled_user_task_message(task, message, logger=logger)
                 if not message:
-                    return
+                    return "safety_blocked"
                 for bot in get_bots().values():
+                    send_started = False
                     try:
                         if qq_outbound_ledger is None:
-                            await bot.send_private_msg(
+                            send_started = True
+                            result = await bot.send_private_msg(
                                 user_id=int(user_id),
                                 message=str(message),
                             )
+                            if parse_onebot_message_id(result) is None:
+                                return "unknown"
                         else:
                             context = build_outbound_context(
                                 bot=bot,
@@ -267,6 +271,7 @@ def build_agent_tool_registry(
                                 surface="scheduled_user_task",
                                 user_target=str(user_id),
                             )
+                            send_started = True
                             receipt = await qq_outbound_ledger.dispatch(
                                 context,
                                 str(message),
@@ -276,14 +281,14 @@ def build_agent_tool_registry(
                                 ),
                             )
                             if receipt.status != "sent":
-                                logger.warning(
-                                    f"[user_tasks] 任务消息发送结果未知 user={user_id}，禁止自动重发"
-                                )
-                        return
-                    except Exception:
-                        if qq_outbound_ledger is not None:
-                            raise
+                                return "unknown"
+                        return "sent"
+                    except Exception as exc:
+                        if send_started:
+                            logger.warning("[user_tasks] send outcome unknown: %s", type(exc).__name__)
+                            return "unknown"
                         continue
+                return "failed"
 
         registry.register(
             AgentTool(
