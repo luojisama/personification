@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, List
 
+from nonebot.exception import FinishedException
+
 from ...agent.inner_state import get_personification_data_dir
 from ...agent.runtime.planner import (
     turn_plan_from_semantic_frame,
@@ -55,6 +57,7 @@ from ...core.group_context import (
     render_topic_state_trace_detail,
 )
 from ...core.group_followup_referent import get_group_followup_referent_resolver
+from ...core import reply_turn_trace
 from ...core.metrics import record_counter, record_timing
 from ...core.meme_reply_policy import format_meme_turn_prompt, prepare_meme_turn_context
 from ...core.message_relations import extract_event_message_id, extract_reply_message_id, extract_send_message_id
@@ -756,31 +759,21 @@ async def process_yaml_response_logic(
         hint: str = "",
         elapsed_ms: int | None = None,
     ) -> None:
-        try:
-            from ...core import reply_turn_trace
-
-            reply_turn_trace.record_stage(
-                key=key,
-                label=label,
-                status=status,
-                detail=detail,
-                hint=hint,
-                elapsed_ms=elapsed_ms,
-            )
-        except Exception:
-            pass
+        reply_turn_trace.record_stage(
+            key=key,
+            label=label,
+            status=status,
+            detail=detail,
+            hint=hint,
+            elapsed_ms=elapsed_ms,
+        )
 
     def _trace_finish(outcome: str, diagnosis_code: str, detail: Dict[str, Any] | None = None) -> None:
-        try:
-            from ...core import reply_turn_trace
-
-            reply_turn_trace.finish_trace(
-                outcome=outcome,
-                diagnosis_code=diagnosis_code,
-                detail=detail or {},
-            )
-        except Exception:
-            pass
+        reply_turn_trace.finish_trace(
+            outcome=outcome,
+            diagnosis_code=diagnosis_code,
+            detail=detail or {},
+        )
 
     def _trace_no_reply(reason: str, *, diagnosis_code: str = "no_reply", detail: str = "") -> None:
         _trace_stage(
@@ -953,6 +946,8 @@ async def process_yaml_response_logic(
     if extract_forward_content is not None:
         try:
             forward_content = await extract_forward_content(bot, event, logger=logger)
+        except FinishedException:
+            raise
         except Exception as e:
             logger.warning(f"拟人插件：提取转发消息内容失败: {e}")
 
@@ -1247,15 +1242,13 @@ async def process_yaml_response_logic(
         planner_shadow_enabled = bool(getattr(plugin_config, "personification_turn_planner_shadow_enabled", False))
         planner_available_tools: list[dict[str, Any]] = []
         if planner_enabled or planner_shadow_enabled:
-            try:
+            if tool_registry is not None:
                 planner_available_tools = registry_planner_metadata(tool_registry)
-                planner_available_tools = add_current_user_avatar_planner_metadata(
-                    planner_available_tools,
-                    profile_service,
-                    user_id,
-                )
-            except Exception:
-                planner_available_tools = []
+            planner_available_tools = add_current_user_avatar_planner_metadata(
+                planner_available_tools,
+                profile_service,
+                user_id,
+            )
         plan_source_text = raw_message_text or history_last_text or trigger_reason
         if planner_enabled:
             turn_plan, plan_elapsed_ms, plan_fallback_reason, plan_timeout_s, plan_source = await plan_turn_with_timeout(
@@ -2384,6 +2377,8 @@ async def process_yaml_response_logic(
                             detail={"direct_output": True, "kind": "translation_forward"},
                         )
                         return
+                    except FinishedException:
+                        raise
                     except Exception as e:
                         if qq_outbound_ledger is not None:
                             delivery_partial = bool(
@@ -2661,6 +2656,8 @@ async def process_yaml_response_logic(
         try:
             await _send_reply(message_segment_cls.poke(int(user_id)))
             pending_yaml_poke = False
+        except FinishedException:
+            raise
         except Exception as exc:
             logger.warning(f"拟人插件: 发送戳一戳失败: {exc}")
         return True
@@ -2727,6 +2724,8 @@ async def process_yaml_response_logic(
                 parsed = _project_parsed_messages_to_canonical_text(
                     parsed, sanitized_regenerated
                 )
+        except FinishedException:
+            raise
         except Exception as e:
             logger.debug(f"[yaml_response_handler] banter regenerate skipped: {e}")
 
@@ -3041,20 +3040,17 @@ async def process_yaml_response_logic(
                 if isinstance(item, dict):
                     item["text"] = assistant_text if index == text_slot else ""
     parsed["messages"] = messages
-    try:
-        _trace_stage(
-            key="reply_length_policy",
-            label="回复字数策略",
-            status="info",
-            detail=render_reply_length_trace(
-                length_policy,
-                before_chars=before_length_chars,
-                after_chars=len(assistant_text),
-            ),
-            hint="normal 与 YAML 共用结构化日常/证据回复上限",
-        )
-    except Exception:
-        pass
+    _trace_stage(
+        key="reply_length_policy",
+        label="回复字数策略",
+        status="info",
+        detail=render_reply_length_trace(
+            length_policy,
+            before_chars=before_length_chars,
+            after_chars=len(assistant_text),
+        ),
+        hint="normal 与 YAML 共用结构化日常/证据回复上限",
+    )
 
     expression_mode = str(getattr(turn_plan, "expression_mode", "auto") or "auto").strip().lower()
     if expression_mode not in {"auto", "text", "emoji", "qq_face", "sticker"}:
@@ -3106,10 +3102,7 @@ async def process_yaml_response_logic(
             str(item or "")
             for item in list(getattr(review_decision, "segments", ()) or ())
         )
-        try:
-            raw_command_candidates.extend(split_text_into_segments(assistant_text))
-        except Exception:
-            pass
+        raw_command_candidates.extend(split_text_into_segments(assistant_text))
         if any(
             match_raw_peer_bot_command_entry(
                 item,
@@ -3297,6 +3290,8 @@ async def process_yaml_response_logic(
                             operation_id=outbound_reply_trace_id,
                             user_target=user_id,
                         )
+                    except FinishedException:
+                        raise
                     except Exception as exc:
                         if bool(reply_commit_state.get("reply_delivery_confirmed", False)):
                             return SimpleNamespace(status="sent", message_id=None, tts_sent=True)
@@ -3363,6 +3358,8 @@ async def process_yaml_response_logic(
                         and not delivery_unknown
                     ):
                         confirmed_text_segments.append(assistant_text)
+        except FinishedException:
+            raise
         except Exception as e:
             likely_delivered = is_likely_delivered_send_timeout(e)
             if bool(reply_commit_state.get("reply_delivery_confirmed", False)) or likely_delivered:
@@ -3510,15 +3507,12 @@ async def process_yaml_response_logic(
                                     return SimpleNamespace(status="failed", message_id=None)
                                 outgoing = rendered_candidate.message
                                 if not sent_message_id and current_continuity_index == 0:
-                                    try:
-                                        outgoing = _humanize.prepend_addressing_segments(
-                                            message_segment_cls=message_segment_cls,
-                                            outgoing=outgoing,
-                                            quote_message_id=quote_message_id,
-                                            at_target=at_target,
-                                        )
-                                    except Exception:
-                                        outgoing = rendered_candidate.message
+                                    outgoing = _humanize.prepend_addressing_segments(
+                                        message_segment_cls=message_segment_cls,
+                                        outgoing=outgoing,
+                                        quote_message_id=quote_message_id,
+                                        at_target=at_target,
+                                    )
                                 return await _send_reply(outgoing)
 
                             if self_continuity_enabled:
@@ -3700,6 +3694,8 @@ async def process_yaml_response_logic(
                             delivery_partial = bool(
                                 reply_commit_state.get("reply_delivery_confirmed", False)
                             )
+                    except FinishedException:
+                        raise
                     except Exception as e:
                         logger.error(f"发送表情包失败: {e}")
                 if interrupted_after_confirmed_segment or delivery_partial or delivery_unknown:
@@ -3749,15 +3745,12 @@ async def process_yaml_response_logic(
                     if not rendered_reply.message:
                         return SimpleNamespace(status="failed", message_id=None)
                     outgoing = rendered_reply.message
-                    try:
-                        outgoing = _humanize.prepend_addressing_segments(
-                            message_segment_cls=message_segment_cls,
-                            outgoing=outgoing,
-                            quote_message_id=quote_message_id,
-                            at_target=at_target,
-                        )
-                    except Exception:
-                        outgoing = rendered_reply.message
+                    outgoing = _humanize.prepend_addressing_segments(
+                        message_segment_cls=message_segment_cls,
+                        outgoing=outgoing,
+                        quote_message_id=quote_message_id,
+                        at_target=at_target,
+                    )
                     return await _send_reply(outgoing)
 
                 rendered_reply = await render_qq_expression_message(
@@ -3960,6 +3953,8 @@ async def process_yaml_response_logic(
     for sticker_name in delivered_sticker_names:
         try:
             await record_sticker_sent(sticker_name)
+        except FinishedException:
+            raise
         except Exception as e:
             logger.debug(f"[sticker] YAML sent feedback update failed: {e}")
     if confirmed_history_text:
@@ -3973,6 +3968,8 @@ async def process_yaml_response_logic(
                 is_private=is_private_session,
                 plugin_config=plugin_config,
             )
+        except FinishedException:
+            raise
         except Exception as e:
             logger.debug(f"[emotion] YAML update after reply failed: {e}")
     schedule_inner_state_update_after_reply(
@@ -4141,12 +4138,9 @@ def build_yaml_response_processor(
         current_image_urls: List[str] | None = None,
         **runtime_overrides: Any,
     ) -> None:
-        try:
-            from .. import yaml_response_handler as _yaml_response_handler
-        except Exception:
-            process_fn = process_yaml_response_logic
-        else:
-            process_fn = getattr(_yaml_response_handler, "process_yaml_response_logic", process_yaml_response_logic)
+        from .. import yaml_response_handler as _yaml_response_handler
+
+        process_fn = _yaml_response_handler.process_yaml_response_logic
 
         return await process_fn(
             bot,

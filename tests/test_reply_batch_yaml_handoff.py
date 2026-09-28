@@ -505,6 +505,7 @@ def test_buffer_failure_trace_uses_existing_trace_id_only(monkeypatch) -> None:
     core = sys.modules.get("plugin.personification.core")
     if core is not None: monkeypatch.setattr(core, "reply_turn_trace", trace, raising=False)
     buffer = load_personification_module("plugin.personification.handlers.reply_buffer")
+    monkeypatch.setattr(buffer, "reply_turn_trace", trace)
     buffer._record_buffer_failure_trace({"reply_trace_id": "trace-fixed"}, "processing_failure", count=2, generation=3, wait_ms=4)
     buffer._record_buffer_failure_trace({}, "processing_failure", count=2, generation=3, wait_ms=4)
     assert len(stages) == 1 and stages[0]["trace_id"] == "trace-fixed"

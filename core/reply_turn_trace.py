@@ -1,16 +1,44 @@
+"""Reply observation persistence and safe administrative projections.
+
+Write APIs ignore and diagnose SQLite/filesystem failures. Internal data errors
+and cancellation propagate; trace data never determines outbound delivery.
+"""
+
 from __future__ import annotations
 
 import contextvars
 import json
+import logging
 import math
 import re
+import sqlite3
 import time
 import uuid
 from typing import Any
 
 from .db import connect_sync
 from .plugin_runtime_logs import sanitize_text
+from .runtime_events import publish_runtime_event
 from .sensitive_data import sanitize_object
+
+
+_LOGGER = logging.getLogger(__name__)
+_TRACE_FAILURE_LOG_TIMES: dict[str, float] = {}
+_TRACE_FAILURE_LOG_INTERVAL_SECONDS = 60.0
+
+
+def _log_trace_storage_failure(operation: str, error: Exception) -> None:
+    """Diagnose storage outages without copying message data or DB error text."""
+
+    now = time.monotonic()
+    previous = _TRACE_FAILURE_LOG_TIMES.get(operation)
+    if previous is None or now - previous >= _TRACE_FAILURE_LOG_INTERVAL_SECONDS:
+        _TRACE_FAILURE_LOG_TIMES[operation] = now
+        _LOGGER.warning(
+            "reply_trace_storage_failed operation=%s error_type=%s",
+            operation,
+            type(error).__name__,
+        )
 
 
 _CURRENT_TRACE_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -186,7 +214,7 @@ def _safe_json(value: Any, *, limit: int = 128000) -> str:
             separators=(",", ":"),
             allow_nan=False,
         )
-    except Exception:
+    except (TypeError, ValueError):
         payload = json.dumps({"value": sanitize_text(value)}, ensure_ascii=False, separators=(",", ":"))
     if len(payload) <= cap:
         return payload
@@ -225,7 +253,7 @@ def _load_stages(conn: Any, trace_id: str) -> list[dict[str, Any]]:
         return []
     try:
         loaded = json.loads(row["stages"] or "[]")
-    except Exception:
+    except (json.JSONDecodeError, TypeError):
         loaded = []
     return loaded if isinstance(loaded, list) else []
 
@@ -239,7 +267,7 @@ def _load_detail(conn: Any, trace_id: str) -> dict[str, Any]:
         return {}
     try:
         loaded = json.loads(row["detail"] or "{}")
-    except Exception:
+    except (json.JSONDecodeError, TypeError):
         loaded = {}
     return loaded if isinstance(loaded, dict) else {}
 
@@ -262,6 +290,8 @@ def start_trace(
     user_id: str = "",
     detail: dict[str, Any] | None = None,
 ) -> str:
+    """Persist observation data under the module's best-effort I/O contract."""
+
     trace = str(trace_id or "").strip() or new_trace_id()
     now = time.time()
     effective_session_type = _trace_identity(session_type, limit=24)
@@ -311,22 +341,17 @@ def start_trace(
                 ),
             )
             conn.commit()
-    except Exception:
-        pass
-    try:
-        from .runtime_events import publish_runtime_event
-
-        publish_runtime_event(
-            "turn.started",
-            trace_id=trace,
-            payload={
-                "session_type": effective_session_type,
-                "group_id": effective_group_id,
-                "user_id": effective_user_id,
-            },
-        )
-    except Exception:
-        pass
+    except (sqlite3.Error, OSError) as exc:
+        _log_trace_storage_failure("start_trace", exc)
+    publish_runtime_event(
+        "turn.started",
+        trace_id=trace,
+        payload={
+            "session_type": effective_session_type,
+            "group_id": effective_group_id,
+            "user_id": effective_user_id,
+        },
+    )
     return trace
 
 
@@ -340,6 +365,8 @@ def record_stage(
     hint: str = "",
     elapsed_ms: int | None = None,
 ) -> None:
+    """Persist observation data under the module's best-effort I/O contract."""
+
     trace = str(trace_id or current_trace_id() or "").strip()
     if not trace:
         return
@@ -398,23 +425,18 @@ def record_stage(
                 (time.time(), _safe_json(stages), trace),
             )
             conn.commit()
-    except Exception:
-        pass
-    try:
-        from .runtime_events import publish_runtime_event
-
-        publish_runtime_event(
-            "turn.stage",
-            trace_id=trace,
-            payload={
-                "key": stage["key"],
-                "label": stage["label"],
-                "status": stage["status"],
-                "elapsed_ms": stage.get("elapsed_ms"),
-            },
-        )
-    except Exception:
-        pass
+    except (sqlite3.Error, OSError) as exc:
+        _log_trace_storage_failure("record_stage", exc)
+    publish_runtime_event(
+        "turn.stage",
+        trace_id=trace,
+        payload={
+            "key": stage["key"],
+            "label": stage["label"],
+            "status": stage["status"],
+            "elapsed_ms": stage.get("elapsed_ms"),
+        },
+    )
 
 
 def finish_trace(
@@ -424,6 +446,8 @@ def finish_trace(
     diagnosis_code: str = "",
     detail: dict[str, Any] | None = None,
 ) -> None:
+    """Persist observation data under the module's best-effort I/O contract."""
+
     trace = str(trace_id or current_trace_id() or "").strip()
     if not trace:
         return
@@ -447,21 +471,16 @@ def finish_trace(
                 ),
             )
             conn.commit()
-    except Exception:
-        pass
-    try:
-        from .runtime_events import publish_runtime_event
-
-        publish_runtime_event(
-            "turn.finished",
-            trace_id=trace,
-            payload={
-                "outcome": str(outcome or "")[:32],
-                "diagnosis_code": str(diagnosis_code or "")[:64],
-            },
-        )
-    except Exception:
-        pass
+    except (sqlite3.Error, OSError) as exc:
+        _log_trace_storage_failure("finish_trace", exc)
+    publish_runtime_event(
+        "turn.finished",
+        trace_id=trace,
+        payload={
+            "outcome": str(outcome or "")[:32],
+            "diagnosis_code": str(diagnosis_code or "")[:64],
+        },
+    )
 
 
 def get_trace(trace_id: str) -> dict[str, Any] | None:
@@ -605,10 +624,8 @@ def _elapsed_from_detail(detail: Any) -> int | None:
     match = _ELAPSED_RE.search(str(detail or ""))
     if not match:
         return None
-    try:
-        return max(0, int(match.group(1)))
-    except Exception:
-        return None
+    # The pattern captures one to nine decimal digits, so conversion is total.
+    return int(match.group(1))
 
 
 def _finite_stage_timestamp(value: Any) -> float:
@@ -958,11 +975,11 @@ def prune_old_entries(*, retention_days: int = 7, max_entries: int = 2000) -> in
 def _row_to_dict(row: Any) -> dict[str, Any]:
     try:
         stages = json.loads(row["stages"] or "[]")
-    except Exception:
+    except (json.JSONDecodeError, TypeError):
         stages = []
     try:
         detail = json.loads(row["detail"] or "{}")
-    except Exception:
+    except (json.JSONDecodeError, TypeError):
         detail = {}
     return {
         "trace_id": str(row["trace_id"] or ""),

@@ -32,8 +32,17 @@ def test_cancelled_reply_processor_does_not_finish_as_no_reply(monkeypatch) -> N
     monkeypatch.setattr(reply_turn_trace, "finish_trace", lambda **kwargs: finished.append(kwargs))
 
     state: dict[str, object] = {}
-    deps = SimpleNamespace(runtime=SimpleNamespace(plugin_config=SimpleNamespace(personification_turn_trace_enabled=True)))
-    event = SimpleNamespace(user_id=1, message_id=2)
+    deps = processor.ReplyProcessorDeps(
+        session=SimpleNamespace(),
+        persona=SimpleNamespace(favorability_service=None),
+        types=SimpleNamespace(),
+        runtime=SimpleNamespace(
+            user_policy_gate=None,
+            logger=SimpleNamespace(debug=lambda *_args: None),
+            plugin_config=SimpleNamespace(personification_turn_trace_enabled=True),
+        ),
+    )
+    event = SimpleNamespace(user_id=1, message_id=2, get_plaintext=lambda: "")
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(processor.process_response_logic(SimpleNamespace(), event, state, deps))
@@ -86,16 +95,26 @@ def test_reply_processor_classifies_and_redacts_outer_failures(
     monkeypatch.setattr(reply_turn_trace, "record_stage", lambda **kwargs: stages.append(kwargs))
     monkeypatch.setattr(reply_turn_trace, "get_trace", lambda _trace_id: {"outcome": "failed"})
     monkeypatch.setattr(reply_turn_trace, "finish_trace", lambda **kwargs: finished.append(kwargs))
-    deps = SimpleNamespace(runtime=SimpleNamespace(plugin_config=SimpleNamespace(personification_turn_trace_enabled=True)))
+    deps = processor.ReplyProcessorDeps(
+        session=SimpleNamespace(),
+        persona=SimpleNamespace(favorability_service=None),
+        types=SimpleNamespace(),
+        runtime=SimpleNamespace(
+            user_policy_gate=None,
+            logger=SimpleNamespace(debug=lambda *_args: None),
+            plugin_config=SimpleNamespace(personification_turn_trace_enabled=True),
+        ),
+    )
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as caught:
         asyncio.run(processor.process_response_logic(
             SimpleNamespace(),
-            SimpleNamespace(user_id=1, message_id=2),
+            SimpleNamespace(user_id=1, message_id=2, get_plaintext=lambda: ""),
             {},
             deps,
         ))
 
+    assert caught.value is error
     stage = next(item for item in stages if item["key"] == expected_key)
     assert finished[-1]["diagnosis_code"] == expected_diagnosis
     assert "top-secret" not in str(stage)

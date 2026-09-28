@@ -1,14 +1,17 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
+import sqlite3
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Dict
 
-from ..core import metrics
+from ..core import metrics, reply_turn_trace
+from ..core.generation_fence import invalidate_generation, safe_to_supersede
 from ..core.context_cleanup import release_message_buffer_entry_resources
 from ..core.message_relations import extract_mentioned_ids, extract_reply_message_id, extract_reply_sender_id
 from ..core.command_runtime_context import has_runtime_command_prefix
@@ -31,6 +34,10 @@ from ..core.turn_media import (
 )
 from ..core.supplement_controller import SupplementController, SupplementSettings
 from .reply_commit import reply_lifecycle_snapshot
+
+
+_LOGGER = logging.getLogger(__name__)
+_RECOVERY_FAILURE_LAST_LOG: float | None = None
 
 
 _GROUP_BATCH_DELAY_SECONDS = 1.2
@@ -70,24 +77,14 @@ def _supplement_settings_from_state(state: dict[str, Any]) -> SupplementSettings
         return SupplementSettings().normalized()
 
 
-def _supplement_safe_to_supersede(state: dict[str, Any]) -> bool:
-    """Keep the conservative pre-send boundary even if fencing is unavailable."""
-    try:
-        from ..core.generation_fence import safe_to_supersede
-        return bool(safe_to_supersede(state))
-    except Exception:
-        return not any(bool(state.get(key, False)) for key in (
-            "reply_delivery_started", "reply_delivery_confirmed", "reply_delivery_complete",
-            "delivery_unknown", "_external_action_started",
-        ))
-
-
 def _consume_detached_generation(task: asyncio.Task[Any]) -> None:
     """Consume a late, fenced provider task; it must never become an unhandled error."""
     try:
         task.result()
-    except (asyncio.CancelledError, Exception):
+    except asyncio.CancelledError:
         pass
+    except Exception as exc:
+        _LOGGER.warning("reply_buffer_detached_generation_failed error_type=%s", type(exc).__name__)
     finally:
         _detached_generation_tasks.discard(task)
 
@@ -264,44 +261,54 @@ def _record_recovery_failure(
                 "media": recovered_media,
             }
         ]
-    queue = ReplyRecoveryQueue()
     recorded = 0
-    for item in entries:
-        message_id = str(item.get("message_id") or "").strip()
-        group_id = str(item.get("group_id") or fallback_group_id).strip()
-        user_id = str(item.get("user_id") or fallback_user_id).strip()
-        conversation_kind = "group" if group_id else "private"
-        conversation_id = group_id or user_id
-        text = str(item.get("text") or "").strip()
-        media = item.get("media") if isinstance(item.get("media"), list) else []
-        if not conversation_id or (not text and not media):
-            continue
-        if not message_id:
-            # Stable synthetic id preserves a no-message-id inbound failure
-            # without embedding its body or session identifier in the queue.
-            event_time = str(item.get("event_time", item.get("timestamp", getattr(event, "time", "missing"))) or "missing")
-            try:
-                media_digest = hashlib.sha256(
-                    json.dumps(media, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-                ).hexdigest()[:16]
-            except Exception:
-                media_digest = "invalid-media"
-            fingerprint = "\x1f".join((bot_id, conversation_kind, conversation_id, user_id, event_time, _normalize_repeat_key(text), media_digest))
-            message_id = "synthetic:" + hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24]
-        queue.record_failure(
-            bot_id=bot_id,
-            conversation_kind=conversation_kind,
-            conversation_id=conversation_id,
-            original_message_id=message_id,
-            normalized_text=text,
-            media_refs=media,
-            failure_stage=failure_stage,
-            failure_class=failure_class,
-            route_fingerprint=str(state.get("provider_route_fingerprint", "") or ""),
-            trace_id=str(state.get("reply_trace_id", "") or ""),
-            missing_part_indexes=state.get("delivery_missing_part_indexes") or (),
-        )
-        recorded += 1
+    try:
+        queue = ReplyRecoveryQueue()
+        for item in entries:
+            message_id = str(item.get("message_id") or "").strip()
+            group_id = str(item.get("group_id") or fallback_group_id).strip()
+            user_id = str(item.get("user_id") or fallback_user_id).strip()
+            conversation_kind = "group" if group_id else "private"
+            conversation_id = group_id or user_id
+            text = str(item.get("text") or "").strip()
+            media = item.get("media") if isinstance(item.get("media"), list) else []
+            if not conversation_id or (not text and not media):
+                continue
+            if not message_id:
+                # Stable synthetic id preserves a no-message-id inbound failure
+                # without embedding its body or session identifier in the queue.
+                event_time = str(item.get("event_time", item.get("timestamp", getattr(event, "time", "missing"))) or "missing")
+                try:
+                    media_digest = hashlib.sha256(
+                        json.dumps(media, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+                    ).hexdigest()[:16]
+                except (TypeError, ValueError):
+                    media_digest = "invalid-media"
+                fingerprint = "\x1f".join((bot_id, conversation_kind, conversation_id, user_id, event_time, _normalize_repeat_key(text), media_digest))
+                message_id = "synthetic:" + hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24]
+            queue.record_failure(
+                bot_id=bot_id,
+                conversation_kind=conversation_kind,
+                conversation_id=conversation_id,
+                original_message_id=message_id,
+                normalized_text=text,
+                media_refs=media,
+                failure_stage=failure_stage,
+                failure_class=failure_class,
+                route_fingerprint=str(state.get("provider_route_fingerprint", "") or ""),
+                trace_id=str(state.get("reply_trace_id", "") or ""),
+                missing_part_indexes=state.get("delivery_missing_part_indexes") or (),
+            )
+            recorded += 1
+    except (sqlite3.Error, OSError) as exc:
+        # A failed recovery write must not interrupt owner cleanup. The
+        # returned count includes only persisted inputs; unknown delivery
+        # remains quarantined and never becomes an automatic replay.
+        global _RECOVERY_FAILURE_LAST_LOG
+        now = time.monotonic()
+        if _RECOVERY_FAILURE_LAST_LOG is None or now - _RECOVERY_FAILURE_LAST_LOG >= 60.0:
+            _RECOVERY_FAILURE_LAST_LOG = now
+            _LOGGER.warning("reply_recovery_storage_failed error_type=%s", type(exc).__name__)
     return recorded
 
 
@@ -344,57 +351,49 @@ async def _handle_reply_timeout(
             if delivery_started
             else "generation_failed_before_send"
         )
-        try:
-            await asyncio.to_thread(
-                _record_recovery_failure,
-                bot=bot,
-                event=event,
-                state=state,
-                failure_stage=diagnosis_code,
-                failure_class=failure_class,
-            )
-        except Exception:
-            pass
-    try:
-        from ..core import reply_turn_trace
-
-        trace_id = str(state.get("reply_trace_id", "") or "")
-        reply_turn_trace.record_stage(
-            trace_id=trace_id,
-            key="reply_timeout",
-            label="回复超时",
-            status="warn" if delivery_confirmed else "error",
-            detail=(
-                f"timeout_seconds={timeout_seconds:g} reply_required={str(bool(state.get('reply_required', False))).lower()} "
-                f"delivery_started={str(delivery_started).lower()} "
-                f"delivery_confirmed={str(delivery_confirmed).lower()} "
-                f"delivery_complete={str(delivery_complete).lower()} "
-                f"delivery_state={delivery_state} "
-                f"last_phase={lifecycle['last_phase']} "
-                f"phase_age_ms={lifecycle['phase_age_ms']} "
-                f"elapsed_ms={lifecycle['elapsed_ms']}"
-            ),
-            hint="基础设施故障保持静默；检查 Provider、工具耗时、状态锁与发送回执",
+        await asyncio.to_thread(
+            _record_recovery_failure,
+            bot=bot,
+            event=event,
+            state=state,
+            failure_stage=diagnosis_code,
+            failure_class=failure_class,
         )
-        reply_turn_trace.finish_trace(
-            trace_id=trace_id,
-            outcome=outcome,
-            diagnosis_code=diagnosis_code,
-            detail={
-                "timeout_seconds": timeout_seconds,
-                "reply_required": bool(state.get("reply_required", False)),
-                "delivery_started": delivery_started,
-                "delivery_confirmed": delivery_confirmed,
-                "delivery_complete": delivery_complete,
-                "delivery_state": delivery_state,
-                "last_phase": lifecycle["last_phase"],
-                "phase_age_ms": lifecycle["phase_age_ms"],
-                "elapsed_ms": lifecycle["elapsed_ms"],
-                "silent": True,
-            },
-        )
-    except Exception:
-        pass
+    trace_id = str(state.get("reply_trace_id", "") or "")
+    reply_turn_trace.record_stage(
+        trace_id=trace_id,
+        key="reply_timeout",
+        label="回复超时",
+        status="warn" if delivery_confirmed else "error",
+        detail=(
+            f"timeout_seconds={timeout_seconds:g} reply_required={str(bool(state.get('reply_required', False))).lower()} "
+            f"delivery_started={str(delivery_started).lower()} "
+            f"delivery_confirmed={str(delivery_confirmed).lower()} "
+            f"delivery_complete={str(delivery_complete).lower()} "
+            f"delivery_state={delivery_state} "
+            f"last_phase={lifecycle['last_phase']} "
+            f"phase_age_ms={lifecycle['phase_age_ms']} "
+            f"elapsed_ms={lifecycle['elapsed_ms']}"
+        ),
+        hint="基础设施故障保持静默；检查 Provider、工具耗时、状态锁与发送回执",
+    )
+    reply_turn_trace.finish_trace(
+        trace_id=trace_id,
+        outcome=outcome,
+        diagnosis_code=diagnosis_code,
+        detail={
+            "timeout_seconds": timeout_seconds,
+            "reply_required": bool(state.get("reply_required", False)),
+            "delivery_started": delivery_started,
+            "delivery_confirmed": delivery_confirmed,
+            "delivery_complete": delivery_complete,
+            "delivery_state": delivery_state,
+            "last_phase": lifecycle["last_phase"],
+            "phase_age_ms": lifecycle["phase_age_ms"],
+            "elapsed_ms": lifecycle["elapsed_ms"],
+            "silent": True,
+        },
+    )
 
 
 def _record_reply_admission_timeout(
@@ -410,67 +409,58 @@ def _record_reply_admission_timeout(
         # Admission has not started delivery, so this is a safe inbound-only
         # recovery record.  It is diagnostic only; the queue never replays an
         # unknown/partial outbound send automatically.
-        try:
-            _record_recovery_failure(
-                bot=bot,
-                event=event,
-                state=state,
-                failure_stage="reply_admission_timeout",
-                failure_class="generation_failed_before_send",
-            )
-        except Exception:
-            pass
+        _record_recovery_failure(
+            bot=bot,
+            event=event,
+            state=state,
+            failure_stage="reply_admission_timeout",
+            failure_class="generation_failed_before_send",
+        )
+    group_id = str(getattr(event, "group_id", "") or "")
+    user_id = str(getattr(event, "user_id", "") or "")
     try:
-        from ..core import reply_turn_trace
-
-        group_id = str(getattr(event, "group_id", "") or "")
-        user_id = str(getattr(event, "user_id", "") or "")
-        try:
-            incoming_text = str(event.get_plaintext() or "")[:2000]
-        except Exception:
-            incoming_text = str(
-                state.get("raw_message_text")
-                or getattr(event, "raw_message", "")
-                or ""
-            )[:2000]
-
-        trace_id = reply_turn_trace.start_trace(
-            trace_id=str(state.get("reply_trace_id", "") or ""),
-            session_type="group" if group_id else "private",
-            group_id=group_id,
-            user_id=user_id,
-            detail={
-                "source": "reply_admission",
-                "mode": mode,
-                "message_id": str(getattr(event, "message_id", "") or ""),
-                "incoming_text": incoming_text,
-            },
-        )
-        state["reply_trace_id"] = trace_id
-        reply_turn_trace.record_stage(
-            trace_id=trace_id,
-            key="reply_admission_timeout",
-            label="回复排队超时",
-            status="warn",
-            detail=(
-                f"mode={mode} wait_ms={max(0, int(wait_ms))} "
-                f"reply_required={str(bool(state.get('reply_required', False))).lower()}"
-            ),
-            hint="检查回复并发、事件循环延迟和上游请求耗时",
-        )
-        reply_turn_trace.finish_trace(
-            trace_id=trace_id,
-            outcome="failed" if state.get("reply_required") else "no_reply",
-            diagnosis_code="reply_admission_timeout",
-            detail={
-                "mode": mode,
-                "wait_ms": max(0, int(wait_ms)),
-                "reply_required": bool(state.get("reply_required", False)),
-                "silent": True,
-            },
-        )
+        incoming_text = str(event.get_plaintext() or "")[:2000]
     except Exception:
-        pass
+        incoming_text = str(
+            state.get("raw_message_text")
+            or getattr(event, "raw_message", "")
+            or ""
+        )[:2000]
+    trace_id = reply_turn_trace.start_trace(
+        trace_id=str(state.get("reply_trace_id", "") or ""),
+        session_type="group" if group_id else "private",
+        group_id=group_id,
+        user_id=user_id,
+        detail={
+            "source": "reply_admission",
+            "mode": mode,
+            "message_id": str(getattr(event, "message_id", "") or ""),
+            "incoming_text": incoming_text,
+        },
+    )
+    state["reply_trace_id"] = trace_id
+    reply_turn_trace.record_stage(
+        trace_id=trace_id,
+        key="reply_admission_timeout",
+        label="回复排队超时",
+        status="warn",
+        detail=(
+            f"mode={mode} wait_ms={max(0, int(wait_ms))} "
+            f"reply_required={str(bool(state.get('reply_required', False))).lower()}"
+        ),
+        hint="检查回复并发、事件循环延迟和上游请求耗时",
+    )
+    reply_turn_trace.finish_trace(
+        trace_id=trace_id,
+        outcome="failed" if state.get("reply_required") else "no_reply",
+        diagnosis_code="reply_admission_timeout",
+        detail={
+            "mode": mode,
+            "wait_ms": max(0, int(wait_ms)),
+            "reply_required": bool(state.get("reply_required", False)),
+            "silent": True,
+        },
+    )
 
 
 def _pop_buffer_entry(
@@ -1070,11 +1060,7 @@ def _record_buffer_failure_trace(state: dict[str, Any], code: str, *, count: int
     trace_id = str(state.get("reply_trace_id", "") or "")
     if not trace_id:
         return
-    try:
-        from ..core import reply_turn_trace
-        reply_turn_trace.record_stage(trace_id=trace_id, key="buffer_failure", label="缓冲失败", status="error", detail=f"code={code} count={max(0, count)} generation={max(0, generation)} wait_ms={max(0, wait_ms)}")
-    except Exception:
-        pass
+    reply_turn_trace.record_stage(trace_id=trace_id, key="buffer_failure", label="缓冲失败", status="error", detail=f"code={code} count={max(0, count)} generation={max(0, generation)} wait_ms={max(0, wait_ms)}")
 
 
 def _take_buffer_diagnostics(entry: dict[str, Any], *, generation: int, wait_ms: int = 0, dequeue_count: int = 0, queued_count: int = 0) -> list[dict[str, int | str]]:
@@ -1289,24 +1275,15 @@ def _should_preempt_current_batch(entry: dict[str, Any], *, immediate_flush: boo
     if not immediate_flush or not bool(entry.get("processing")):
         return False
     state = entry.get("active_state") if isinstance(entry.get("active_state"), dict) else {}
-    if any(bool(state.get(key, False)) for key in (
-        "reply_delivery_started", "reply_delivery_confirmed", "reply_delivery_complete",
-        "delivery_unknown", "_external_action_started",
-    )):
-        return False
-    return bool(entry.get("current_is_random_chat"))
+    return bool(entry.get("current_is_random_chat")) and safe_to_supersede(state)
 
 
 def _invalidate_random_preemption(entry: dict[str, Any]) -> None:
     """Mark a legacy random-turn cancellation stale before releasing its task."""
     state = entry.get("active_state") if isinstance(entry.get("active_state"), dict) else {}
-    if not _supplement_safe_to_supersede(state):
+    if not safe_to_supersede(state):
         return
-    try:
-        from ..core.generation_fence import invalidate_generation
-        invalidate_generation(state, reason="random_preempt")
-    except Exception:
-        state["_generation_invalidated"] = True
+    invalidate_generation(state, reason="random_preempt")
 
 
 def _queue_group_supplement(entry: dict[str, Any], candidate: dict[str, Any]) -> bool:
@@ -1317,7 +1294,7 @@ def _queue_group_supplement(entry: dict[str, Any], candidate: dict[str, Any]) ->
         return False
     generation = int(entry.get("current_generation", 0) or 0)
     if (
-        controller.can_replace(entry, generation=generation, safe_to_supersede=_supplement_safe_to_supersede(active_state)).status != "related"
+        controller.can_replace(entry, generation=generation, safe_to_supersede=safe_to_supersede(active_state)).status != "related"
         and not controller.replacement_pending(entry, generation=generation)
     ):
         return False
@@ -1350,7 +1327,7 @@ def _queue_group_supplement(entry: dict[str, Any], candidate: dict[str, Any]) ->
             originals = list(active.get("batched_events") or [])
             decision = await controller.judge_group(
                 entry, generation=generation, originals=originals, candidates=candidates,
-                safe_to_supersede=_supplement_safe_to_supersede(active),
+                safe_to_supersede=safe_to_supersede(active),
                 judge=active.get("supplement_relation_judge") if callable(active.get("supplement_relation_judge")) else None,
             )
             # Aggregate-only observability: do not put chat text or message
@@ -1377,15 +1354,11 @@ def _queue_group_supplement(entry: dict[str, Any], candidate: dict[str, Any]) ->
                 if lock is None or not hasattr(lock, "__aenter__"):
                     return
                 async with lock:
-                    if not _supplement_safe_to_supersede(active):
+                    if not safe_to_supersede(active):
                         return
                     if int(entry.get("active_generation_token", 0) or 0) != generation:
                         return
-                    try:
-                        from ..core.generation_fence import invalidate_generation
-                        if not invalidate_generation(active, reason="supplement"):
-                            return
-                    except Exception:
+                    if not invalidate_generation(active, reason="supplement"):
                         return
                     entry.setdefault("supplement_related_items", []).extend(accepted_items)
             # Non-related and uncertain values are already in pending_items,
@@ -1552,22 +1525,19 @@ async def run_buffer_timer(
         for item, is_allowed in zip(items, allowed):
             if is_allowed:
                 continue
-            try:
-                await asyncio.to_thread(
-                    _record_recovery_failure,
-                    bot=bot,
-                    event=item.get("event"),
-                    state=dict(item.get("state") or {}),
-                    failure_stage="permission_revoked",
-                    # A policy revocation is not evidence that delivery began,
-                    # but this queue has no dedicated policy class.  Reuse the
-                    # existing quarantine/manual-confirm boundary so an
-                    # operator must explicitly confirm it was not sent before
-                    # any recovery can be claimed.
-                    failure_class="delivery_unknown",
-                )
-            except Exception:
-                pass
+            await asyncio.to_thread(
+                _record_recovery_failure,
+                bot=bot,
+                event=item.get("event"),
+                state=dict(item.get("state") or {}),
+                failure_stage="permission_revoked",
+                # A policy revocation is not evidence that delivery began,
+                # but this queue has no dedicated policy class.  Reuse the
+                # existing quarantine/manual-confirm boundary so an
+                # operator must explicitly confirm it was not sent before
+                # any recovery can be claimed.
+                failure_class="delivery_unknown",
+            )
         items = [item for item, is_allowed in zip(items, allowed) if is_allowed]
     # Do not mutate overflow ownership before an awaitable policy check: a
     # new direct arrival may cancel/reorder this generation while the gate is
@@ -1613,135 +1583,151 @@ async def run_buffer_timer(
         _pop_buffer_entry(msg_buffer, key)
         return
 
-    entry["processing"] = True
-    entry["active_items"] = list(items)
-    entry["delivery_state"] = "generating"
-    entry["active_task"] = asyncio.current_task()
-    entry["processing_started_at"] = time.monotonic()
-    entry["timer_task"] = None
-    entry["next_fire_at"] = 0.0
-    entry["current_generation"] = int(entry.get("current_generation", 0) or 0) + 1
-    current_generation = int(entry["current_generation"])
-    if int(entry.get("supplement_replacement_generation", -1) or -1) < current_generation:
-        # Late relation API results belong to the now-stale predecessor and
-        # cannot join a replacement that has begun generating or dispatching.
-        entry["replacement_generation_started"] = True
-    entry["active_generation_token"] = current_generation
-    # A replacement has consumed its frozen original batch.  Later arrivals
-    # are a normal next turn, not another addition to this old burst.
-    entry.pop("supplement_replay_original_items", None)
-    entry["newer_batch_for_current"] = False
-    entry["interrupt_requested_generation"] = 0
-    entry["items"] = []
-    entry["batch_started_at"] = 0.0
-
-    trigger_item, trigger_type = _select_batch_trigger(items)
-    selected_event = trigger_item.get("event")
-    if selected_event is None:
-        entry["processing"] = False
-        _pop_buffer_entry(msg_buffer, key)
-        return
-
-    state = dict(trigger_item.get("state") or {})
-    # A later @ can become the semantic trigger, but not the configuration
-    # owner: a supplement chain always uses its first ingress snapshot.
-    if "supplement_chain_settings" in entry:
-        state["_supplement_settings"] = dict(entry.get("supplement_chain_settings") or {})
-    if entry.get("supplement_chain_route_snapshot") is not None:
-        state["_route_config_snapshot"] = entry["supplement_chain_route_snapshot"]
-    entry["active_state"] = state
-    events = [item.get("event") for item in items if isinstance(item.get("event"), message_event_cls)]
-    state["buffer_trace_diagnostics"] = _take_buffer_diagnostics(entry, generation=current_generation, wait_ms=int((time.monotonic() - started_at) * 1000), dequeue_count=len(events), queued_count=len(overflow_items))
-    if not events:
-        entry["processing"] = False
-        _pop_buffer_entry(msg_buffer, key)
-        return
-
-    combined_message = None
     try:
-        combined_message = _build_combined_message(
-            items,
-            message_cls=message_cls,
-            message_segment_cls=message_segment_cls,
-        )
-    except Exception as exc:
-        logger.warning(f"拟人插件：拼接消息构建失败，回退单条处理: {exc}")
+        entry["processing"] = True
+        entry["active_items"] = list(items)
+        entry["delivery_state"] = "generating"
+        entry["active_task"] = asyncio.current_task()
+        entry["processing_started_at"] = time.monotonic()
+        entry["timer_task"] = None
+        entry["next_fire_at"] = 0.0
+        entry["current_generation"] = int(entry.get("current_generation", 0) or 0) + 1
+        current_generation = int(entry["current_generation"])
+        if int(entry.get("supplement_replacement_generation", -1) or -1) < current_generation:
+            # Late relation API results belong to the now-stale predecessor and
+            # cannot join a replacement that has begun generating or dispatching.
+            entry["replacement_generation_started"] = True
+        entry["active_generation_token"] = current_generation
+        # A replacement has consumed its frozen original batch.  Later arrivals
+        # are a normal next turn, not another addition to this old burst.
+        entry.pop("supplement_replay_original_items", None)
+        entry["newer_batch_for_current"] = False
+        entry["interrupt_requested_generation"] = 0
+        entry["items"] = []
+        entry["batch_started_at"] = 0.0
 
-    serialized_items = [
-        _serialize_batched_event(item, selected_event=selected_event)
-        for item in items
-    ]
-    repeat_clusters = _build_repeat_clusters(items)
-    if combined_message is not None:
-        state["concatenated_message"] = combined_message
-    state["merged_event_context"] = {
-        "event_count": len(events),
-        "selected_event_index": max(0, events.index(selected_event)),
-    }
-    state["batched_events"] = serialized_items
-    state["turn_media_context"] = serialize_turn_media(media_from_batched_events(serialized_items))
-    state["batch_trigger"] = {
-        "type": trigger_type,
-        "message_id": str(getattr(selected_event, "message_id", "") or "").strip(),
-        "user_id": str(getattr(selected_event, "user_id", "") or "").strip(),
-    }
-    state["repeat_clusters"] = repeat_clusters
-    state["batch_event_count"] = len(events)
-    state["batch_session_key"] = key
-    state["batch_runtime_ref"] = {
-        "entry": entry,
-        "generation": current_generation,
-    }
-    # The first generation fixes the 30-second supplement deadline.  A
-    # replacement carries this object forward, so a burst cannot keep a model
-    # request alive indefinitely by resetting its own clock.
-    controller = entry.get("supplement_controller")
-    if not isinstance(controller, SupplementController):
-        controller = SupplementController(_supplement_settings_from_state(state))
-        entry["supplement_controller"] = controller
-    previous = entry.get("supplement") if isinstance(entry.get("supplement"), dict) else {}
-    if not previous or not previous.get("deadline"):
-        controller.begin(entry, generation=current_generation, originals=serialized_items, now=min(
-            (float(item.get("received_at", 0.0) or 0.0) for item in items if float(item.get("received_at", 0.0) or 0.0) > 0),
-            default=time.monotonic(),
-        ))
-    else:
-        # Replacement generation gets a fresh ownership token but retains the
-        # original fixed deadline and accepted-message provenance.
-        previous["generation"] = current_generation
-        entry["supplement"] = previous
-    state["supplement_window"] = {
-        "enabled": controller.settings.enabled,
-        "deadline_monotonic": float((entry.get("supplement") or {}).get("deadline", 0.0) or 0.0),
-        "accepted_message_count": len((entry.get("supplement") or {}).get("accepted_ids") or ()),
-    }
-    interrupted_context = attach_interrupted_reply_context(state, entry)
-    if interrupted_context is not None:
-        _note_buffer_diagnostic(
-            entry,
-            "consume_interrupted_drafts",
-            count=len(interrupted_context.get("segments") or []),
-        )
-    state["turn_generation_id"] = _next_turn_generation(key)
-    entry["current_trigger_type"] = trigger_type
-    entry["current_is_random_chat"] = bool(state.get("is_random_chat", False))
-    timeout_seconds = min(
-        HARD_TURN_TIMEOUT_SECONDS,
-        max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS)),
-    )
-    first_received_at = min(
-        (
-            float(item.get("received_at", 0.0) or 0.0)
+        trigger_item, trigger_type = _select_batch_trigger(items)
+        selected_event = trigger_item.get("event")
+        if selected_event is None:
+            entry["processing"] = False
+            _pop_buffer_entry(msg_buffer, key)
+            return
+
+        state = dict(trigger_item.get("state") or {})
+        # A later @ can become the semantic trigger, but not the configuration
+        # owner: a supplement chain always uses its first ingress snapshot.
+        if "supplement_chain_settings" in entry:
+            state["_supplement_settings"] = dict(entry.get("supplement_chain_settings") or {})
+        if entry.get("supplement_chain_route_snapshot") is not None:
+            state["_route_config_snapshot"] = entry["supplement_chain_route_snapshot"]
+        entry["active_state"] = state
+        events = [item.get("event") for item in items if isinstance(item.get("event"), message_event_cls)]
+        state["buffer_trace_diagnostics"] = _take_buffer_diagnostics(entry, generation=current_generation, wait_ms=int((time.monotonic() - started_at) * 1000), dequeue_count=len(events), queued_count=len(overflow_items))
+        if not events:
+            entry["processing"] = False
+            _pop_buffer_entry(msg_buffer, key)
+            return
+
+        combined_message = None
+        try:
+            combined_message = _build_combined_message(
+                items,
+                message_cls=message_cls,
+                message_segment_cls=message_segment_cls,
+            )
+        except Exception as exc:
+            logger.warning(f"拟人插件：拼接消息构建失败，回退单条处理: {exc}")
+
+        serialized_items = [
+            _serialize_batched_event(item, selected_event=selected_event)
             for item in items
-            if float(item.get("received_at", 0.0) or 0.0) > 0
-        ),
-        default=time.monotonic(),
-    )
-    turn_deadline = attach_turn_deadline(
-        state,
-        timeout_seconds=timeout_seconds,
-        started_at=first_received_at,
-    )
+        ]
+        repeat_clusters = _build_repeat_clusters(items)
+        if combined_message is not None:
+            state["concatenated_message"] = combined_message
+        state["merged_event_context"] = {
+            "event_count": len(events),
+            "selected_event_index": max(0, events.index(selected_event)),
+        }
+        state["batched_events"] = serialized_items
+        state["turn_media_context"] = serialize_turn_media(media_from_batched_events(serialized_items))
+        state["batch_trigger"] = {
+            "type": trigger_type,
+            "message_id": str(getattr(selected_event, "message_id", "") or "").strip(),
+            "user_id": str(getattr(selected_event, "user_id", "") or "").strip(),
+        }
+        state["repeat_clusters"] = repeat_clusters
+        state["batch_event_count"] = len(events)
+        state["batch_session_key"] = key
+        state["batch_runtime_ref"] = {
+            "entry": entry,
+            "generation": current_generation,
+        }
+        # The first generation fixes the 30-second supplement deadline.  A
+        # replacement carries this object forward, so a burst cannot keep a model
+        # request alive indefinitely by resetting its own clock.
+        controller = entry.get("supplement_controller")
+        if not isinstance(controller, SupplementController):
+            controller = SupplementController(_supplement_settings_from_state(state))
+            entry["supplement_controller"] = controller
+        previous = entry.get("supplement") if isinstance(entry.get("supplement"), dict) else {}
+        if not previous or not previous.get("deadline"):
+            controller.begin(entry, generation=current_generation, originals=serialized_items, now=min(
+                (float(item.get("received_at", 0.0) or 0.0) for item in items if float(item.get("received_at", 0.0) or 0.0) > 0),
+                default=time.monotonic(),
+            ))
+        else:
+            # Replacement generation gets a fresh ownership token but retains the
+            # original fixed deadline and accepted-message provenance.
+            previous["generation"] = current_generation
+            entry["supplement"] = previous
+        state["supplement_window"] = {
+            "enabled": controller.settings.enabled,
+            "deadline_monotonic": float((entry.get("supplement") or {}).get("deadline", 0.0) or 0.0),
+            "accepted_message_count": len((entry.get("supplement") or {}).get("accepted_ids") or ()),
+        }
+        interrupted_context = attach_interrupted_reply_context(state, entry)
+        if interrupted_context is not None:
+            _note_buffer_diagnostic(
+                entry,
+                "consume_interrupted_drafts",
+                count=len(interrupted_context.get("segments") or []),
+            )
+        state["turn_generation_id"] = _next_turn_generation(key)
+        entry["current_trigger_type"] = trigger_type
+        entry["current_is_random_chat"] = bool(state.get("is_random_chat", False))
+        timeout_seconds = min(
+            HARD_TURN_TIMEOUT_SECONDS,
+            max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS)),
+        )
+        first_received_at = min(
+            (
+                float(item.get("received_at", 0.0) or 0.0)
+                for item in items
+                if float(item.get("received_at", 0.0) or 0.0) > 0
+            ),
+            default=time.monotonic(),
+        )
+        turn_deadline = attach_turn_deadline(
+            state,
+            timeout_seconds=timeout_seconds,
+            started_at=first_received_at,
+        )
+    except BaseException:
+        # Setup is synchronous and still owned by this timer. Preserve only
+        # follow-up arrivals, release ownership, and propagate the failure.
+        entry["processing"] = False
+        entry["active_task"] = None
+        entry["active_items"] = []
+        entry["processing_started_at"] = 0.0
+        entry["current_trigger_type"] = ""
+        entry["current_is_random_chat"] = False
+        if entry.get("pending_items"):
+            _promote_pending_batch(entry)
+            entry["queued_items"] = list(entry["items"])
+        elif msg_buffer.get(key) is entry:
+            _pop_buffer_entry(msg_buffer, key)
+        raise
 
     try:
         if concurrency_controller is None:
@@ -1810,172 +1796,173 @@ async def run_buffer_timer(
                 f"拟人插件：处理拼接消息失败，保持静默: "
                 f"type={type(exc).__name__} delivery_state={delivery_state}"
             )
-            try:
-                failure_class = (
-                    "delivery_partial"
-                    if state.get("reply_delivery_confirmed")
-                    else "delivery_unknown"
-                    if state.get("reply_delivery_started")
-                    else "generation_failed_before_send"
-                )
-                await asyncio.to_thread(
-                    _record_recovery_failure,
-                    bot=bot,
-                    event=selected_event,
-                    state=state,
-                    failure_stage="reply_processing_failed",
-                    failure_class=failure_class,
-                )
-                _note_buffer_diagnostic(entry, "failure_processing", count=len(items))
-            except Exception:
-                pass
+            failure_class = (
+                "delivery_partial"
+                if state.get("reply_delivery_confirmed")
+                else "delivery_unknown"
+                if state.get("reply_delivery_started")
+                else "generation_failed_before_send"
+            )
+            await asyncio.to_thread(
+                _record_recovery_failure,
+                bot=bot,
+                event=selected_event,
+                state=state,
+                failure_stage="reply_processing_failed",
+                failure_class=failure_class,
+            )
+            _note_buffer_diagnostic(entry, "failure_processing", count=len(items))
             _record_buffer_failure_trace(state, "processing_failure", count=len(items), generation=current_generation, wait_ms=int((time.monotonic() - started_at) * 1000))
     finally:
-        # A superseded task must not erase queue state prepared by a newer
-        # generation.  The owning task still performs the one safe hand-off
-        # from a pre-send random batch to its replay queue.
-        if int(entry.get("active_generation_token", 0) or 0) != current_generation:
-            if (
-                int(entry.get("superseded_generation", 0) or 0) >= current_generation
-            ):
-                # Pre-send replacement has a proven no-send boundary.  Its
-                # next generation receives original provenance plus only the
-                # messages approved as related; unrelated/uncertain arrivals
-                # remain FIFO for the ordinary following turn.
-                entry["processing"] = False
-                entry["active_task"] = None
-                related = list(entry.pop("supplement_related_items", []) or [])
-                relation_task = entry.get("supplement_relation_task")
-                if not related and relation_task is not None and not relation_task.done():
-                    # Hold the original provenance until the bounded relation
-                    # request resolves; its drain callback performs the hand-
-                    # off.  Starting a new generation here would make that
-                    # late result race a fresh send.
-                    return
-                if related:
-                    original_items = list(entry.get("active_items") or [])
-                    entry["supplement_replay_original_items"] = list(original_items)
-                    replay = [*original_items, *related]
-                    seen: set[str] = set()
-                    entry["items"] = [
-                        item for item in replay
-                        if isinstance(item, dict)
-                        and not (str(item.get("dedupe_key") or "") in seen or seen.add(str(item.get("dedupe_key") or "")))
-                    ]
-                    related_keys = {str(item.get("dedupe_key") or "") for item in related}
-                    entry["pending_items"] = [
-                        item for item in list(entry.get("pending_items") or [])
-                        if str(item.get("dedupe_key") or "") not in related_keys
-                    ]
-                    entry["queued_items"] = list(entry.get("pending_items") or [])
+        # Returns in the hand-off routine control queue processing only;
+        # they must not replace an exception or cancellation from the owner.
+        async def finalize_generation() -> None:
+            # A superseded task must not erase queue state prepared by a newer
+            # generation.  The owning task still performs the one safe hand-off
+            # from a pre-send random batch to its replay queue.
+            if int(entry.get("active_generation_token", 0) or 0) != current_generation:
+                if (
+                    int(entry.get("superseded_generation", 0) or 0) >= current_generation
+                ):
+                    # Pre-send replacement has a proven no-send boundary.  Its
+                    # next generation receives original provenance plus only the
+                    # messages approved as related; unrelated/uncertain arrivals
+                    # remain FIFO for the ordinary following turn.
+                    entry["processing"] = False
+                    entry["active_task"] = None
+                    related = list(entry.pop("supplement_related_items", []) or [])
+                    relation_task = entry.get("supplement_relation_task")
+                    if not related and relation_task is not None and not relation_task.done():
+                        # Hold the original provenance until the bounded relation
+                        # request resolves; its drain callback performs the hand-
+                        # off.  Starting a new generation here would make that
+                        # late result race a fresh send.
+                        return
+                    if related:
+                        original_items = list(entry.get("active_items") or [])
+                        entry["supplement_replay_original_items"] = list(original_items)
+                        replay = [*original_items, *related]
+                        seen: set[str] = set()
+                        entry["items"] = [
+                            item for item in replay
+                            if isinstance(item, dict)
+                            and not (str(item.get("dedupe_key") or "") in seen or seen.add(str(item.get("dedupe_key") or "")))
+                        ]
+                        related_keys = {str(item.get("dedupe_key") or "") for item in related}
+                        entry["pending_items"] = [
+                            item for item in list(entry.get("pending_items") or [])
+                            if str(item.get("dedupe_key") or "") not in related_keys
+                        ]
+                        entry["queued_items"] = list(entry.get("pending_items") or [])
+                        entry["active_items"] = []
+                        wait = max(0.0, float(entry.pop("supplement_restart_wait", 0.0) or 0.0))
+                        _note_buffer_diagnostic(entry, "supplement_restart", count=len(related))
+                        _schedule_timer(entry=entry, key=key, bot=bot, wait_seconds=wait, start_buffer_timer=start_buffer_timer)
+                        return
                     entry["active_items"] = []
-                    wait = max(0.0, float(entry.pop("supplement_restart_wait", 0.0) or 0.0))
-                    _note_buffer_diagnostic(entry, "supplement_restart", count=len(related))
-                    _schedule_timer(entry=entry, key=key, bot=bot, wait_seconds=wait, start_buffer_timer=start_buffer_timer)
-                    return
-                entry["active_items"] = []
-                if entry.get("pending_items"):
+                    if entry.get("pending_items"):
+                        _promote_pending_batch(entry)
+                        _schedule_timer(entry=entry, key=key, bot=bot, wait_seconds=0.0, start_buffer_timer=start_buffer_timer)
+                return
+            entry["processing"] = False
+            entry["active_task"] = None
+            entry["active_items"] = []
+            entry["delivery_state"] = (
+                "complete" if state.get("reply_delivery_complete") else
+                "partial" if state.get("reply_delivery_confirmed") else
+                "unknown" if state.get("reply_delivery_started") else "not_started"
+            )
+            entry["processing_started_at"] = 0.0
+            entry["current_trigger_type"] = ""
+            entry["current_is_random_chat"] = False
+            if bool(state.get("reply_delivery_started", False)):
+                _note_session_reply(key)
+            await _reset_attention_after_confirmed(state, key)
+            if cancelled_without_preempt:
+                # Shutdown/task cancellation is not a delivery-safe replay
+                # signal.  Keep current entry state for lifecycle cleanup but do
+                # not schedule a new generation from pending/overflow items.
+                return
+            if entry.get("pending_items"):
+                entry["queued_items"] = list(entry.get("pending_items") or [])
+                if entry.get("pending_ready"):
                     _promote_pending_batch(entry)
-                    _schedule_timer(entry=entry, key=key, bot=bot, wait_seconds=0.0, start_buffer_timer=start_buffer_timer)
-            return
-        entry["processing"] = False
-        entry["active_task"] = None
-        entry["active_items"] = []
-        entry["delivery_state"] = (
-            "complete" if state.get("reply_delivery_complete") else
-            "partial" if state.get("reply_delivery_confirmed") else
-            "unknown" if state.get("reply_delivery_started") else "not_started"
-        )
-        entry["processing_started_at"] = 0.0
-        entry["current_trigger_type"] = ""
-        entry["current_is_random_chat"] = False
-        if bool(state.get("reply_delivery_started", False)):
-            _note_session_reply(key)
-        await _reset_attention_after_confirmed(state, key)
-        if cancelled_without_preempt:
-            # Shutdown/task cancellation is not a delivery-safe replay
-            # signal.  Keep current entry state for lifecycle cleanup but do
-            # not schedule a new generation from pending/overflow items.
-            return
-        if entry.get("pending_items"):
-            entry["queued_items"] = list(entry.get("pending_items") or [])
-            if entry.get("pending_ready"):
-                _promote_pending_batch(entry)
-                _schedule_timer(
-                    entry=entry,
-                    key=key,
-                    bot=bot,
-                    wait_seconds=0.0,
-                    start_buffer_timer=lambda _key, _bot, _delay: asyncio.create_task(
-                        run_buffer_timer(
-                            _key,
-                            _bot,
-                            msg_buffer=msg_buffer,
-                            process_response_logic=process_response_logic,
-                            message_event_cls=message_event_cls,
-                            message_cls=message_cls,
-                            message_segment_cls=message_segment_cls,
-                            logger=logger,
-                            finished_exception_cls=finished_exception_cls,
-                            delay=_delay,
-                            response_timeout_seconds=response_timeout_seconds,
-                            batch_base_wait_seconds=batch_base_wait_seconds,
-                            batch_min_wait_seconds=batch_min_wait_seconds,
-                            batch_max_wait_seconds=batch_max_wait_seconds,
-                            legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,
-                            concurrency_controller=concurrency_controller,
-                            user_policy_gate=user_policy_gate,
-                        )
-                    ),
-                )
-            else:
-                effective_base, effective_min, effective_max, effective_legacy = _entry_timing(
-                    entry,
-                    base_wait_seconds=batch_base_wait_seconds,
-                    min_wait_seconds=batch_min_wait_seconds,
-                    max_wait_seconds=batch_max_wait_seconds,
-                    legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,
-                )
-                remaining = _schedule_debounce_wait(
-                    first_at=float(entry.get("pending_started_at", 0.0) or 0.0),
-                    last_at=float(entry.get("last_item_at", 0.0) or 0.0),
-                    last_reply_at=_session_last_reply_at(key),
-                    base_wait_seconds=effective_base,
-                    min_wait_seconds=effective_min,
-                    max_wait_seconds=effective_max,
-                    legacy_reply_backoff_seconds=effective_legacy,
-                    immediate=False,
-                )
-                _promote_pending_batch(entry)
-                _schedule_timer(
-                    entry=entry,
-                    key=key,
-                    bot=bot,
-                    wait_seconds=remaining,
-                    start_buffer_timer=lambda _key, _bot, _delay: asyncio.create_task(
-                        run_buffer_timer(
-                            _key,
-                            _bot,
-                            msg_buffer=msg_buffer,
-                            process_response_logic=process_response_logic,
-                            message_event_cls=message_event_cls,
-                            message_cls=message_cls,
-                            message_segment_cls=message_segment_cls,
-                            logger=logger,
-                            finished_exception_cls=finished_exception_cls,
-                            delay=_delay,
-                            response_timeout_seconds=response_timeout_seconds,
-                            batch_base_wait_seconds=batch_base_wait_seconds,
-                            batch_min_wait_seconds=batch_min_wait_seconds,
-                            batch_max_wait_seconds=batch_max_wait_seconds,
-                            legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,
-                            concurrency_controller=concurrency_controller,
-                            user_policy_gate=user_policy_gate,
-                        )
-                    ),
-                )
-        elif not entry.get("items"):
-            _pop_buffer_entry(msg_buffer, key)
+                    _schedule_timer(
+                        entry=entry,
+                        key=key,
+                        bot=bot,
+                        wait_seconds=0.0,
+                        start_buffer_timer=lambda _key, _bot, _delay: asyncio.create_task(
+                            run_buffer_timer(
+                                _key,
+                                _bot,
+                                msg_buffer=msg_buffer,
+                                process_response_logic=process_response_logic,
+                                message_event_cls=message_event_cls,
+                                message_cls=message_cls,
+                                message_segment_cls=message_segment_cls,
+                                logger=logger,
+                                finished_exception_cls=finished_exception_cls,
+                                delay=_delay,
+                                response_timeout_seconds=response_timeout_seconds,
+                                batch_base_wait_seconds=batch_base_wait_seconds,
+                                batch_min_wait_seconds=batch_min_wait_seconds,
+                                batch_max_wait_seconds=batch_max_wait_seconds,
+                                legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,
+                                concurrency_controller=concurrency_controller,
+                                user_policy_gate=user_policy_gate,
+                            )
+                        ),
+                    )
+                else:
+                    effective_base, effective_min, effective_max, effective_legacy = _entry_timing(
+                        entry,
+                        base_wait_seconds=batch_base_wait_seconds,
+                        min_wait_seconds=batch_min_wait_seconds,
+                        max_wait_seconds=batch_max_wait_seconds,
+                        legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,
+                    )
+                    remaining = _schedule_debounce_wait(
+                        first_at=float(entry.get("pending_started_at", 0.0) or 0.0),
+                        last_at=float(entry.get("last_item_at", 0.0) or 0.0),
+                        last_reply_at=_session_last_reply_at(key),
+                        base_wait_seconds=effective_base,
+                        min_wait_seconds=effective_min,
+                        max_wait_seconds=effective_max,
+                        legacy_reply_backoff_seconds=effective_legacy,
+                        immediate=False,
+                    )
+                    _promote_pending_batch(entry)
+                    _schedule_timer(
+                        entry=entry,
+                        key=key,
+                        bot=bot,
+                        wait_seconds=remaining,
+                        start_buffer_timer=lambda _key, _bot, _delay: asyncio.create_task(
+                            run_buffer_timer(
+                                _key,
+                                _bot,
+                                msg_buffer=msg_buffer,
+                                process_response_logic=process_response_logic,
+                                message_event_cls=message_event_cls,
+                                message_cls=message_cls,
+                                message_segment_cls=message_segment_cls,
+                                logger=logger,
+                                finished_exception_cls=finished_exception_cls,
+                                delay=_delay,
+                                response_timeout_seconds=response_timeout_seconds,
+                                batch_base_wait_seconds=batch_base_wait_seconds,
+                                batch_min_wait_seconds=batch_min_wait_seconds,
+                                batch_max_wait_seconds=batch_max_wait_seconds,
+                                legacy_reply_backoff_seconds=legacy_reply_backoff_seconds,
+                                concurrency_controller=concurrency_controller,
+                                user_policy_gate=user_policy_gate,
+                            )
+                        ),
+                    )
+            elif not entry.get("items"):
+                _pop_buffer_entry(msg_buffer, key)
+        await finalize_generation()
 
 
 async def handle_reply_event(
@@ -2020,19 +2007,16 @@ async def handle_reply_event(
     if not policy_allowed:
         # The policy can change after enqueue.  Preserve the inbound event for
         # operator diagnosis/recovery, but never invent a replay of any reply.
-        try:
-            await asyncio.to_thread(
-                _record_recovery_failure,
-                bot=bot,
-                event=event,
-                state=state,
-                failure_stage="permission_revoked",
-                # See the per-item buffered gate above: revoked policy input
-                # is quarantined rather than replayed automatically.
-                failure_class="delivery_unknown",
-            )
-        except Exception:
-            pass
+        await asyncio.to_thread(
+            _record_recovery_failure,
+            bot=bot,
+            event=event,
+            state=state,
+            failure_stage="permission_revoked",
+            # See the per-item buffered gate above: revoked policy input
+            # is quarantined rather than replayed automatically.
+            failure_class="delivery_unknown",
+        )
         return
     if isinstance(event, poke_event_cls):
         if concurrency_controller is None:
@@ -2230,7 +2214,7 @@ async def handle_reply_event(
                         entry,
                         generation=int(entry.get("current_generation", 0) or 0),
                         candidate=direct_item,
-                        safe_to_supersede=_supplement_safe_to_supersede(active_state),
+                        safe_to_supersede=safe_to_supersede(active_state),
                     )
                     if decision.status == "related":
                         lock = active_state.get("reply_commit_lock")
@@ -2242,12 +2226,8 @@ async def handle_reply_event(
                             invalidated = True
                         elif lock is not None and hasattr(lock, "__aenter__"):
                             async with lock:
-                                if _supplement_safe_to_supersede(active_state):
-                                    try:
-                                        from ..core.generation_fence import invalidate_generation
-                                        invalidated = bool(invalidate_generation(active_state, reason="supplement"))
-                                    except Exception:
-                                        invalidated = False
+                                if safe_to_supersede(active_state):
+                                    invalidated = bool(invalidate_generation(active_state, reason="supplement"))
                         if invalidated:
                             entry.setdefault("supplement_related_items", []).append(direct_item)
                             entry["supplement_replacement_generation"] = int(entry.get("current_generation", 0) or 0)
@@ -2328,28 +2308,26 @@ async def handle_reply_event(
             direct_controller.begin(direct_entry, generation=1, originals=[direct_item])
             direct_state["batch_runtime_ref"] = {"entry": direct_entry, "generation": 1}
             msg_buffer[session_key] = direct_entry
-        direct_media = await resolve_onebot_quoted_media_refs(event, bot)
-        recent_media: list[TurnMediaRef] = []
-        if not any(item.kind in {"video", "audio"} for item in direct_media) and event_plain_text:
-            recent_media = _recent_media_for_followup(
-                session_key=session_key,
-                user_id=str(getattr(event, "user_id", "") or ""),
-                now=time.monotonic(),
-            )
-            direct_media.extend(recent_media)
-        media_reference_unavailable = bool(
-            event_plain_text
-            and extract_reply_message_id(event)
-            and not direct_media
-        )
-        direct_state["media_reference_unavailable"] = media_reference_unavailable
-        direct_state["batch_event_count"] = 1 + int(bool(recent_media))
-        direct_state["turn_media_context"] = serialize_turn_media(
-            coerce_turn_media(direct_media)
-        )
         try:
-            from ..core import reply_turn_trace
-
+            direct_media = await resolve_onebot_quoted_media_refs(event, bot)
+            recent_media: list[TurnMediaRef] = []
+            if not any(item.kind in {"video", "audio"} for item in direct_media) and event_plain_text:
+                recent_media = _recent_media_for_followup(
+                    session_key=session_key,
+                    user_id=str(getattr(event, "user_id", "") or ""),
+                    now=time.monotonic(),
+                )
+                direct_media.extend(recent_media)
+            media_reference_unavailable = bool(
+                event_plain_text
+                and extract_reply_message_id(event)
+                and not direct_media
+            )
+            direct_state["media_reference_unavailable"] = media_reference_unavailable
+            direct_state["batch_event_count"] = 1 + int(bool(recent_media))
+            direct_state["turn_media_context"] = serialize_turn_media(
+                coerce_turn_media(direct_media)
+            )
             media_counts = {
                 "current": sum(item.origin == "current" for item in direct_media),
                 "quoted": sum(item.origin == "quoted" for item in direct_media),
@@ -2368,91 +2346,88 @@ async def handle_reply_event(
                     ),
                     hint="引用媒体通过 message_id 回查；近期媒体只在同一会话与同一发送者内承接",
                 )
-        except Exception:
-            pass
-        if is_private_session:
-            await _await_private_direct_backoff(
-                session_key,
-                debounce_seconds=batch_base_wait_seconds,
-                max_wait_seconds=batch_max_wait_seconds,
-                backoff_seconds=float(legacy_reply_backoff_seconds or 0.0),
-            )
-        timeout_seconds = min(
-            HARD_TURN_TIMEOUT_SECONDS,
-            max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS)),
-        )
-        attach_turn_deadline(
-            direct_state,
-            timeout_seconds=timeout_seconds,
-            started_at=received_monotonic_at,
-        )
-        try:
-            async with concurrency_controller.direct_turn(
-                session_key,
-                deadline=float(direct_state["response_deadline"]),
-            ) as commit_lock:
-                direct_state["reply_commit_lock"] = commit_lock
-                await _run_generation_call(
-                    process_response_logic, bot, event, direct_state,
-                    timeout=float(direct_state["response_deadline"]) - time.monotonic(),
+            if is_private_session:
+                await _await_private_direct_backoff(
+                    session_key,
+                    debounce_seconds=batch_base_wait_seconds,
+                    max_wait_seconds=batch_max_wait_seconds,
+                    backoff_seconds=float(legacy_reply_backoff_seconds or 0.0),
                 )
-        except ReplyAdmissionTimeout as exc:
-            logger.warning(f"拟人插件：会话 {session_key} direct turn 排队超时，已静默放弃。")
-            _record_reply_admission_timeout(
-                bot=bot,
-                event=event,
-                state=direct_state,
-                session_key=session_key,
-                wait_ms=exc.wait_ms,
-                mode="direct",
+            timeout_seconds = min(
+                HARD_TURN_TIMEOUT_SECONDS,
+                max(30.0, float(response_timeout_seconds or _PROCESS_RESPONSE_TIMEOUT_SECONDS)),
             )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"拟人插件：会话 {session_key} direct turn 超时（>{timeout_seconds:.0f}s），已终止本轮。"
-            )
-            await _handle_reply_timeout(
-                bot=bot,
-                event=event,
-                state=direct_state,
-                session_key=session_key,
+            attach_turn_deadline(
+                direct_state,
                 timeout_seconds=timeout_seconds,
-                logger=logger,
+                started_at=received_monotonic_at,
             )
-        except asyncio.CancelledError:
-            if direct_entry is None or int(direct_entry.get("active_generation_token", 0) or 0) == 1:
-                # Cancellation outside an explicit supplement replacement is
-                # a lifecycle/shutdown signal.  Do not replay the active
-                # direct turn, but leave already-arrived FIFO follow-ups in a
-                # dormant queue so the next ingress can resume them instead
-                # of retaining an entry forever in ``processing`` state.
-                if direct_entry is not None:
-                    direct_entry["processing"] = False
-                    direct_entry["active_task"] = None
-                    direct_entry["active_items"] = []
-                    if direct_entry.get("pending_items"):
-                        _promote_pending_batch(direct_entry)
-                        direct_entry["queued_items"] = list(direct_entry["items"])
-                    elif msg_buffer.get(session_key) is direct_entry:
-                        _pop_buffer_entry(msg_buffer, session_key)
-                raise
-        except Exception as exc:
-            if finished_exception_cls and isinstance(exc, finished_exception_cls):
-                logger.debug("拟人插件：direct turn 提前结束（FinishedException）")
-            else:
-                delivery_state = (
-                    "complete"
-                    if direct_state.get("reply_delivery_complete")
-                    else "partial"
-                    if direct_state.get("reply_delivery_confirmed")
-                    else "dispatching"
-                    if direct_state.get("reply_delivery_started")
-                    else "not_started"
+            try:
+                async with concurrency_controller.direct_turn(
+                    session_key,
+                    deadline=float(direct_state["response_deadline"]),
+                ) as commit_lock:
+                    direct_state["reply_commit_lock"] = commit_lock
+                    await _run_generation_call(
+                        process_response_logic, bot, event, direct_state,
+                        timeout=float(direct_state["response_deadline"]) - time.monotonic(),
+                    )
+            except ReplyAdmissionTimeout as exc:
+                logger.warning(f"拟人插件：会话 {session_key} direct turn 排队超时，已静默放弃。")
+                _record_reply_admission_timeout(
+                    bot=bot,
+                    event=event,
+                    state=direct_state,
+                    session_key=session_key,
+                    wait_ms=exc.wait_ms,
+                    mode="direct",
                 )
-                logger.error(
-                    f"拟人插件：会话 {session_key} direct turn 处理失败，保持静默: "
-                    f"type={type(exc).__name__} delivery_state={delivery_state}"
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"拟人插件：会话 {session_key} direct turn 超时（>{timeout_seconds:.0f}s），已终止本轮。"
                 )
-                try:
+                await _handle_reply_timeout(
+                    bot=bot,
+                    event=event,
+                    state=direct_state,
+                    session_key=session_key,
+                    timeout_seconds=timeout_seconds,
+                    logger=logger,
+                )
+            except asyncio.CancelledError:
+                if direct_entry is None or int(direct_entry.get("active_generation_token", 0) or 0) == 1:
+                    # Cancellation outside an explicit supplement replacement is
+                    # a lifecycle/shutdown signal.  Do not replay the active
+                    # direct turn, but leave already-arrived FIFO follow-ups in a
+                    # dormant queue so the next ingress can resume them instead
+                    # of retaining an entry forever in ``processing`` state.
+                    if direct_entry is not None:
+                        direct_entry["processing"] = False
+                        direct_entry["active_task"] = None
+                        direct_entry["active_items"] = []
+                        if direct_entry.get("pending_items"):
+                            _promote_pending_batch(direct_entry)
+                            direct_entry["queued_items"] = list(direct_entry["items"])
+                        elif msg_buffer.get(session_key) is direct_entry:
+                            _pop_buffer_entry(msg_buffer, session_key)
+                    raise
+            except Exception as exc:
+                if finished_exception_cls and isinstance(exc, finished_exception_cls):
+                    logger.debug("拟人插件：direct turn 提前结束（FinishedException）")
+                else:
+                    delivery_state = (
+                        "complete"
+                        if direct_state.get("reply_delivery_complete")
+                        else "partial"
+                        if direct_state.get("reply_delivery_confirmed")
+                        else "dispatching"
+                        if direct_state.get("reply_delivery_started")
+                        else "not_started"
+                    )
+                    logger.error(
+                        f"拟人插件：会话 {session_key} direct turn 处理失败，保持静默: "
+                        f"type={type(exc).__name__} delivery_state={delivery_state}"
+                    )
                     failure_class = (
                         "delivery_partial"
                         if direct_state.get("reply_delivery_confirmed")
@@ -2468,43 +2443,59 @@ async def handle_reply_event(
                         failure_stage="reply_processing_failed",
                         failure_class=failure_class,
                     )
-                except Exception:
-                    pass
-        if is_private_session and bool(direct_state.get("reply_delivery_started", False)):
-            _note_session_reply(session_key)
-        await _reset_attention_after_confirmed(direct_state, session_key)
-        if direct_entry is not None and int(direct_entry.get("active_generation_token", 0) or 0) != 1:
-            related = list(direct_entry.pop("supplement_related_items", []) or [])
-            if related:
+            if is_private_session and bool(direct_state.get("reply_delivery_started", False)):
+                _note_session_reply(session_key)
+            await _reset_attention_after_confirmed(direct_state, session_key)
+            if direct_entry is not None and int(direct_entry.get("active_generation_token", 0) or 0) != 1:
+                related = list(direct_entry.pop("supplement_related_items", []) or [])
+                if related:
+                    direct_entry["processing"] = False
+                    direct_entry["active_task"] = None
+                    direct_entry["active_items"] = []
+                    direct_entry["items"] = [direct_item, *related]
+                    direct_entry["batch_started_at"] = received_monotonic_at
+                    _schedule_timer(
+                        entry=direct_entry, key=session_key, bot=bot,
+                        wait_seconds=max(0.0, float(direct_entry.pop("supplement_restart_wait", 0.0) or 0.0)),
+                        start_buffer_timer=start_buffer_timer,
+                    )
+                    return
+            # A direct turn which has crossed the delivery/action barrier cannot
+            # be replaced.  Arrivals queued by that turn still belong to the
+            # private FIFO lane and must be promoted after the owner completes;
+            # dropping the entry here silently loses the follow-up message.
+            if direct_entry is not None and direct_entry.get("pending_items"):
                 direct_entry["processing"] = False
                 direct_entry["active_task"] = None
                 direct_entry["active_items"] = []
-                direct_entry["items"] = [direct_item, *related]
-                direct_entry["batch_started_at"] = received_monotonic_at
+                direct_entry["queued_items"] = list(direct_entry.get("pending_items") or [])
+                _promote_pending_batch(direct_entry)
                 _schedule_timer(
                     entry=direct_entry, key=session_key, bot=bot,
-                    wait_seconds=max(0.0, float(direct_entry.pop("supplement_restart_wait", 0.0) or 0.0)),
-                    start_buffer_timer=start_buffer_timer,
+                    wait_seconds=0.0, start_buffer_timer=start_buffer_timer,
                 )
                 return
-        # A direct turn which has crossed the delivery/action barrier cannot
-        # be replaced.  Arrivals queued by that turn still belong to the
-        # private FIFO lane and must be promoted after the owner completes;
-        # dropping the entry here silently loses the follow-up message.
-        if direct_entry is not None and direct_entry.get("pending_items"):
-            direct_entry["processing"] = False
-            direct_entry["active_task"] = None
-            direct_entry["active_items"] = []
-            direct_entry["queued_items"] = list(direct_entry.get("pending_items") or [])
-            _promote_pending_batch(direct_entry)
-            _schedule_timer(
-                entry=direct_entry, key=session_key, bot=bot,
-                wait_seconds=0.0, start_buffer_timer=start_buffer_timer,
-            )
+            if direct_entry is not None and msg_buffer.get(session_key) is direct_entry:
+                _pop_buffer_entry(msg_buffer, session_key)
             return
-        if direct_entry is not None and msg_buffer.get(session_key) is direct_entry:
-            _pop_buffer_entry(msg_buffer, session_key)
-        return
+        finally:
+            # Unexpected internal failures must release the direct owner too.
+            # Preserve only follow-up arrivals; the failed active turn must
+            # never be replayed after a possible outbound dispatch.
+            if (
+                direct_entry is not None
+                and bool(direct_entry.get("processing"))
+                and direct_entry.get("active_task") is asyncio.current_task()
+                and int(direct_entry.get("active_generation_token", 0) or 0) == 1
+            ):
+                direct_entry["processing"] = False
+                direct_entry["active_task"] = None
+                direct_entry["active_items"] = []
+                if direct_entry.get("pending_items"):
+                    _promote_pending_batch(direct_entry)
+                    direct_entry["queued_items"] = list(direct_entry["items"])
+                elif msg_buffer.get(session_key) is direct_entry:
+                    _pop_buffer_entry(msg_buffer, session_key)
     entry = msg_buffer.setdefault(session_key, _new_entry(delay))
     if "supplement_chain_settings" not in entry:
         entry["supplement_chain_settings"] = dict(state.get("_supplement_settings") or {})

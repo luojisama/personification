@@ -34,7 +34,9 @@ def test_reply_processor_allows_classifier_unavailable_into_normal_lifecycle(mon
     monkeypatch.setattr(processor, "_process_response_logic_impl", fake_impl)
 
     deps = SimpleNamespace(
+        persona=SimpleNamespace(favorability_service=None),
         runtime=SimpleNamespace(
+            logger=SimpleNamespace(debug=lambda *_args: None),
             user_policy_gate=gate,
             plugin_config=SimpleNamespace(personification_turn_trace_enabled=False),
             qq_outbound_ledger=None,
