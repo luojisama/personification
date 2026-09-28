@@ -1,0 +1,2 @@
+# Development-only exception-boundary gate; not a plugin runtime dependency.
+ruff==0.16.9

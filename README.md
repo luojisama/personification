@@ -462,6 +462,7 @@ node plugin/personification/tests/test_qzone_webui_static.js
 ## 维护约定
 
 - 异常处理按[异常边界约定](docs/exception-boundaries.md)维护：存储容错由边界负责，内部编程错误可见，控制流和真实送达状态优先。
+- 已治理模块运行 `python -m pip install -r requirements-dev.txt` 后，从插件目录执行 `ruff check .`；开发工具版本与检查范围固定在 `requirements-dev.txt`、`ruff.toml`。新增或拆出的模块完成行为核验后应加入范围，不能通过整文件忽略掩盖问题。
 - 新的正常聊天语义判断继续由 LLM metadata / TurnPlan 承担，不新增关键词表、短语表或 regex semantic router。
 - 新的外发工具必须声明副作用、最终回复行为和重试安全性。
 - `CancelledError` 应传播；认证失败、模型不存在和缺少 caller 等确定性错误应快速失败。

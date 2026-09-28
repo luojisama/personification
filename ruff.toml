@@ -1,0 +1,24 @@
+required-version = "==0.16.9"
+target-version = "py39"
+
+# Explicit rollout scope. Add newly governed modules here when their behavioral
+# tests and exception-boundary review pass; do not silence legacy files globally.
+include = [
+    "core/active_learning.py",
+    "core/call_compat.py",
+    "core/data_store.py",
+    "core/db.py",
+    "core/generation_fence.py",
+    "core/history_projection.py",
+    "core/qq_outbound.py",
+    "core/reply_turn_trace.py",
+    "core/runtime_task_supervisor.py",
+    "core/token_ledger.py",
+    "handlers/peer_bot_admin_commands.py",
+    "handlers/reply_pipeline/input_projection.py",
+    "skills/skillpacks/tool_caller/scripts/usage_normalization.py",
+    "agent/runtime/background_learning.py",
+]
+
+[lint]
+select = ["BLE001", "S110", "B012", "F401", "F821"]
