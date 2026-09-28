@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from .call_compat import select_call_shape
 from .data_store import get_data_store
 
 
@@ -125,22 +126,18 @@ async def refresh_bot_group_mute_state(
         checked_at = float(cached.get("checked_at", 0.0) or 0.0)
         if now_value - checked_at <= max(0.0, float(ttl_seconds)):
             return float(cached.get("muted_until", 0.0) or 0.0) > now_value
+    member_info = bot.get_group_member_info
+    group_number = int(normalized_group_id)
+    bot_number = int(getattr(bot, "self_id", "") or 0)
     try:
-        info = await bot.get_group_member_info(
-            group_id=int(normalized_group_id),
-            user_id=int(getattr(bot, "self_id", "") or 0),
-            no_cache=True,
+        args, kwargs = select_call_shape(
+            member_info,
+            (
+                ((), {"group_id": group_number, "user_id": bot_number, "no_cache": True}),
+                ((), {"group_id": group_number, "user_id": bot_number}),
+            ),
         )
-    except TypeError:
-        try:
-            info = await bot.get_group_member_info(
-                group_id=int(normalized_group_id),
-                user_id=int(getattr(bot, "self_id", "") or 0),
-            )
-        except Exception as exc:
-            if logger is not None:
-                logger.debug(f"[group_mute] get_group_member_info failed: {exc}")
-            return is_group_muted(normalized_group_id, now_ts=now_value)
+        info = await member_info(*args, **kwargs)
     except Exception as exc:
         if logger is not None:
             logger.debug(f"[group_mute] get_group_member_info failed: {exc}")

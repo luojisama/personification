@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -11,6 +13,28 @@ from .paths import get_data_dir as _get_data_dir
 
 
 _ROOT_KEY = "__root__"
+_LOGGER = logging.getLogger(__name__)
+
+
+class CorruptDataError(ValueError):
+    """An existing namespace contains invalid JSON or an incompatible shape.
+
+    The namespace name and stable reason code are safe diagnostics; stored
+    bytes and database paths are intentionally omitted.
+    """
+
+    def __init__(self, namespace: str, reason: str) -> None:
+        self.namespace = namespace
+        self.reason = reason
+        super().__init__(f"data_store_corrupt namespace={namespace} reason={reason}")
+
+
+def _decode_existing(name: str, raw: Any) -> Any:
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError, UnicodeDecodeError) as exc:
+        raise CorruptDataError(name, "invalid_json") from exc
+
 
 class DataStore:
     """
@@ -37,42 +61,50 @@ class DataStore:
         except asyncio.CancelledError:
             while not worker.done():
                 try:
-                    await asyncio.shield(worker)
+                    await asyncio.wait({worker})
                 except asyncio.CancelledError:
                     continue
             try:
                 worker.result()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - observe arbitrary worker failure after cancellation
+                # Cancellation still owns the caller result, but a failed
+                # background write must remain diagnosable without data text.
+                try:
+                    _LOGGER.warning("data_store_cancelled_worker_failed error_type=%s", type(exc).__name__)
+                except Exception:  # noqa: BLE001,S110 - logger failure cannot replace owner cancellation
+                    pass
             raise asyncio.CancelledError
 
     def _read(self, name: str) -> Any:
-        with connect_sync() as conn:
+        with closing(connect_sync()) as conn:
             row = conn.execute(
                 "SELECT value FROM kv_store WHERE namespace=? AND key=?",
                 (name, _ROOT_KEY),
             ).fetchone()
         if not row:
             return {}
-        try:
-            raw = row["value"] if hasattr(row, "__getitem__") else row[0]
-            return json.loads(raw)
-        except Exception:
-            return {}
+        return _decode_existing(name, row["value"])
 
     def _write(self, name: str, data: Any) -> None:
         payload = json.dumps(data, ensure_ascii=False)
-        with connect_sync() as conn:
-            conn.execute(
-                """
-                INSERT INTO kv_store(namespace, key, value, updated_at)
-                VALUES (?, ?, ?, unixepoch('now'))
-                ON CONFLICT(namespace, key)
-                DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
-                """,
-                (name, _ROOT_KEY, payload),
-            )
-            conn.commit()
+        with closing(connect_sync()) as conn:
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT value FROM kv_store WHERE namespace=? AND key=?",
+                    (name, _ROOT_KEY),
+                ).fetchone()
+                if row is not None:
+                    _decode_existing(name, row["value"])
+                conn.execute(
+                    """
+                    INSERT INTO kv_store(namespace, key, value, updated_at)
+                    VALUES (?, ?, ?, unixepoch('now'))
+                    ON CONFLICT(namespace, key)
+                    DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+                    """,
+                    (name, _ROOT_KEY, payload),
+                )
 
     def load_sync(self, name: str) -> Any:
         return self._read(name)
@@ -81,24 +113,14 @@ class DataStore:
         self._write(name, data)
 
     def mutate_sync(self, name: str, mutator: Callable[[Any], Any]) -> Any:
-        with connect_sync() as conn:
-            try:
+        with closing(connect_sync()) as conn:
+            with conn:
                 conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
                     "SELECT value FROM kv_store WHERE namespace=? AND key=?",
                     (name, _ROOT_KEY),
                 ).fetchone()
-                if row is None:
-                    current = {}
-                else:
-                    try:
-                        raw = row["value"]
-                    except (KeyError, TypeError, IndexError):
-                        raw = row[0]
-                    try:
-                        current = json.loads(raw)
-                    except Exception:
-                        current = {}
+                current = {} if row is None else _decode_existing(name, row["value"])
                 updated = mutator(current)
                 if updated is None:
                     updated = current
@@ -112,20 +134,17 @@ class DataStore:
                     """,
                     (name, _ROOT_KEY, payload),
                 )
-                conn.commit()
                 return updated
-            except Exception:
-                conn.rollback()
-                raise
 
     def update_sync(self, name: str, patch: dict[str, Any]) -> dict[str, Any]:
         def _mutate(current: Any) -> dict[str, Any]:
-            data = current if isinstance(current, dict) else {}
+            if not isinstance(current, dict):
+                raise CorruptDataError(name, "expected_object")
+            data = current
             data.update(patch)
             return data
 
-        updated = self.mutate_sync(name, _mutate)
-        return updated if isinstance(updated, dict) else {}
+        return self.mutate_sync(name, _mutate)
 
     async def load(self, name: str) -> Any:
         async with self._alock(name):

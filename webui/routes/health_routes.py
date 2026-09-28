@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import random
 import re
 import shutil
@@ -20,6 +21,9 @@ from ...core.operation_diagnostics import (
     step as operation_step,
 )
 from ..deps import AdminIdentity, require_admin
+
+_LOGGER = logging.getLogger(__name__)
+
 
 _INTERACTION_WAIT_SECONDS = 45
 _INTERACTION_TIMEOUT_GRACE_SECONDS = 5
@@ -1006,12 +1010,15 @@ def build_health_router(*, runtime) -> APIRouter:
             )
             raise HTTPException(status_code=500, detail=report) from exc
         finally:
-            shutil.rmtree(probe_dir, ignore_errors=True)
+            try:
+                shutil.rmtree(probe_dir)
+            except OSError as exc:
+                _LOGGER.warning("video_probe_cleanup_failed phase=upload_dir error_type=%s", type(exc).__name__)
             try:
                 if root.exists() and not any(root.iterdir()):
                     root.rmdir()
-            except Exception:
-                pass
+            except OSError as exc:
+                _LOGGER.warning("video_probe_cleanup_failed phase=root_dir error_type=%s", type(exc).__name__)
 
     @router.post("/interaction-test")
     async def interaction_test(

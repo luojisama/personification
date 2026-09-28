@@ -276,10 +276,9 @@ class BrowserPool:
                 self._idle_tasks.pop(platform, None)
             if completed.cancelled():
                 return
-            try:
-                completed.exception()
-            except Exception:
-                return
+            error = completed.exception()
+            if error is not None:
+                self._record_diagnostic("browser_context_idle_task_failed", platform)
 
         task.add_done_callback(consume)
 
@@ -293,11 +292,12 @@ class BrowserPool:
                 if self._platform_session_protected(platform):
                     self._last_activity[platform] = time.monotonic()
                     continue
-                context = self._contexts.pop(platform, None)
-                self._context_headless.pop(platform, None)
+                context = self._contexts.get(platform)
                 if context is None:
                     return
                 await context.close()
+                self._contexts.pop(platform, None)
+                self._context_headless.pop(platform, None)
                 self._record_diagnostic("browser_context_idle_evicted", platform)
                 return
 
@@ -402,10 +402,11 @@ class BrowserPool:
             ):
                 await self._release_interactive_pointer(session)
         async with self._locks[platform]:
-            context = self._contexts.pop(platform, None)
-            self._context_headless.pop(platform, None)
+            context = self._contexts.get(platform)
             if context is not None:
                 await context.close()
+                self._contexts.pop(platform, None)
+                self._context_headless.pop(platform, None)
 
     async def close(self) -> None:
         idle_tasks = list(self._idle_tasks.values())

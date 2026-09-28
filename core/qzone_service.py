@@ -133,14 +133,9 @@ def _observe_qzone_action(
 
 
 def _get_qzone_auth_status_with_config(bot_id: Any, plugin_config: Any) -> dict[str, Any]:
-    """Call the status projection while preserving legacy test/service shims."""
+    """Project auth status from the explicit per-Bot configuration."""
 
-    try:
-        return get_qzone_auth_status(bot_id, plugin_config=plugin_config)
-    except TypeError as exc:
-        if "plugin_config" not in str(exc):
-            raise
-        return get_qzone_auth_status(bot_id)
+    return get_qzone_auth_status(bot_id, plugin_config=plugin_config)
 
 
 def get_qzone_capability_status(

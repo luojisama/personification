@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import inspect
 import json
 import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from .embedding_index import cosine_similarity, embed_text, normalize_text, tokenize
+from .call_compat import select_call_shape
 from .memory_store import MemoryStore
 from .search_ranker import safe_float
 
@@ -258,17 +258,11 @@ class EvolvesEngine:
 
     async def _call_evolves_llm(self, messages: list[dict[str, Any]]) -> Any:
         assert self.call_ai_api is not None
-        try:
-            return await self.call_ai_api(messages, temperature=0.0)
-        except TypeError:
-            signature = None
-            try:
-                signature = inspect.signature(self.call_ai_api)
-            except Exception:
-                pass
-            if signature is not None and "temperature" not in signature.parameters:
-                return await self.call_ai_api(messages)
-            raise
+        args, kwargs = select_call_shape(self.call_ai_api, [
+            ((messages,), {"temperature": 0.0}),
+            ((messages,), {}),
+        ])
+        return await self.call_ai_api(*args, **kwargs)
 
     def _render_memory_for_llm(self, payload: dict[str, Any]) -> dict[str, Any]:
         return {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -11,8 +12,11 @@ from .paths import get_data_dir as _get_data_dir
 
 try:
     import aiosqlite  # type: ignore
-except Exception:  # pragma: no cover - runtime fallback when dependency is unavailable
+except ImportError:  # pragma: no cover - runtime fallback when dependency is unavailable
     aiosqlite = None
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 DB_FILENAME = "personification.db"
@@ -896,7 +900,14 @@ def connect_sync(db_path: Path | None = None) -> sqlite3.Connection:
     path = Path(db_path or get_db_path())
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, check_same_thread=False)
-    return _configure_connection(conn)
+    try:
+        return _configure_connection(conn)
+    except BaseException:
+        try:
+            conn.close()
+        except Exception as close_exc:  # noqa: BLE001 - preserve the original setup failure
+            _LOGGER.warning("db_connection_cleanup_failed mode=sync error_type=%s", type(close_exc).__name__)
+        raise
 
 
 def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
@@ -1082,7 +1093,9 @@ def _migrate_qzone_monthly_usage(conn: sqlite3.Connection) -> None:
         return
     try:
         state = json.loads(row["value"] or "{}")
-    except Exception:
+    except (json.JSONDecodeError, TypeError):
+        # Legacy QZone state can be malformed; leave it untouched and skip
+        # only this optional derived counter migration.
         return
     if not isinstance(state, dict):
         return
@@ -1092,7 +1105,7 @@ def _migrate_qzone_monthly_usage(conn: sqlite3.Connection) -> None:
     try:
         confirmed_count = max(0, int(state.get("count", 0) or 0))
         forward_count = max(0, int(state.get("forward_count", 0) or 0))
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return
     conn.execute(
         """
@@ -1206,10 +1219,17 @@ async def get_db() -> Any:
         path = get_db_path()
         if aiosqlite is not None:
             conn = await aiosqlite.connect(path)
-            conn.row_factory = sqlite3.Row
-            await conn.execute("PRAGMA journal_mode=WAL")
-            await conn.execute("PRAGMA synchronous=NORMAL")
-            await conn.execute("PRAGMA foreign_keys=ON")
+            try:
+                conn.row_factory = sqlite3.Row
+                await conn.execute("PRAGMA journal_mode=WAL")
+                await conn.execute("PRAGMA synchronous=NORMAL")
+                await conn.execute("PRAGMA foreign_keys=ON")
+            except BaseException:
+                try:
+                    await conn.close()
+                except Exception as close_exc:  # noqa: BLE001 - preserve the original setup failure
+                    _LOGGER.warning("db_connection_cleanup_failed mode=async error_type=%s", type(close_exc).__name__)
+                raise
             _db = conn
             return _db
         _db = _AsyncConnectionWrapper(connect_sync(path))

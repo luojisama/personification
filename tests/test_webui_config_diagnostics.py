@@ -43,6 +43,38 @@ def test_config_value_reports_persistence_and_runtime_reload(
     assert reload_calls == ["reload"]
 
 
+def test_config_value_reports_persisted_partial_when_reload_fails(
+    _runtime_context, monkeypatch,
+) -> None:
+    routes = load_personification_module("plugin.personification.webui.routes.config_routes")
+    runtime = _runtime_context.app_module.get_runtime_context()
+    operations = []
+
+    def persist(field_name, value, _config):
+        operations.append(("persist", {field_name: value}))
+        return {"env_json_path": "isolated-env.json", "dotenv_path": None, "errors": []}
+
+    def reload_services():
+        operations.append(("reload", runtime.plugin_config.personification_agent_max_steps))
+        raise OSError("private-runtime-detail")
+
+    monkeypatch.setattr(routes.env_writer, "write_both", persist)
+    monkeypatch.setattr(routes, "_schedule_diagnostics_warm", lambda _runtime: operations.append("warm"))
+    runtime.runtime_bundle = SimpleNamespace(reload_runtime_services=reload_services)
+    client = _build_client(_runtime_context)
+    _login_as_admin(client, _runtime_context)
+    response = client.post(
+        "/personification/api/config/value",
+        json={"field_name": "personification_agent_max_steps", "value": "7"},
+    )
+    payload = response.json()
+    assert payload["success"] is False
+    assert payload["diagnostic"]["partial"] is True
+    assert payload["diagnostic"]["code"] == "config_value_runtime_partial"
+    assert operations == [("persist", {"personification_agent_max_steps": 7}), ("reload", 7)]
+    assert "private-runtime-detail" not in response.text
+
+
 def test_video_config_form_saves_atomically_and_reloads_once(
     _runtime_context, monkeypatch  # noqa: ANN001
 ) -> None:

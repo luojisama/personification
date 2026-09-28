@@ -222,17 +222,7 @@ def _build_status(runtime, *, bot_id: str = "") -> dict[str, Any]:
     requested_bot_id = str(bot_id or "").strip()
 
     def _safe_auth(exact_bot_id: str = "") -> dict[str, Any]:
-        # Keep the route tolerant of explicitly injected legacy status shims.
-        # Production always receives the configuration so credential metadata is
-        # projected from the isolated store; the narrow fallback prevents a
-        # test/downgrade shim that predates the keyword from turning the whole
-        # status page into a 500 response.
-        try:
-            raw_auth = get_qzone_auth_status(exact_bot_id, plugin_config=cfg)
-        except TypeError as exc:
-            if "plugin_config" not in str(exc):
-                raise
-            raw_auth = get_qzone_auth_status(exact_bot_id)
+        raw_auth = get_qzone_auth_status(exact_bot_id, plugin_config=cfg)
         value = sanitize_object(raw_auth)
         auth_value = value if isinstance(value, dict) else {}
         if auth_value.get("last_error"):

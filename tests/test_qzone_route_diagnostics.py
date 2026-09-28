@@ -78,7 +78,7 @@ def test_qzone_status_sanitizes_all_last_errors_and_adds_diagnostic(_runtime_con
     monkeypatch.setattr(
         qzone_service,
         "get_qzone_auth_status",
-        lambda _bot_id="": {"status": "refresh_failed", "last_error": secret, "token": "token-secret"},
+        lambda _bot_id="", *, plugin_config=None: {"status": "refresh_failed", "last_error": secret, "token": "token-secret"},
     )
     _install_runtime(_runtime_context, bundle=SimpleNamespace(qzone_publish_available=True))
     client = _admin_client(_runtime_context)
@@ -337,7 +337,7 @@ def test_qzone_post_duplicate_success_does_not_mark_generated_content(_runtime_c
 
 
 def test_qzone_post_hides_refresh_and_publish_service_messages(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
-    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda _bot_id="": {"status": "healthy"})
+    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda _bot_id="", *, plugin_config=None: {"status": "healthy"})
 
     async def generate(_bot):  # noqa: ANN001
         return "一条安全草稿"
@@ -422,7 +422,7 @@ def test_qzone_post_reports_image_upload_failure_before_publish(_runtime_context
             },
         }
 
-    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda _bot_id="": {"status": "healthy"})
+    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda _bot_id="", *, plugin_config=None: {"status": "healthy"})
     monkeypatch.setattr(periodic_jobs, "coordinated_qzone_publish", coordinated)
     _install_runtime(
         _runtime_context,
@@ -466,7 +466,7 @@ def test_qzone_post_stops_before_generation_when_forced_refresh_still_requires_l
     async def publish(_content, _bot_id):  # noqa: ANN001
         raise AssertionError("login preflight must stop before publish")
 
-    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda _bot_id="": {"status": "login_required"})
+    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda _bot_id="", *, plugin_config=None: {"status": "login_required"})
     _install_runtime(
         _runtime_context,
         bundle=SimpleNamespace(
@@ -506,7 +506,7 @@ def test_qzone_post_stops_before_generation_when_forced_refresh_hits_risk_challe
     async def publish(_content, _bot_id):  # noqa: ANN001
         raise AssertionError("risk preflight must stop before publish")
 
-    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda _bot_id="": {"status": "risk_blocked"})
+    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda _bot_id="", *, plugin_config=None: {"status": "risk_blocked"})
     _install_runtime(
         _runtime_context,
         bundle=SimpleNamespace(
@@ -567,7 +567,7 @@ def test_qzone_post_recovers_login_without_automatically_replaying_write(
         auth_state["status"] = "login_required"
         return {"success": False, "status": publish_status, "message": "secret"}
 
-    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda _bot_id="": dict(auth_state))
+    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", lambda _bot_id="", *, plugin_config=None: dict(auth_state))
     monkeypatch.setattr(periodic_jobs, "coordinated_qzone_publish", coordinated)
     _install_runtime(
         _runtime_context,
@@ -875,3 +875,29 @@ def test_qzone_scan_diagnostics_sanitize_failures_and_exceptions(_runtime_contex
     invalid = client.post("/personification/api/qzone/scan-now", json={"kind": "unsupported"})
     assert invalid.status_code == 400
     _assert_safe_report(invalid.json()["detail"], code="qzone_scan_kind_invalid", phase="scan_preflight")
+
+
+def test_qzone_capability_auth_internal_type_error_is_not_retried(monkeypatch):
+    calls = []
+    def broken(bot_id="", *, plugin_config=None):
+        calls.append(bot_id)
+        raise TypeError("plugin_config internal error")
+
+    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", broken)
+    with pytest.raises(TypeError, match="internal error"):
+        qzone_service._get_qzone_auth_status_with_config("10000", object())
+    assert calls == ["10000"]
+
+
+def test_qzone_status_auth_internal_type_error_is_not_retried(_runtime_context, monkeypatch):
+    calls = []
+    def broken(bot_id="", *, plugin_config=None):
+        calls.append(bot_id)
+        raise TypeError("plugin_config internal error")
+
+    monkeypatch.setattr(qzone_service, "get_qzone_auth_status", broken)
+    _install_runtime(_runtime_context, bundle=SimpleNamespace(qzone_publish_available=True))
+    client = _admin_client(_runtime_context)
+    response = client.get("/personification/api/qzone/status?bot_id=10000")
+    assert response.status_code >= 400
+    assert calls == [""]

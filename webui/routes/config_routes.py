@@ -1243,8 +1243,35 @@ def build_config_router(*, runtime) -> APIRouter:
                 outcome="error",
             )
             raise HTTPException(status_code=500, detail=failure) from exc
-        errors = ["env.json 持久化失败"] if result.get("errors") or not result.get("env_json_path") else []
         persistence = _persistence_step(result)
+        if result.get("errors") or not result.get("env_json_path"):
+            operation_diagnostic = diagnostic(
+                ok=False,
+                code="config_value_persist_failed",
+                phase="persist_config",
+                title="配置未能持久化",
+                message="env.json 未写入，当前进程配置没有修改。",
+                details=(detail("字段", field_name), detail("持久化目标", "env.json")),
+                steps=(
+                    step("value_normalization", "Normalize configuration value", "ok", "字段值已通过校验。"),
+                    persistence,
+                ),
+                suggestion="检查数据目录写权限后重试。",
+                retryable=True,
+            )
+            _record_audit(
+                action="config_update",
+                qq=admin.qq,
+                device_id=admin.device_id,
+                target=field_name,
+                detail={"code": operation_diagnostic["code"], "phase": operation_diagnostic["phase"]},
+                outcome="error",
+            )
+            return _attach_diagnostic(
+                {"success": False, "errors": ["env.json 持久化失败"], "dotenv_path": result.get("dotenv_path"), "env_json_path": result.get("env_json_path")},
+                operation_diagnostic,
+            )
+        errors: list[str] = []
         # 同步当前进程中的 plugin_config 实例（不依赖重启）
         try:
             setattr(runtime.plugin_config, field_name, normalized)

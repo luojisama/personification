@@ -20,6 +20,7 @@ import yaml
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 
 from ...core import webui_audit_log
+from ...core.call_compat import select_call_shape
 from ...core.paths import get_data_dir
 from ...core.llm_context import reset_llm_context, set_llm_context
 from ...core.persona_template_history import (
@@ -400,17 +401,12 @@ async def _call_main_model(
     stage_label: str = "主模型调用",
 ) -> str:
     async def _invoke() -> Any:
-        try:
-            return await caller(
-                messages,
-                temperature=temperature,
-                use_builtin_search=use_builtin_search,
-            )
-        except TypeError:
-            try:
-                return await caller(messages, None, None, temperature)
-            except TypeError:
-                return await caller(messages)
+        args, kwargs = select_call_shape(caller, [
+            ((messages,), {"temperature": temperature, "use_builtin_search": use_builtin_search}),
+            ((messages, None, None, temperature), {}),
+            ((messages,), {}),
+        ])
+        return await caller(*args, **kwargs)
 
     token = set_llm_context(purpose=purpose) if purpose else None
     try:
