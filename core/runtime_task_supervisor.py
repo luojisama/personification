@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ class RuntimeTaskSupervisor:
 
     def __init__(self) -> None:
         self._records: dict[str, _TaskRecord] = {}
+        self._owned: dict[asyncio.Task[Any], _TaskRecord] = {}
         self._failed_total = 0
         self._logger: Any = None
 
@@ -41,6 +43,52 @@ class RuntimeTaskSupervisor:
         self._records[normalized] = record
         task.add_done_callback(lambda done, key=normalized: self._finish(key, done))
         return task
+
+    def start_owned(
+        self,
+        owner: asyncio.Task[Any],
+        name: str,
+        factory: Callable[[], Awaitable[Any]],
+    ) -> asyncio.Task[Any]:
+        """Start a per-turn task without deduplicating unrelated owners."""
+        normalized = str(name or "").strip() or "unnamed"
+        task = asyncio.create_task(factory(), name=f"personification:{normalized}")
+        self._owned[task] = _TaskRecord(name=normalized, task=task, started_at=time.time())
+        task.add_done_callback(self._finish_owned)
+        def _cancel_with_owner(done: asyncio.Task[Any]) -> None:
+            if done.cancelled() and not task.done():
+                task.cancel()
+        owner.add_done_callback(_cancel_with_owner)
+        task.add_done_callback(lambda _done: owner.remove_done_callback(_cancel_with_owner))
+        return task
+
+    def _finish_owned(self, task: asyncio.Task[Any]) -> None:
+        record = self._owned.pop(task, None)
+        if record is None or task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:
+            self._failed_total += 1
+            try:
+                metrics.record_counter("runtime_task_failed_total", task=record.name)
+            except Exception as metric_error:  # noqa: BLE001 - telemetry is best effort after ownership is released
+                logging.getLogger(__name__).warning(
+                    "[runtime] 后台任务失败计数不可用 error_type=%s", type(metric_error).__name__,
+                )
+            logger = self._logger
+            if logger is not None:
+                try:
+                    logger.warning(
+                        "[runtime] 后台任务失败 task=%s error_type=%s",
+                        record.name, type(error).__name__,
+                    )
+                except Exception as log_error:  # noqa: BLE001 - avoid replacing the task's original failure
+                    logging.getLogger(__name__).warning(
+                        "[runtime] 后台任务诊断不可用 error_type=%s", type(log_error).__name__,
+                    )
 
     def _finish(self, name: str, task: asyncio.Task[Any]) -> None:
         record = self._records.get(name)
@@ -70,8 +118,10 @@ class RuntimeTaskSupervisor:
                     name,
                     type(error).__name__,
                 )
-            except Exception:
-                pass
+            except Exception as log_error:  # noqa: BLE001 - task reporting must not raise from its done callback
+                logging.getLogger(__name__).warning(
+                    "[runtime] 后台任务诊断不可用 error_type=%s", type(log_error).__name__,
+                )
 
     def snapshot(self) -> dict[str, Any]:
         now = time.time()
@@ -95,11 +145,13 @@ class RuntimeTaskSupervisor:
         return {
             "total": len(items),
             "supervised": items,
+            "owned_active": len(self._owned),
             "failed_total": self._failed_total,
         }
 
     async def shutdown(self, *, timeout: float = 5.0) -> None:
         active = [record.task for record in self._records.values() if not record.task.done()]
+        active.extend(task for task in self._owned if not task.done())
         for task in active:
             task.cancel()
         if active:
@@ -112,7 +164,7 @@ class RuntimeTaskSupervisor:
                 metrics.record_counter("runtime_task_shutdown_timeout_total")
 
     def reset_for_testing(self) -> None:
-        if any(not record.task.done() for record in self._records.values()):
+        if any(not record.task.done() for record in self._records.values()) or self._owned:
             raise RuntimeError("cannot reset while supervised tasks are running")
         self._records.clear()
         self._failed_total = 0

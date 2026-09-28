@@ -14,6 +14,7 @@ impl = load_personification_module(
     "plugin.personification.skills.skillpacks.tool_caller.scripts.impl"
 )
 punctuation = load_personification_module("plugin.personification.core.reply_punctuation")
+llm_context = load_personification_module("plugin.personification.core.llm_context")
 
 
 def test_buffered_assembler_waits_for_completed_and_joins_cross_chunk_tool_call() -> None:
@@ -208,7 +209,9 @@ def test_openai_caller_stream_error_falls_back_before_any_tool_or_delivery(monke
         async def create(self, **kwargs):
             calls.append(bool(kwargs.get("stream")))
             if kwargs.get("stream"):
-                raise RuntimeError("mock stream disconnected")
+                error = RuntimeError("stream endpoint unsupported")
+                error.status_code = 405
+                raise error
             return SimpleNamespace(
                 choices=[SimpleNamespace(message=SimpleNamespace(content="完整回复", tool_calls=[], annotations=[]))]
             )
@@ -225,10 +228,41 @@ def test_openai_caller_stream_error_falls_back_before_any_tool_or_delivery(monke
         model="test-model",
         streaming_mode="buffered",
     )
-    response = asyncio.run(caller.chat_with_tools([{"role": "user", "content": "hi"}], [], False))
+    async def run():
+        budget = llm_context.set_wire_budget(4)
+        try:
+            response = await caller.chat_with_tools([{"role": "user", "content": "hi"}], [], False)
+            return response, llm_context.wire_budget_remaining()
+        finally:
+            llm_context.reset_llm_context(budget)
+
+    response, remaining = asyncio.run(run())
     assert calls == [True, False]
+    assert remaining == 2
     assert response.content == "完整回复"
     assert response.tool_calls == []
+
+
+def test_openai_stream_runtime_error_does_not_open_second_request(monkeypatch) -> None:  # noqa: ANN001
+    calls: list[bool] = []
+
+    class Completions:
+        async def create(self, **kwargs):
+            calls.append(bool(kwargs.get("stream")))
+            raise RuntimeError("parser defect")
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=Completions())
+            self.responses = SimpleNamespace()
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(AsyncOpenAI=FakeAsyncOpenAI))
+    caller = impl.OpenAIToolCaller(
+        api_key="test", base_url="https://example.invalid/v1", model="m", streaming_mode="buffered",
+    )
+    with pytest.raises(RuntimeError, match="parser defect"):
+        asyncio.run(caller.chat_with_tools([{"role": "user", "content": "hi"}], [], False))
+    assert calls == [True]
 
 
 def test_openai_stream_creation_failure_increments_fallback_counter(monkeypatch) -> None:  # noqa: ANN001
@@ -237,7 +271,9 @@ def test_openai_stream_creation_failure_increments_fallback_counter(monkeypatch)
     class Completions:
         async def create(self, **kwargs):
             if kwargs.get("stream"):
-                raise RuntimeError("cannot create stream")
+                error = RuntimeError("stream endpoint unsupported")
+                error.status_code = 405
+                raise error
             return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="完整", tool_calls=[], annotations=[]))])
 
     class FakeAsyncOpenAI:

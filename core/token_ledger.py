@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import sqlite3
 import time
 import threading
 import uuid
@@ -21,6 +23,19 @@ _WINDOW_ALIASES = {
 }
 _GENERATION_LOCK = threading.Lock()
 _LEDGER_GENERATION = 0
+_USAGE_DIAGNOSTIC_LOCK = threading.Lock()
+_USAGE_DIAGNOSTIC_TYPES: set[str] = set()
+
+
+def _warn_usage_once(exc: Exception) -> None:
+    error_type = type(exc).__name__
+    with _USAGE_DIAGNOSTIC_LOCK:
+        if error_type in _USAGE_DIAGNOSTIC_TYPES:
+            return
+        _USAGE_DIAGNOSTIC_TYPES.add(error_type)
+    logging.getLogger(__name__).warning(
+        "[usage] token ledger write unavailable error_type=%s", error_type,
+    )
 
 
 def ledger_generation() -> int:
@@ -58,42 +73,44 @@ def record_response_usage(
     `purpose` 参数为空时从 contextvar 读，让 callers 既能 set_llm_context（推荐），
     也能直接调 record_response_usage(response, purpose="...") 一行搞定。
     """
+    usage = getattr(response, "usage", None) or {}
+    if not isinstance(usage, dict):
+        return False
+    if usage.get("usage_complete") is False:
+        return False
+    prompt_tokens = _required_token_count(usage.get("prompt_tokens", 0))
+    completion_tokens = _required_token_count(usage.get("completion_tokens", 0))
+    if prompt_tokens is None or completion_tokens is None:
+        return False
+    cache_read = _optional_token_count(usage.get("cache_read_input_tokens"))
+    cache_create = _optional_token_count(usage.get("cache_creation_input_tokens"))
+    cache_5m = _optional_token_count(usage.get("cache_creation_5m_input_tokens"))
+    cache_1h = _optional_token_count(usage.get("cache_creation_1h_input_tokens"))
+    if prompt_tokens == 0 and completion_tokens == 0 and not any(
+        value is not None and value > 0 for value in (cache_read, cache_create, cache_5m, cache_1h)
+    ):
+        return False
+    ctx = current_llm_context()
+    fields = dict(
+        model=str(getattr(response, "model_used", "") or model_fallback or ""),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        group_id=str(ctx.get("group_id", "") or ""),
+        user_id=str(ctx.get("user_id", "") or ""),
+        purpose=str(purpose or ctx.get("purpose", "") or "direct_call"),
+        bot_id=str(ctx.get("bot_id", "") or ""),
+        provider=str(usage.get("cache_provider") or getattr(response, "usage_provider", "") or provider or ""),
+        route_id=str(route_id or getattr(response, "usage_route_id", "") or ""),
+        event_id=str(getattr(response, "usage_event_id", "") or ""),
+        cache_read_tokens=cache_read,
+        cache_create_tokens=cache_create,
+        cache_create_5m_tokens=cache_5m,
+        cache_create_1h_tokens=cache_1h,
+    )
     try:
-        usage = getattr(response, "usage", None) or {}
-        if not isinstance(usage, dict):
-            return False
-        if usage.get("usage_complete") is False:
-            return False
-        prompt_tokens = _required_token_count(usage.get("prompt_tokens", 0))
-        completion_tokens = _required_token_count(usage.get("completion_tokens", 0))
-        if prompt_tokens is None or completion_tokens is None:
-            return False
-        cache_read = _optional_token_count(usage.get("cache_read_input_tokens"))
-        cache_create = _optional_token_count(usage.get("cache_creation_input_tokens"))
-        cache_5m = _optional_token_count(usage.get("cache_creation_5m_input_tokens"))
-        cache_1h = _optional_token_count(usage.get("cache_creation_1h_input_tokens"))
-        if prompt_tokens == 0 and completion_tokens == 0 and not any(
-            value is not None and value > 0 for value in (cache_read, cache_create, cache_5m, cache_1h)
-        ):
-            return False
-        ctx = current_llm_context()
-        return record_llm_call(
-            model=str(getattr(response, "model_used", "") or model_fallback or ""),
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            group_id=str(ctx.get("group_id", "") or ""),
-            user_id=str(ctx.get("user_id", "") or ""),
-            purpose=str(purpose or ctx.get("purpose", "") or "direct_call"),
-            bot_id=str(ctx.get("bot_id", "") or ""),
-            provider=str(usage.get("cache_provider") or getattr(response, "usage_provider", "") or provider or ""),
-            route_id=str(route_id or getattr(response, "usage_route_id", "") or ""),
-            event_id=str(getattr(response, "usage_event_id", "") or ""),
-            cache_read_tokens=cache_read,
-            cache_create_tokens=cache_create,
-            cache_create_5m_tokens=cache_5m,
-            cache_create_1h_tokens=cache_1h,
-        )
-    except Exception:
+        return record_llm_call(**fields)
+    except (sqlite3.Error, OSError) as exc:
+        _warn_usage_once(exc)
         return False
 
 
@@ -131,7 +148,7 @@ def _normalize_bucket_values(
         try:
             hour = datetime.strptime(raw_hour[:13], "%Y-%m-%d %H")
             return _day_str(hour), _hour_str(hour)
-        except Exception:
+        except ValueError:
             pass
 
     raw_day = str(bucket_day or "").strip()

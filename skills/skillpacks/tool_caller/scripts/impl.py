@@ -26,6 +26,7 @@ from plugin.personification.core.gemini_transport import (
 )
 from plugin.personification.core.llm_context import (
     current_llm_context,
+    reserve_wire_attempt,
     use_single_attempt_retry_policy,
     use_single_wire_attempt_policy,
 )
@@ -37,6 +38,7 @@ from plugin.personification.core.provider_types import (
     removed_provider_migration_hint,
 )
 from plugin.personification.core.time_ctx import build_current_time_context_block, inject_current_time_context
+from plugin.personification.core.call_compat import select_call_shape
 
 
 OPENAI_REASONING_MAP = {
@@ -340,6 +342,56 @@ _STREAM_SAFETY_BLOCKED_FINISH_REASONS = frozenset({
 
 class ProviderStreamSafetyBlocked(RuntimeError):
     """A provider explicitly blocked output; partial chunks must not escape."""
+
+
+def _stream_capability_rejection(exc: BaseException) -> bool:
+    """Accept only explicit upstream stream capability errors for a shape fallback."""
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in {405, 415, 501}:
+        return True
+    if status not in {400, 422}:
+        return False
+    code = str(getattr(exc, "code", "") or "").strip().lower()
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        detail = body.get("error") if isinstance(body.get("error"), dict) else body
+        code = str(detail.get("code") or detail.get("type") or code).strip().lower()
+    return code in {"stream_unsupported", "unsupported_stream", "streaming_not_supported"}
+
+
+def _request_shape_capability_rejection(exc: BaseException, capability: str) -> bool:
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in {405, 501} and capability == "responses_endpoint":
+        return True
+    if status not in {400, 422}:
+        return False
+    code = str(getattr(exc, "code", "") or "").strip().lower()
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        detail = body.get("error") if isinstance(body.get("error"), dict) else body
+        code = str(detail.get("code") or detail.get("type") or code).strip().lower()
+    codes = {
+        "responses_endpoint": {"unsupported_response_api", "unsupported_responses"},
+        "native_search": {"unsupported_builtin_search", "unsupported_web_search_options"},
+        "reasoning": {"unsupported_reasoning", "unsupported_reasoning_effort"},
+    }
+    return code in codes.get(capability, set())
+
+
+def _prepare_optional_sdk_argument(call: Any, payload: dict[str, Any], key: str) -> bool:
+    """Drop an unsupported optional SDK keyword before any wire dispatch."""
+    if key not in payload:
+        return False
+    without = {name: value for name, value in payload.items() if name != key}
+    _, selected = select_call_shape(call, [((), payload), ((), without)])
+    if key in selected:
+        return False
+    payload.pop(key)
+    return True
 
 
 def _stream_finish_is_safety_blocked(value: Any) -> bool:
@@ -1687,166 +1739,10 @@ def _response_to_dict(response: Any) -> dict:
     return {}
 
 
-_USAGE_PROMPT_KEYS = ("prompt_tokens", "input_tokens", "promptTokenCount", "promptTokens")
-_USAGE_COMPLETION_KEYS = ("completion_tokens", "output_tokens", "candidatesTokenCount", "completionTokens", "outputTokens")
-_USAGE_TOTAL_KEYS = ("total_tokens", "totalTokenCount", "totalTokens")
-_USAGE_CONTAINER_KEYS = ("usage", "usageMetadata", "usage_metadata")
-
-
-def _read_usage_value(source: Any, keys: tuple[str, ...]) -> int:
-    """从 dict / pydantic 对象任一支持的键名读 token 计数。"""
-    if isinstance(source, dict):
-        for key in keys:
-            if key in source and source[key] is not None:
-                try:
-                    return int(source[key])
-                except (TypeError, ValueError):
-                    return 0
-        return 0
-    for key in keys:
-        value = getattr(source, key, None)
-        if value is not None:
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                return 0
-    return 0
-
-
-def _read_optional_usage_value(source: Any, keys: tuple[str, ...]) -> int | None:
-    """Read a provider counter without conflating absence with an explicit zero."""
-    for key in keys:
-        if isinstance(source, dict):
-            if key not in source or source[key] is None:
-                continue
-            value = source[key]
-        else:
-            value = getattr(source, key, None)
-            if value is None:
-                continue
-        if isinstance(value, bool) or not isinstance(value, (int, str)):
-            return None
-        if isinstance(value, str) and not value.strip().isdigit():
-            return None
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            return None
-        return parsed if parsed >= 0 else None
-    return None
-
-
-def _read_usage_child(source: Any, keys: tuple[str, ...]) -> Any:
-    for key in keys:
-        if isinstance(source, dict):
-            if key in source and source[key] is not None:
-                return source[key]
-        else:
-            value = getattr(source, key, None)
-            if value is not None:
-                return value
-    return None
-
-
-def _extract_cache_usage(usage_obj: Any) -> dict[str, Any]:
-    """Normalize only cache counters explicitly reported by the provider.
-
-    A missing field stays missing so downstream telemetry cannot turn an
-    unsupported response shape into a false cache miss.  An explicit zero is
-    retained because it is a provider-confirmed miss for that response.
-    """
-
-    openai_details = _read_usage_child(
-        usage_obj,
-        ("prompt_tokens_details", "input_tokens_details", "promptTokensDetails", "inputTokensDetails"),
-    )
-    openai_read = _read_optional_usage_value(openai_details, ("cached_tokens", "cachedTokens"))
-    if openai_read is not None:
-        return {
-            "cache_provider": "openai",
-            "cache_read_input_tokens": openai_read,
-        }
-
-    anthropic_read = _read_optional_usage_value(
-        usage_obj, ("cache_read_input_tokens", "cacheReadInputTokens")
-    )
-    anthropic_create = _read_optional_usage_value(
-        usage_obj, ("cache_creation_input_tokens", "cacheCreationInputTokens")
-    )
-    if anthropic_read is not None or anthropic_create is not None:
-        result: dict[str, Any] = {"cache_provider": "anthropic"}
-        if anthropic_read is not None:
-            result["cache_read_input_tokens"] = anthropic_read
-        if anthropic_create is not None:
-            result["cache_creation_input_tokens"] = anthropic_create
-        creation = _read_usage_child(usage_obj, ("cache_creation",))
-        for source_key, target_key in (
-            ("ephemeral_5m_input_tokens", "cache_creation_5m_input_tokens"),
-            ("ephemeral_1h_input_tokens", "cache_creation_1h_input_tokens"),
-        ):
-            count = _read_optional_usage_value(creation, (source_key,))
-            if count is not None:
-                result[target_key] = count
-        return result
-
-    gemini_read = _read_optional_usage_value(
-        usage_obj, ("cachedContentTokenCount", "cached_content_token_count")
-    )
-    if gemini_read is not None:
-        return {
-            "cache_provider": "gemini",
-            "cache_read_input_tokens": gemini_read,
-        }
-    return {}
-
-
-def _extract_usage(response: Any) -> dict:
-    """从任意 LLM provider 响应提取 token 用量。
-
-    兼容三种字段命名族：
-      - OpenAI:    prompt_tokens / completion_tokens / total_tokens
-      - Anthropic: input_tokens / output_tokens
-      - Gemini:    promptTokenCount / candidatesTokenCount / totalTokenCount
-
-    兼容三种容器键：response.usage / response.usageMetadata / response.usage_metadata
-    （chat.completions、Responses、generateContent 三套 API 各用一种）
-
-    response 可以是 dict、Pydantic 对象、嵌套结构。无法定位时返回 {}。
-    """
-    try:
-        usage_obj: Any = None
-        for container_key in _USAGE_CONTAINER_KEYS:
-            if isinstance(response, dict):
-                if container_key in response and response[container_key] is not None:
-                    usage_obj = response[container_key]
-                    break
-            else:
-                candidate = getattr(response, container_key, None)
-                if candidate is not None:
-                    usage_obj = candidate
-                    break
-        if usage_obj is None:
-            return {}
-        prompt = _read_usage_value(usage_obj, _USAGE_PROMPT_KEYS)
-        completion = _read_usage_value(usage_obj, _USAGE_COMPLETION_KEYS)
-        total = _read_usage_value(usage_obj, _USAGE_TOTAL_KEYS) or (prompt + completion)
-        cache_usage = _extract_cache_usage(usage_obj)
-        if prompt == 0 and completion == 0 and total == 0 and not cache_usage:
-            return {}
-        result = {
-            "prompt_tokens": prompt,
-            "completion_tokens": completion,
-            "total_tokens": total,
-        }
-        # Keep legacy numeric fields for telemetry, but never price a missing or
-        # malformed required counter as a provider-confirmed zero.
-        if (_read_optional_usage_value(usage_obj, _USAGE_PROMPT_KEYS) is None
-                or _read_optional_usage_value(usage_obj, _USAGE_COMPLETION_KEYS) is None):
-            result["usage_complete"] = False
-        result.update(cache_usage)
-        return result
-    except Exception:
-        return {}
+from .usage_normalization import (
+    _read_usage_value, _read_optional_usage_value, _read_usage_child,
+    _extract_cache_usage, _extract_usage,
+)
 
 
 def _anthropic_tool_use_blocks(tool_calls: Any) -> List[dict]:
@@ -1989,6 +1885,8 @@ class OpenAIToolCaller(ToolCaller):
                     reasoning = _maybe_openai_reasoning(self.model, self.thinking_mode)
                     if reasoning and self._supports_reasoning is not False:
                         payload["reasoning"] = reasoning
+                    if _prepare_optional_sdk_argument(client.responses.create, payload, "reasoning"):
+                        self._supports_reasoning = False
 
                     try:
                         if self.streaming_mode == "buffered":
@@ -1999,6 +1897,7 @@ class OpenAIToolCaller(ToolCaller):
                                     status="info",
                                     detail=f"provider=openai_responses model={str(self.model or '')[:96]} route_supported=true",
                                 )
+                                reserve_wire_attempt()
                                 async with client.responses.stream(**payload) as response_stream:
                                     stream_created = True
                                     streamed_response = await _assemble_openai_responses_stream(
@@ -2010,7 +1909,9 @@ class OpenAIToolCaller(ToolCaller):
                                 return streamed_response
                             except (asyncio.CancelledError, KeyboardInterrupt):
                                 raise
-                            except Exception:
+                            except Exception as exc:
+                                if stream_created or use_single_attempt_retry_policy() or not _stream_capability_rejection(exc):
+                                    raise
                                 if not stream_created:
                                     _record_stream_fallback(route_supported=True)
                                 # Gateways frequently advertise Responses but
@@ -2018,6 +1919,7 @@ class OpenAIToolCaller(ToolCaller):
                                 # with built-in search. No tool has run yet.
                                 _stream_trace_stage("provider_stream_fallback", status="warn", detail="route_supported=false diagnostic_code=stream_unsupported")
                         self.last_probe_request_shape = _probe_request_shape(payload, "responses")
+                        reserve_wire_attempt()
                         response = await client.responses.create(**payload)
                         response_data = _response_to_dict(response)
                         content, tool_calls, used_builtin_search = _parse_openai_responses_output(response_data)
@@ -2036,36 +1938,9 @@ class OpenAIToolCaller(ToolCaller):
                                 else None
                             ),
                         )
-                    except TypeError as e:
-                        error_msg = str(e).lower()
-                        if "reasoning" in error_msg and "unexpected keyword" in error_msg:
-                            payload.pop("reasoning", None)
-                            self._supports_reasoning = False
-                            try:
-                                self.last_probe_request_shape = _probe_request_shape(payload, "responses")
-                                response = await client.responses.create(**payload)
-                                response_data = _response_to_dict(response)
-                                content, tool_calls, used_builtin_search = _parse_openai_responses_output(response_data)
-                                return ToolCallerResponse(
-                                    finish_reason="tool_calls" if tool_calls else "stop",
-                                    content=content,
-                                    tool_calls=tool_calls,
-                                    raw=response,
-                                    used_builtin_search=used_builtin_search,
-                                    usage=_extract_usage(response),
-                                    model_used=str(self.model or ""),
-                                    wire_tools_count=wire_tools_count,
-                                    provider_history=(
-                                        copy.deepcopy(list(response_data.get("output", []) or []))
-                                        if tool_calls
-                                        else None
-                                    ),
-                                )
-                            except Exception:
-                                responses_failed = True
-                        else:
+                    except Exception as exc:
+                        if use_single_attempt_retry_policy() or not _request_shape_capability_rejection(exc, "responses_endpoint"):
                             raise
-                    except Exception:
                         responses_failed = True
 
                 chat_supports_native_search = use_builtin_search and _openai_chat_search_model(self.model)
@@ -2109,6 +1984,8 @@ class OpenAIToolCaller(ToolCaller):
                     use_original_tools=(not use_builtin_search) or responses_failed,
                 )
                 wire_tools_count = len(list(payload.get("tools") or []))
+                if _prepare_optional_sdk_argument(client.chat.completions.create, payload, "reasoning_effort"):
+                    self._supports_reasoning = False
 
                 try:
                     if self.streaming_mode == "buffered":
@@ -2120,6 +1997,7 @@ class OpenAIToolCaller(ToolCaller):
                                 detail=f"provider=openai model={str(self.model or '')[:96]} route_supported=true",
                             )
                             self.last_probe_request_shape = _probe_request_shape(payload, "chat_completions")
+                            reserve_wire_attempt()
                             provider_stream = await client.chat.completions.create(**payload, stream=True)
                             stream_created = True
                             response = await _assemble_openai_chat_stream(
@@ -2135,7 +2013,9 @@ class OpenAIToolCaller(ToolCaller):
                             return response
                         except (asyncio.CancelledError, KeyboardInterrupt):
                             raise
-                        except Exception:
+                        except Exception as exc:
+                            if stream_created or use_single_attempt_retry_policy() or not _stream_capability_rejection(exc):
+                                raise
                             if not stream_created:
                                 _record_stream_fallback(route_supported=True)
                             # No tool or visible QQ output has happened: falling back
@@ -2146,26 +2026,14 @@ class OpenAIToolCaller(ToolCaller):
                                 detail="route_supported=true diagnostic_code=provider_stream_fallback",
                             )
                     self.last_probe_request_shape = _probe_request_shape(payload, "chat_completions")
+                    reserve_wire_attempt()
                     response = await client.chat.completions.create(**payload)
-                except TypeError as e:
-                    error_msg = str(e).lower()
-                    if "reasoning" in error_msg and "unexpected keyword" in error_msg:
-                        payload.pop("reasoning_effort", None)
-                        self._supports_reasoning = False
-                        self.last_probe_request_shape = _probe_request_shape(payload, "chat_completions")
-                        response = await client.chat.completions.create(**payload)
-                    elif use_builtin_search and chat_supports_native_search and not responses_failed:
+                except Exception as exc:
+                    if use_builtin_search and chat_supports_native_search and not responses_failed and not use_single_attempt_retry_policy() and _request_shape_capability_rejection(exc, "native_search"):
                         payload = _build_chat_payload(use_native_search=False, use_original_tools=True)
                         wire_tools_count = len(list(payload.get("tools") or []))
                         self.last_probe_request_shape = _probe_request_shape(payload, "chat_completions")
-                        response = await client.chat.completions.create(**payload)
-                    else:
-                        raise
-                except Exception:
-                    if use_builtin_search and chat_supports_native_search and not responses_failed:
-                        payload = _build_chat_payload(use_native_search=False, use_original_tools=True)
-                        wire_tools_count = len(list(payload.get("tools") or []))
-                        self.last_probe_request_shape = _probe_request_shape(payload, "chat_completions")
+                        reserve_wire_attempt()
                         response = await client.chat.completions.create(**payload)
                     else:
                         raise
@@ -2285,6 +2153,7 @@ class GeminiToolCaller(ToolCaller):
                         stream_url = f"{self.base_url.rstrip('/')}/models/{self.model}:streamGenerateContent?alt=sse"
                         auth = gemini_auth_payload(self.api_key, self.auth_mode)
                         _stream_trace_stage("provider_stream_started", status="info", detail=f"provider=gemini model={str(self.model or '')[:96]} route_supported=true")
+                        reserve_wire_attempt()
                         async with client.stream(
                             "POST", stream_url,
                             headers={"Content-Type": "application/json", **auth.headers},
@@ -2303,11 +2172,14 @@ class GeminiToolCaller(ToolCaller):
                         return streamed
                     except (asyncio.CancelledError, KeyboardInterrupt):
                         raise
-                    except Exception:
+                    except Exception as exc:
+                        if assembler_entered or use_single_attempt_retry_policy() or not _stream_capability_rejection(exc):
+                            raise
                         if not assembler_entered:
                             _record_stream_fallback(route_supported=True)
                         _stream_trace_stage("provider_stream_fallback", status="warn", detail="route_supported=true diagnostic_code=provider_stream_fallback")
                 async def _send(auth):  # noqa: ANN001, ANN202
+                    reserve_wire_attempt()
                     return await client.post(
                         url,
                         headers={"Content-Type": "application/json", **auth.headers},
@@ -2482,6 +2354,7 @@ class AnthropicToolCaller(ToolCaller):
 
             if self.streaming_mode == "buffered":
                 assembler: BufferedToolResponseAssembler | None = None
+                stream_entered = False
                 try:
                     _stream_trace_stage(
                         "provider_stream_started", status="info",
@@ -2491,7 +2364,9 @@ class AnthropicToolCaller(ToolCaller):
                         model_used=str(self.model or ""), wire_tools_count=wire_tools_count
                     )
                     _PROVIDER_STREAMING_TELEMETRY.started(mode="buffered", route_supported=True)
+                    reserve_wire_attempt()
                     async with client.messages.stream(**payload) as stream:
+                        stream_entered = True
                         async for event in stream:
                             event_type = str(_obj_get(event, "type", "") or "")
                             if event_type == "content_block_start":
@@ -2544,16 +2419,20 @@ class AnthropicToolCaller(ToolCaller):
                             assembler.snapshot(mode="buffered", route_supported=True), fallback=False
                         )
                     raise
-                except Exception:
+                except Exception as exc:
                     # The tool loop has not observed a response yet, therefore
                     # the existing complete request can safely take over.
+                    can_fallback = not stream_entered and not use_single_attempt_retry_policy() and _stream_capability_rejection(exc)
                     if assembler is not None:
                         assembler.record_interrupted_usage()
                         _PROVIDER_STREAMING_TELEMETRY.finished(
-                            assembler.snapshot(mode="buffered", route_supported=True), fallback=True
+                            assembler.snapshot(mode="buffered", route_supported=True), fallback=can_fallback
                         )
+                    if not can_fallback:
+                        raise
                     _stream_trace_stage("provider_stream_fallback", status="warn", detail="route_supported=true diagnostic_code=provider_stream_fallback")
             self.last_probe_request_shape = _probe_request_shape(payload, "anthropic")
+            reserve_wire_attempt()
             response = await client.messages.create(**payload)
 
             content_blocks = list(_obj_get(response, "content", []) or [])
@@ -3131,6 +3010,7 @@ class OpenAICodexToolCaller(ToolCaller):
                     ),
                     **client_kwargs,
                 )
+                reserve_wire_attempt()
                 async with client.stream(
                     "POST",
                     _CODEX_API_ENDPOINT,
@@ -3144,6 +3024,17 @@ class OpenAICodexToolCaller(ToolCaller):
                     content_type = (resp.headers.get("content-type", "") or "").lower()
                     if resp.is_error:
                         detail = (await resp.aread()).decode("utf-8", errors="ignore").strip()
+                        upstream_code = ""
+                        try:
+                            error_body = json.loads(detail)
+                            if isinstance(error_body, dict):
+                                nested = error_body.get("error")
+                                if isinstance(nested, dict):
+                                    upstream_code = str(nested.get("code") or nested.get("type") or "").strip().lower()
+                                else:
+                                    upstream_code = str(error_body.get("code") or "").strip().lower()
+                        except json.JSONDecodeError:
+                            pass
                         lowered_detail = detail.lower()
                         if contains_image_input and resp.status_code in {400, 403, 404, 415, 422} and any(
                             token in lowered_detail
@@ -3158,13 +3049,19 @@ class OpenAICodexToolCaller(ToolCaller):
                                 vision_unavailable=True,
                             )
                         if resp.status_code == 400:
-                            raise RuntimeError(
+                            error = RuntimeError(
                                 "Codex 请求返回 400。请确认 model 使用 Codex 可用模型（如 gpt-5.3-codex），"
                                 f"当前 model={self.model}。服务端返回: {detail[:600]}"
                             )
-                        raise RuntimeError(
+                            error.status_code = resp.status_code
+                            error.upstream_code = upstream_code[:80]
+                            raise error
+                        error = RuntimeError(
                             f"Codex 请求失败 HTTP {resp.status_code}: {detail[:600]}"
                         )
+                        error.status_code = resp.status_code
+                        error.upstream_code = upstream_code[:80]
+                        raise error
 
                     if "text/event-stream" in content_type:
                         lines: List[str] = []
@@ -3196,9 +3093,11 @@ class OpenAICodexToolCaller(ToolCaller):
                 if attempt == 0 and not use_single_wire_attempt_policy():
                     await asyncio.sleep(0.8)
                     continue
-                raise RuntimeError(
+                error = RuntimeError(
                     f"Codex 连接不稳定，服务器在响应前断开: {type(e).__name__}: {e}"
-                ) from e
+                )
+                error.code = "provider_network_failed"
+                raise error from e
             except Exception as e:
                 last_error = e
                 if (
@@ -3542,14 +3441,16 @@ class OpenAICodexToolCaller(ToolCaller):
         try:
             data = await self._request_codex_response(payload, access_token=access_token)
         except Exception as exc:
-            error_text = str(exc).lower()
-            if "model" in error_text:
+            rejection = getattr(exc, "status_code", None) in {400, 422}
+            upstream_code = str(getattr(exc, "upstream_code", "") or "").lower()
+            if rejection and upstream_code in {"unsupported_image_model", "unsupported_model_parameter"} and not use_single_attempt_retry_policy():
                 fallback_tool = dict(image_tool)
                 fallback_tool.pop("model", None)
                 payload = dict(payload)
                 payload["tools"] = [fallback_tool]
                 data = await self._request_codex_response(payload, access_token=access_token)
-            elif use_reference_images and mode in {"auto", ""}:
+                reference_warning = "requested image model was rejected; generated with provider default model"
+            elif rejection and upstream_code in {"unsupported_reference_image", "unsupported_input_image"} and use_reference_images and mode in {"auto", ""} and not use_single_attempt_retry_policy():
                 fallback_messages = [
                     {
                         "role": "user",
@@ -3558,8 +3459,7 @@ class OpenAICodexToolCaller(ToolCaller):
                             "Use the image_generation tool and return no prose-only substitute.\n"
                             f"Requested image model: {requested_image_model}.\n"
                             f"Requested aspect/size: {size_hint} ({requested_size}).\n"
-                            "Reference image mode: unavailable; generate from the text prompt only.\n"
-                            f"Reference image pass-through failed: {str(exc)[:240]}\n"
+                            "Reference image mode: rejected by provider; generate from text only.\n"
                             f"Prompt: {prompt_text}"
                         ),
                     }
@@ -4692,6 +4592,7 @@ class GeminiCliToolCaller(ToolCaller):
                         "project": _project,
                         "request": request_obj,
                     }
+                    reserve_wire_attempt()
                     resp = await client.post(
                         _GEMINI_CLI_GENERATE_ENDPOINT,
                         json=envelope_inner,
@@ -5343,6 +5244,7 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
                     last_network_exc: Exception | None = None
                     for attempt in range(1 if use_single_wire_attempt_policy() else 4):
                         try:
+                            reserve_wire_attempt()
                             resp = await client.post(
                                 _ANTIGRAVITY_CLI_STREAM_ENDPOINT,
                                 json=envelope_inner,

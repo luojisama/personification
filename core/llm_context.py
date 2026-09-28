@@ -11,6 +11,7 @@ _LLM_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.Contex
 LLM_RETRY_POLICY_SINGLE_ATTEMPT = "single_attempt"
 LLM_MAX_WIRE_ATTEMPTS = 4
 _WIRE_RETRY_DISABLED = "wire_retry_disabled"
+_WIRE_BUDGET = "wire_budget"
 
 
 def set_llm_context(
@@ -63,15 +64,38 @@ def set_wire_retry_disabled(*, usage_route_id: str = "", usage_provider: str = "
     """Disable SDK transport retries for exactly one outer wire attempt.
 
     This deliberately differs from ``single_attempt``: the latter also owns
-    probe/QZone request-shape compatibility rules, while this flag merely
-    prevents an SDK's hidden retry loop from multiplying the route retry
-    budget.
+    probe/QZone request-shape compatibility rules. Explicit shape negotiation
+    can reserve another request from the shared outer budget.
     """
     value = dict(current_llm_context())
     value[_WIRE_RETRY_DISABLED] = True
     value["usage_route_id"] = usage_route_id
     value["usage_provider"] = usage_provider
     return _LLM_CONTEXT.set(value)
+
+
+def set_wire_budget(max_attempts: int) -> contextvars.Token:
+    value = dict(current_llm_context())
+    value[_WIRE_BUDGET] = {"remaining": max(1, int(max_attempts))}
+    return _LLM_CONTEXT.set(value)
+
+
+def wire_budget_remaining() -> int | None:
+    budget = current_llm_context().get(_WIRE_BUDGET)
+    return int(budget["remaining"]) if isinstance(budget, dict) else None
+
+
+def reserve_wire_attempt() -> None:
+    """Reserve one actual provider generation request before dispatch."""
+    budget = current_llm_context().get(_WIRE_BUDGET)
+    if not isinstance(budget, dict):
+        return
+    if budget["remaining"] <= 0:
+        error = RuntimeError("provider wire attempt budget exhausted")
+        error.code = "provider_request_budget_exhausted"
+        error.retryable = False
+        raise error
+    budget["remaining"] -= 1
 
 
 def set_llm_purpose(purpose: str) -> contextvars.Token:
@@ -138,6 +162,9 @@ __all__ = [
     "current_llm_context",
     "use_single_attempt_retry_policy",
     "set_wire_retry_disabled",
+    "set_wire_budget",
+    "wire_budget_remaining",
+    "reserve_wire_attempt",
     "set_llm_purpose",
     "set_llm_retry_policy",
     "use_single_wire_attempt_policy",

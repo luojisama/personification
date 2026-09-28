@@ -97,6 +97,7 @@ from .tool_args import (
     _tool_allows_parameter,
 )
 from .budgeting import apply_agent_budget_profile, derive_agent_budget_profile, render_agent_budget_trace_detail
+from .background_learning import start_active_learning_task
 from .final_synthesis import AgentResult, direct_tool_result_agent_result, synthesize_max_steps_result
 from .tool_catalog import tool_runtime_metadata
 from .tool_contracts import recommended_tools_for_chat_intent
@@ -171,29 +172,6 @@ async def _await_with_deadline(
     if remaining <= 0.0:
         raise asyncio.TimeoutError
     return await asyncio.wait_for(factory(), timeout=remaining)
-
-
-async def _spawn_active_learning(
-    *,
-    tool_caller: Any,
-    memory_store: Any,
-    uncertainty_notes: list[str],
-    group_id: str,
-    research_followup_query: str,
-    plugin_config: Any,
-) -> None:
-    try:
-        from ...core.active_learning import run_active_learning
-        await run_active_learning(
-            tool_caller=tool_caller,
-            memory_store=memory_store,
-            uncertainty_notes=uncertainty_notes,
-            group_id=group_id,
-            research_followup_query=research_followup_query,
-            plugin_config=plugin_config,
-        )
-    except Exception:
-        pass
 
 
 def _maybe_inject_date_to_query(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -944,18 +922,16 @@ async def run_agent(
             try:
                 group_scope = str(context_hint or "").replace("group:", "").split(",")[0].strip() or "unknown"
                 _learning_query = str(evidence.research_followup_query or evidence.uncertainty_notes[0]).strip()
-                asyncio.create_task(
-                    _spawn_active_learning(
-                        tool_caller=tool_caller,
-                        memory_store=getattr(executor, "memory_store", None),
-                        uncertainty_notes=evidence.uncertainty_notes,
-                        group_id=group_scope,
-                        research_followup_query=_learning_query,
-                        plugin_config=plugin_config,
-                    )
+                start_active_learning_task(
+                    tool_caller=tool_caller,
+                    memory_store=getattr(executor, "memory_store", None),
+                    uncertainty_notes=list(evidence.uncertainty_notes),
+                    group_id=group_scope,
+                    research_followup_query=_learning_query,
+                    plugin_config=plugin_config,
                 )
-            except Exception:
-                pass
+            except RuntimeError as exc:
+                logger.warning("[learning] active learning task unavailable error_type=%s", type(exc).__name__)
         return evidence
 
     for _step in range(effective_max_steps):

@@ -107,6 +107,7 @@ def test_routed_tool_caller_response_route_survives_duplicate_call_ids() -> None
         raw={},
     )
     route_error = RuntimeError("route unavailable")
+    route_error.status_code = 400
     primary = _FakeCaller("primary", [first_response, route_error])
     fallback = _FakeCaller("fallback", [second_response])
     routed = ai_routes.RoutedToolCaller(
@@ -246,7 +247,9 @@ def test_routed_tool_caller_keeps_safety_retry_pinned() -> None:
     valid = tool_impl.ToolCallerResponse(
         finish_reason="stop", content="原 caller 恢复", tool_calls=[], raw={}
     )
-    primary = _FakeCaller("primary", [AssertionError("pinning was lost")])
+    upstream_error = RuntimeError("route unavailable")
+    upstream_error.status_code = 400
+    primary = _FakeCaller("primary", [upstream_error])
     fallback = _FakeCaller("fallback", [valid, blocked, valid])
     routed = ai_routes.RoutedToolCaller(
         primary_callers=[primary], fallback_caller=fallback, logger=None
@@ -813,7 +816,7 @@ def test_routed_tool_caller_vision_fallback_success_pins_synthetic_continuation(
     assert "code=provider_vision_unavailable" in str(request_stages[0]["detail"])
 
 
-def test_runtime_builder_wraps_legacy_caller_when_provider_list_is_empty(monkeypatch) -> None:  # noqa: ANN001
+def test_runtime_builder_propagates_unclassified_legacy_caller_error(monkeypatch) -> None:  # noqa: ANN001
     raw_error = RuntimeError("private raw provider error")
     legacy = _FakeCaller("legacy", [raw_error])
     monkeypatch.setattr(ai_routes, "_get_primary_provider_list", lambda *_args: [])
@@ -828,10 +831,9 @@ def test_runtime_builder_wraps_legacy_caller_when_provider_list_is_empty(monkeyp
     caller = ai_routes.build_routed_tool_caller(SimpleNamespace(), logger=None)
 
     assert isinstance(caller, ai_routes.RoutedToolCaller)
-    with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+    with pytest.raises(RuntimeError) as caught:
         asyncio.run(caller.chat_with_tools([], [], False))
-    assert caught.value.code == "provider_call_failed"
-    assert "private raw provider error" not in str(caught.value.route_attempts)
+    assert caught.value is raw_error
 
 
 def test_qzone_probe_uses_response_scoped_route_state() -> None:
@@ -953,6 +955,81 @@ def test_single_attempt_policy_disables_outer_retry() -> None:
         llm_context.reset_llm_context(token)
 
     assert len(caller.calls_seen) == 1
+
+
+@pytest.mark.parametrize("failure", [TypeError("internal defect"), RuntimeError("internal timeout parser defect")])
+def test_internal_provider_caller_error_does_not_retry_or_switch_route(failure: Exception) -> None:
+    primary = _FakeCaller("primary", [failure])
+    fallback = _FakeCaller("fallback", [_valid_response("must not run")])
+    routed = ai_routes.RoutedToolCaller(primary_callers=[primary], fallback_caller=fallback, logger=None)
+    with pytest.raises(type(failure)) as caught:
+        asyncio.run(routed.chat_with_tools([], [], False))
+    assert caught.value is failure
+    assert len(primary.calls_seen) == 1
+    assert fallback.calls_seen == []
+
+
+def test_native_token_counter_internal_typeerror_runs_once() -> None:
+    calls = 0
+
+    def count_tokens(*, messages, tools):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        raise TypeError("internal counter defect")
+
+    with pytest.raises(TypeError, match="internal counter defect"):
+        asyncio.run(ai_routes.RoutedToolCaller._optional_native_token_count(
+            object(), SimpleNamespace(count_tokens=count_tokens), [], [],
+        ))
+    assert calls == 1
+
+
+def test_shared_wire_budget_counts_shape_fallback_and_outer_retries(monkeypatch) -> None:  # noqa: ANN001
+    calls = 0
+
+    class NegotiatingCaller(_FakeCaller):
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            nonlocal calls
+            # Each outer call first reaches a rejected stream endpoint, then
+            # retries the documented complete-response shape.
+            llm_context.reserve_wire_attempt()
+            calls += 1
+            llm_context.reserve_wire_attempt()
+            calls += 1
+            raise _http_error(503)
+
+    caller = NegotiatingCaller("primary", [])
+    routed = ai_routes.RoutedToolCaller(primary_callers=[caller], fallback_caller=None, logger=None)
+    async def no_sleep(_delay: float) -> None:
+        return None
+    monkeypatch.setattr(ai_routes.asyncio, "sleep", no_sleep)
+    with pytest.raises(ai_routes.RoutedToolCallerError):
+        asyncio.run(routed.chat_with_tools([], [], False))
+    assert calls == 4
+
+
+def test_single_attempt_budget_rejects_second_wire() -> None:
+    calls = 0
+
+    class OverreachingCaller(_FakeCaller):
+        async def chat_with_tools(self, messages, tools, use_builtin_search):  # noqa: ANN001
+            nonlocal calls
+            llm_context.reserve_wire_attempt()
+            calls += 1
+            llm_context.reserve_wire_attempt()
+            calls += 1
+            return _valid_response()
+
+    caller = OverreachingCaller("primary", [])
+    routed = ai_routes.RoutedToolCaller(primary_callers=[caller], fallback_caller=None, logger=None)
+    token = llm_context.set_llm_context(purpose="capability_probe", retry_policy=llm_context.LLM_RETRY_POLICY_SINGLE_ATTEMPT)
+    try:
+        with pytest.raises(ai_routes.RoutedToolCallerError) as caught:
+            asyncio.run(routed.chat_with_tools([], [], False))
+    finally:
+        llm_context.reset_llm_context(token)
+    assert calls == 1
+    assert caught.value.code == "provider_request_budget_exhausted"
 
 
 def test_outer_wire_attempt_disables_sdk_retry_without_disabling_shape_policy() -> None:

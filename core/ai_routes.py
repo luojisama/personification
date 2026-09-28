@@ -6,8 +6,10 @@ import asyncio
 import hashlib
 import inspect
 import json
+import logging
 import threading
 import time
+import httpx
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional
 
@@ -17,8 +19,10 @@ from .llm_context import (
     remember_successful_route,
     reset_llm_context,
     set_wire_retry_disabled,
+    set_wire_budget,
     successful_route_key,
     use_single_attempt_retry_policy,
+    wire_budget_remaining,
 )
 from .gemini_transport import safe_upstream_diagnostics
 from .context_budget import ContextBudget, fit_request_to_budget, record_usage_calibration, request_token_categories, route_estimation_multiplier
@@ -34,6 +38,18 @@ from .tool_schema_compat import classify_schema_rejection, prepare_tools_for_pro
 
 _EMITTED_ROUTE_WARNINGS: set[str] = set()
 _ROUTE_WARNING_LOCK = threading.RLock()
+_NATIVE_COUNT_WARNED_TYPES: set[str] = set()
+
+
+def _warn_native_count_failure(exc: Exception) -> None:
+    error_type = type(exc).__name__
+    with _ROUTE_WARNING_LOCK:
+        if error_type in _NATIVE_COUNT_WARNED_TYPES:
+            return
+        _NATIVE_COUNT_WARNED_TYPES.add(error_type)
+    logging.getLogger(__name__).warning(
+        "[provider] native token counter unavailable error_type=%s", error_type,
+    )
 _CANONICAL_PROVIDER_CODES = {
     "provider_auth_failed",
     "provider_call_failed",
@@ -45,6 +61,7 @@ _CANONICAL_PROVIDER_CODES = {
     "provider_network_failed",
     "provider_permission_denied",
     "provider_request_rejected",
+    "provider_request_budget_exhausted",
     "provider_safety_block",
     "provider_timeout",
     "provider_type_removed",
@@ -308,6 +325,42 @@ def _exception_route_metadata(exc: BaseException) -> tuple[int, str, bool, str, 
         auth_mode[:48],
         max(1, request_count),
     )
+
+
+def _is_provider_failure(exc: Exception) -> bool:
+    """Only upstream failures may select another route.
+
+    A plain TypeError/RuntimeError from request preparation or a caller is an
+    implementation fault; labelling it as a provider outage hides the cause
+    and can issue an unrelated second request.
+    """
+    current: BaseException | None = exc
+    if isinstance(exc, (TypeError, AttributeError, AssertionError, NameError, KeyError)):
+        return False
+    sdk_error_types: list[type[BaseException]] = []
+    try:
+        from openai import APIError as OpenAIAPIError
+        sdk_error_types.append(OpenAIAPIError)
+    except ImportError:
+        pass
+    try:
+        from anthropic import APIError as AnthropicAPIError
+        sdk_error_types.append(AnthropicAPIError)
+    except ImportError:
+        pass
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(seen) < 6:
+        seen.add(id(current))
+        if str(getattr(current, "code", "") or "").strip().lower() in _CANONICAL_PROVIDER_CODES | _MODEL_UNAVAILABLE_ERROR_CODES:
+            return True
+        if getattr(current, "status_code", None) is not None or getattr(getattr(current, "response", None), "status_code", None) is not None:
+            return True
+        if isinstance(current, (TimeoutError, ConnectionError, httpx.TransportError, httpx.HTTPStatusError)):
+            return True
+        if sdk_error_types and isinstance(current, tuple(sdk_error_types)):
+            return True
+        current = current.__cause__
+    return False
 
 
 def _exception_wire_tools_count(exc: BaseException) -> int | None:
@@ -1300,8 +1353,8 @@ class RoutedToolCaller:
 
         # Record each completed wire attempt, including rejected responses,
         # before retry/fallback decisions can discard its reported usage.
-        try:
-            if response is not None:
+        if response is not None:
+            try:
                 from .token_ledger import record_response_usage
 
                 usage_route = self._caller_route_descriptors.get(id(caller), {})
@@ -1313,8 +1366,10 @@ class RoutedToolCaller:
                     route_id=response.usage_route_id,
                     provider=response.usage_provider,
                 )
-        except Exception:
-            pass
+            except (OSError, ValueError) as exc:
+                logging.getLogger(__name__).warning(
+                    "[provider] usage projection failed error_type=%s", type(exc).__name__,
+                )
 
         try:
             descriptor = self._caller_route_descriptors.get(
@@ -1458,18 +1513,26 @@ class RoutedToolCaller:
             raise
         finally:
             reset_llm_context(wire_retry_token)
-            self._record_provider_request(
-                caller,
-                request_shape=request_shape,
-                elapsed_ms=max(0, int((time.monotonic() - started_at) * 1000)),
-                response=response,
-                error=error,
-                cancelled=cancelled,
-                reframe=reframe,
-            )
+            try:
+                self._record_provider_request(
+                    caller,
+                    request_shape=request_shape,
+                    elapsed_ms=max(0, int((time.monotonic() - started_at) * 1000)),
+                    response=response,
+                    error=error,
+                    cancelled=cancelled,
+                    reframe=reframe,
+                )
+            except Exception as diagnostic_error:
+                if error is None and not cancelled:
+                    raise
+                logging.getLogger(__name__).warning(
+                    "[provider] diagnostic failed after request error_type=%s",
+                    type(diagnostic_error).__name__,
+                )
 
-    @staticmethod
     async def _optional_native_token_count(
+        self,
         caller: ToolCaller,
         messages: list[dict],
         tools: list[dict],
@@ -1478,22 +1541,26 @@ class RoutedToolCaller:
         counter = getattr(caller, "count_tokens", None)
         if not callable(counter):
             return {"token_count_source": "estimate"}
+        from .call_compat import select_call_shape
+        args, kwargs = select_call_shape(counter, [
+            ((), {"messages": messages, "tools": tools}),
+            ((messages, tools), {}),
+        ])
         try:
-            value = counter(messages=messages, tools=tools)
-        except TypeError:
-            try:
-                value = counter(messages, tools)
-            except Exception:
-                return {"token_count_source": "estimate"}
-        except Exception:
-            return {"token_count_source": "estimate"}
-        try:
+            value = counter(*args, **kwargs)
             if inspect.isawaitable(value):
                 value = await value
+        except Exception as exc:
+            if not _is_provider_failure(exc):
+                raise
+            _warn_native_count_failure(exc)
+            return {"token_count_source": "estimate"}
+        try:
             if isinstance(value, Mapping):
                 value = value.get("total_tokens", value.get("input_tokens", value.get("prompt_tokens", 0)))
             count = max(0, int(value or 0))
-        except Exception:
+        except (TypeError, ValueError, OverflowError) as exc:
+            _warn_native_count_failure(exc)
             return {"token_count_source": "estimate"}
         return {"token_count_source": "native" if count else "estimate", "native_input_tokens": count}
 
@@ -1534,7 +1601,24 @@ class RoutedToolCaller:
         deadline = current_llm_context().get("deadline_monotonic")
         last_error: Exception | None = None
         max_attempts = 1 if use_single_attempt_retry_policy() else LLM_MAX_WIRE_ATTEMPTS
+        budget_token = set_wire_budget(max_attempts)
+        try:
+            return await self._call_provider_retry_loop(
+                caller, messages, wire_tools, use_builtin_search, request_shape,
+                deadline=deadline, max_attempts=max_attempts, reframe=reframe,
+            )
+        finally:
+            reset_llm_context(budget_token)
+
+    async def _call_provider_retry_loop(
+        self, caller: ToolCaller, messages: list[dict], wire_tools: list[dict],
+        use_builtin_search: bool, request_shape: dict[str, Any], *,
+        deadline: float | None, max_attempts: int, reframe: bool,
+    ) -> ToolCallerResponse:
+        last_error: Exception | None = None
         for attempt in range(max_attempts):  # first request plus three transient retries
+            if wire_budget_remaining() == 0 and last_error is not None:
+                raise last_error
             try:
                 remaining: float | None = None
                 if deadline is not None:
@@ -1571,6 +1655,8 @@ class RoutedToolCaller:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if not _is_provider_failure(exc):
+                    raise
                 last_error = exc
                 _status, _code, retryable, *_rest = _exception_route_metadata(exc)
                 if getattr(exc, "_personification_deadline_exhausted", False):
@@ -1580,6 +1666,8 @@ class RoutedToolCaller:
                 if not retryable:
                     raise
                 if attempt >= max_attempts - 1:
+                    raise
+                if wire_budget_remaining() == 0:
                     raise
                 delay = float(2 ** attempt)
                 if deadline is not None:
@@ -1716,6 +1804,8 @@ class RoutedToolCaller:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if not _is_provider_failure(exc):
+                    raise
                 last_error = exc
                 route_attempts.append(self._route_attempt(caller, exc, request_shape=request_shape))
                 continue
@@ -1747,6 +1837,8 @@ class RoutedToolCaller:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    if not _is_provider_failure(exc):
+                        raise
                     last_error = exc
                     route_attempts.append(self._route_attempt(caller, exc, request_shape=reframe_shape))
                     continue

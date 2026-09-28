@@ -42,6 +42,18 @@ def generation_route_cache() -> dict | None:
     return state.setdefault("_generation_route_callers", {}) if isinstance(state, dict) else None
 
 
+def register_generation_task(task: asyncio.Task[Any]) -> None:
+    """Bind a background task to the current reply generation, if present."""
+    state = _ACTIVE.get()
+    if not isinstance(state, dict):
+        return
+    tasks = state.setdefault("_generation_owned_tasks", set())
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+    if not generation_is_current(state):
+        task.cancel()
+
+
 def generation_is_current(state: dict | None = None) -> bool:
     state = state if state is not None else _ACTIVE.get()
     if not isinstance(state, dict):
@@ -73,6 +85,13 @@ def invalidate_generation(state: dict, reason: str = "supplement") -> bool:
         return False
     state["_generation_invalidated"] = True
     state["generation_cancel_reason"] = str(reason)[:64]
+    try:
+        current = asyncio.current_task()
+    except RuntimeError:
+        current = None
+    for task in tuple(state.get("_generation_owned_tasks") or ()):
+        if task is not current and not task.done():
+            task.cancel()
     ref = state.get("batch_runtime_ref") or {}
     entry = ref.get("entry")
     if isinstance(entry, dict):

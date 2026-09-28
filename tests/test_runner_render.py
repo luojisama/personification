@@ -3541,7 +3541,10 @@ def test_codex_image_generation_auto_reference_falls_back_to_text_prompt() -> No
         async def _request_codex_response(self, payload, **_kwargs):  # noqa: ANN001
             self.payloads.append(payload)
             if len(self.payloads) == 1:
-                raise RuntimeError("image input not supported")
+                error = RuntimeError("image input not supported")
+                error.status_code = 400
+                error.upstream_code = "unsupported_reference_image"
+                raise error
             return {"output": [{"type": "image_generation_call", "result": image_b64}]}
 
     caller = _CaptureCodexCaller()
@@ -3557,4 +3560,4 @@ def test_codex_image_generation_auto_reference_falls_back_to_text_prompt() -> No
     assert result["b64_json"] == image_b64
     assert "reference images were rejected" in result["warning"]
     fallback_content = caller.payloads[1]["input"][0]["content"][0]["text"]
-    assert "Reference image mode: unavailable" in fallback_content
+    assert "Reference image mode: rejected by provider; generate from text only" in fallback_content
