@@ -160,6 +160,10 @@
                   </dl>
                   <dl v-else-if="contextDiagnosticDisplay(stage)" class="review-diagnostic">
                     <div><dt>状态</dt><dd>{{ contextDiagnosticDisplay(stage)?.stateLabel }}</dd></div>
+                    <div v-if="contextDiagnosticDisplay(stage)?.localCounts"><dt>本地上下文</dt><dd>{{ contextDiagnosticDisplay(stage)?.localCounts }}</dd></div>
+                    <div v-if="contextDiagnosticDisplay(stage)?.estimatedInput !== null"><dt>估算输入 Token</dt><dd>{{ contextDiagnosticDisplay(stage)?.estimatedInput }}</dd></div>
+                    <div v-if="contextDiagnosticDisplay(stage)?.budgetSource"><dt>预算来源</dt><dd>{{ contextDiagnosticDisplay(stage)?.budgetSource }}</dd></div>
+                    <div v-if="contextDiagnosticDisplay(stage)?.failurePhase"><dt>失败阶段</dt><dd>{{ contextDiagnosticDisplay(stage)?.failurePhase }}</dd></div>
                     <div v-if="contextDiagnosticDisplay(stage)?.candidateCount !== null"><dt>召回候选</dt><dd>{{ contextDiagnosticDisplay(stage)?.candidateCount }}</dd></div>
                     <div v-if="contextDiagnosticDisplay(stage)?.injectedCount !== null"><dt>注入记忆</dt><dd>{{ contextDiagnosticDisplay(stage)?.injectedCount }}</dd></div>
                     <div v-if="contextDiagnosticDisplay(stage)?.stateCount !== null"><dt>当前状态</dt><dd>{{ contextDiagnosticDisplay(stage)?.stateCount }}</dd></div>
@@ -349,16 +353,19 @@ const visibleStages = computed(() => {
     });
 });
 
-function contextDiagnosticDisplay(stage: TraceStage): { stateLabel: string; candidateCount: number | null; injectedCount: number | null; stateCount: number | null; inputLimit: number | null; windowTokens: number | null; elapsedMs: number | null; diagnosticCode: string; categoryText: string; reserveText: string; messageCountText: string } | null {
+function contextDiagnosticDisplay(stage: TraceStage): { stateLabel: string; candidateCount: number | null; injectedCount: number | null; stateCount: number | null; inputLimit: number | null; windowTokens: number | null; elapsedMs: number | null; diagnosticCode: string; categoryText: string; reserveText: string; messageCountText: string; localCounts: string; estimatedInput: number | null; budgetSource: string; failurePhase: string } | null {
   if (stage.key !== "memory_context" && stage.key !== "context_budget") return null;
   const raw = stage.context_diagnostic;
   if (!raw || typeof raw !== "object") return null;
   const integer = (key: string): number | null => typeof raw[key] === "number" && Number.isFinite(raw[key] as number) ? Math.max(0, Math.trunc(raw[key] as number)) : null;
   const code = typeof raw.diagnostic_code === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(raw.diagnostic_code) ? raw.diagnostic_code : "context_diagnostic_observed";
   const state = typeof raw.status === "string" ? raw.status : typeof raw.state === "string" ? raw.state : "unknown";
-  const labels: Record<string, string> = { injected: "已注入", no_hit: "未命中", timeout: "超时", api_failed: "调用失败", disabled: "未启用", fitted: "已裁剪", unknown: "状态未知" };
+  const labels: Record<string, string> = { injected: "已注入", no_hit: "未命中", timeout: "超时", api_failed: "调用失败", disabled: "未启用", local_context_only: "仅加载本地上下文", exceeded: "请求超过预算", fitted: "已裁剪", unknown: "状态未知" };
   const namedCounts = (pairs: Array<[string, string]>) => pairs.flatMap(([key, label]) => { const value = integer(key); return value === null ? [] : [`${label} ${value}`]; }).join("；");
-  return { stateLabel: labels[state] || `未知状态（${state}）`, candidateCount: integer("candidate_count"), injectedCount: integer("injected_count"), stateCount: integer("state_count"), inputLimit: integer("input_token_limit"), windowTokens: integer("context_window_tokens"), elapsedMs: integer("elapsed_ms"), diagnosticCode: code,
+  return { stateLabel: labels[state] || `未知状态（${state}）`, candidateCount: state === "local_context_only" ? null : integer("candidate_count"), injectedCount: state === "local_context_only" ? null : integer("injected_count"), stateCount: integer("state_count"), inputLimit: integer("input_token_limit"), windowTokens: integer("context_window_tokens"), elapsedMs: integer("elapsed_ms"), diagnosticCode: code,
+    localCounts: namedCounts([["profile_count", "画像"], ["history_count", "近期历史"], ["state_count", "已有状态"]]),
+    estimatedInput: integer("estimated_input_tokens"), budgetSource: typeof raw.budget_source === "string" ? raw.budget_source : "",
+    failurePhase: typeof raw.failure_phase === "string" ? raw.failure_phase : "",
     categoryText: namedCounts([["system_tokens", "系统"], ["history_tokens", "历史"], ["memory_tokens", "记忆"], ["tools_tokens", "工具"], ["media_tokens", "媒体"]]),
     reserveText: namedCounts([["output_reserve_tokens", "输出"], ["thinking_reserve_tokens", "思考"]]),
     messageCountText: namedCounts([["pre_trim_message_count", "裁剪前"], ["post_trim_message_count", "裁剪后"]]),

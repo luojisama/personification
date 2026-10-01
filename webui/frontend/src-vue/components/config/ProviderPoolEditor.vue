@@ -25,6 +25,7 @@
               <h4>已添加模型</h4>
               <button class="button button-secondary" type="button" :disabled="probing[providerKey(provider, index)]" @click="discoverModels(index)">{{ probing[providerKey(provider, index)] ? '正在获取…' : '获取可用模型' }}</button>
               <button class="button button-secondary" type="button" @click="addModel(index)">手动添加模型</button>
+              <button class="button button-secondary" type="button" @click="previewBudget(index)">核对生效容量</button>
             </div>
             <p v-if="probeNotice[providerKey(provider, index)]" class="muted-copy" role="status">{{ probeNotice[providerKey(provider, index)] }}</p>
             <p v-if="probeError[providerKey(provider, index)]" class="form-error" role="alert">{{ probeError[providerKey(provider, index)] }}</p>
@@ -36,7 +37,7 @@
               </div>
               <ul class="candidate-list">
                 <li v-for="candidate in filteredCandidates(provider, index)" :key="text(candidate.model_id)">
-                  <label><input type="checkbox" :checked="isCandidateSelected(provider, index, text(candidate.model_id))" @change="toggleCandidate(provider, index, text(candidate.model_id), ($event.target as HTMLInputElement).checked)" /> <span>{{ text(candidate.display_name) || text(candidate.model_id) }}</span> <code>{{ text(candidate.model_id) }}</code></label>
+                  <label><input type="checkbox" :checked="isCandidateSelected(provider, index, text(candidate.model_id))" @change="toggleCandidate(provider, index, text(candidate.model_id), ($event.target as HTMLInputElement).checked)" /> <span>{{ text(candidate.display_name) || text(candidate.model_id) }}</span> <code>{{ text(candidate.model_id) }}</code><span v-if="number(candidate.reported_input_token_limit)">输入能力 {{ candidate.reported_input_token_limit }} / 输出能力 {{ candidate.reported_output_token_limit || '未知' }}</span></label>
                 </li>
               </ul>
             </section>
@@ -45,14 +46,17 @@
                 <div class="model-grid">
                   <TextField :id="fieldId(index, `model-${modelIndex}-id`)" :model-value="text(model.model_id)" label="模型 ID" required placeholder="例如 gemini-2.5-flash" @update:model-value="updateModel(index, modelIndex, 'model_id', $event)" />
                   <TextField :id="fieldId(index, `model-${modelIndex}-display`)" :model-value="text(model.display_name)" label="显示名称" placeholder="留空使用模型 ID" @update:model-value="updateModel(index, modelIndex, 'display_name', $event)" />
-                  <NumberField :id="fieldId(index, `model-${modelIndex}-context`)" :model-value="number(model.context_window_tokens)" label="上下文 Token" :min="1" :step="1" placeholder="留空使用 Provider 默认值" @update:model-value="updateModel(index, modelIndex, 'context_window_tokens', $event)" />
+                  <NumberField :id="fieldId(index, `model-${modelIndex}-context`)" :model-value="number(model.context_window_tokens)" label="上下文 Token" :min="1" :step="1" placeholder="未配置时保守窗口 32,768" @update:model-value="updateModel(index, modelIndex, 'context_window_tokens', $event)" />
                   <NumberField :id="fieldId(index, `model-${modelIndex}-input`)" :model-value="number(model.max_input_tokens)" label="最大输入 Token" :min="1" :step="1" placeholder="可选" @update:model-value="updateModel(index, modelIndex, 'max_input_tokens', $event)" />
-                  <NumberField :id="fieldId(index, `model-${modelIndex}-output`)" :model-value="number(model.max_output_tokens)" label="最大输出 Token" :min="1" :step="1" placeholder="可选" @update:model-value="updateModel(index, modelIndex, 'max_output_tokens', $event)" />
+                  <NumberField :id="fieldId(index, `model-${modelIndex}-output`)" :model-value="number(model.max_output_tokens)" label="每次输出预留 Token" :min="1" :step="1" placeholder="可选" @update:model-value="updateModel(index, modelIndex, 'max_output_tokens', $event)" />
                   <NumberField :id="fieldId(index, `model-${modelIndex}-limit`)" :model-value="number(model.input_token_limit)" label="输入 Token 硬上限" :min="1" :step="1" placeholder="可选" @update:model-value="updateModel(index, modelIndex, 'input_token_limit', $event)" />
                   <SwitchField :id="fieldId(index, `model-${modelIndex}-enabled`)" :model-value="model.enabled !== false" label="启用模型" @update:model-value="updateModel(index, modelIndex, 'enabled', $event)" />
                   <SwitchField :id="fieldId(index, `model-${modelIndex}-tools`)" :model-value="capability(model, 'function_call')" label="工具调用（声明）" @update:model-value="setCapability(index, modelIndex, 'function_call', $event)" />
                   <SwitchField :id="fieldId(index, `model-${modelIndex}-vision`)" :model-value="capability(model, 'image_input')" label="图片输入（声明）" @update:model-value="setCapability(index, modelIndex, 'image_input', $event)" />
                 </div>
+                <p class="muted-copy">{{ capacityText(provider, index, model) }}</p>
+                <p v-if="number(reportedModel(provider, index, model).reported_input_token_limit) || number(reportedModel(provider, index, model).reported_output_token_limit)" class="muted-copy">服务元数据：输入能力 {{ number(reportedModel(provider, index, model).reported_input_token_limit) || '未知' }}；输出能力 {{ number(reportedModel(provider, index, model).reported_output_token_limit) || '未知' }}。采纳会将输入能力作为未配置模型的保守窗口和输入容量；生效输入仍受分配比例与预留约束。输出能力上限不作为每次输出预留。</p>
+                <button v-if="number(reportedModel(provider, index, model).reported_input_token_limit)" class="button button-secondary" type="button" @click="adoptCapacity(index, modelIndex)">采纳为保守窗口和输入容量</button>
                 <p class="muted-copy model-capability-note">能力声明会随模型保存，用于路由能力展示；未经过实际探测前仍是“未知”，不会把列表发现当成已验证能力。</p>
                 <div class="model-actions">
                   <button class="button button-secondary" type="button" :disabled="text(provider.default_model_id) === text(model.model_id)" @click="setDefaultModel(index, text(model.model_id))">设为默认</button>
@@ -80,6 +84,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { api } from "@/api/client";
 import { resources } from "@/api/resources";
 import FormField from "@vue-app/components/forms/FormField.vue";
 import NumberField from "@vue-app/components/forms/NumberField.vue";
@@ -93,9 +98,11 @@ type Purpose = "main" | "lite" | "persona" | "compress" | "vision" | "labeler";
 const props = withDefaults(defineProps<{ modelValue: unknown; label: string; id: string; description?: string; error?: string }>(), { description: "", error: "" });
 const emit = defineEmits<{ "update:modelValue": [value: Row[]]; "update:error": [value: string] }>();
 const probing = ref<Record<string, boolean>>({});
+const budgetPreviews = ref<Record<string, { snapshot: string; models: Row[] }>>({});
 const probeNotice = ref<Record<string, string>>({});
 const probeError = ref<Record<string, string>>({});
 const discoveredCandidates = ref<Record<string, Row[]>>({});
+const discoveredMetadata = ref<Record<string, Row[]>>({});
 const candidateSearch = ref<Record<string, string>>({});
 const selectedCandidateIds = ref<Record<string, string[]>>({});
 const purposes: Array<{ key: Purpose; label: string }> = [
@@ -158,14 +165,50 @@ async function discoverModels(index: number): Promise<void> {
   try {
     const result = await resources.providerModels(clone(provider));
     const discovered = Array.isArray(result.models) ? result.models.filter(record) : [];
+    discoveredMetadata.value = { ...discoveredMetadata.value, [key]: discovered };
     const existingIds = new Set(models(provider).map(model => text(model.model_id)).filter(Boolean));
-    const normalized = discovered.filter(model => text(model.model_id || model.id)).map(model => ({ ...model, model_id: text(model.model_id || model.id), display_name: text(model.display_name || model.name || model.model_id || model.id) })).filter(model => !existingIds.has(text(model.model_id)));
+    const normalized = discovered.filter(model => text(model.model_id || model.id)).map(model => ({ ...model, model_id: text(model.model_id || model.id), display_name: text(model.display_name || model.label || model.name || model.model_id || model.id) })).filter(model => !existingIds.has(text(model.model_id)));
     discoveredCandidates.value = { ...discoveredCandidates.value, [key]: normalized };
     selectedCandidateIds.value = { ...selectedCandidateIds.value, [key]: [] };
     probeNotice.value = { ...probeNotice.value, [key]: normalized.length ? `已读取 ${normalized.length} 个候选模型；请筛选并勾选后再添加，现有模型未被覆盖。` : "服务端未返回新的可选模型；仍可手动填写模型 ID。" };
   } catch {
     probeError.value = { ...probeError.value, [key]: "获取模型列表未完成。已添加模型和凭据草稿均已保留；可稍后重试或手动填写模型 ID。" };
   } finally { probing.value = { ...probing.value, [key]: false }; }
+}
+function reportedModel(provider: Row, index: number, model: Row): Row {
+  const metadata = discoveredMetadata.value[providerKey(provider, index)]?.find(item => text(item.model_id || item.id) === text(model.model_id));
+  return metadata ? { ...model, ...metadata } : model;
+}
+function capacityText(provider: Row, index: number, model: Row): string {
+  const preview = budgetPreviews.value[providerKey(provider, index)];
+  const current = preview?.snapshot === JSON.stringify(provider) ? preview.models.find(item => item.model_id === model.model_id) : undefined;
+  if (!current) return "未配置窗口时使用保守 32,768；默认输入分配为窗口的一半，并受输出、思考、安全预留和配置上限约束。点击“核对生效容量”读取服务端预算。";
+  if (current.error) return "容量无效：输出、思考和安全预留超过上下文窗口。";
+  return `生效窗口 ${current.context_window_tokens}；输入上限 ${current.effective_input_limit}；来源 ${current.source === 'configured' ? '显式配置' : '保守默认值'}。`;
+}
+async function previewBudget(index: number): Promise<void> {
+  const provider = providers.value[index]; if (!provider) return;
+  // Capacity checks need no credentials, connection address or private metadata.
+  const draft = { model: provider.model, legacy_capacity_model_id: provider.legacy_capacity_model_id, models: provider.models,
+    default_model_id: provider.default_model_id, context_window_tokens: provider.context_window_tokens,
+    max_input_tokens: provider.max_input_tokens, max_output_tokens: provider.max_output_tokens, input_token_limit: provider.input_token_limit };
+  try {
+    const result = await api.post<{ models: Row[] }>("/config/provider-budget", { provider: draft });
+    budgetPreviews.value = { ...budgetPreviews.value, [providerKey(provider, index)]: { snapshot: JSON.stringify(provider), models: result.models } };
+  } catch { probeError.value = { ...probeError.value, [providerKey(provider, index)]: "容量核对未完成，请稍后重试。" }; }
+}
+function adoptCapacity(index: number, modelIndex: number): void {
+  mutateProvider(index, provider => {
+    const entries = models(provider); const model = entries[modelIndex]; if (!model) return;
+    const metadata = reportedModel(provider, index, model);
+    const input = number(metadata.reported_input_token_limit);
+    if (metadata.reported_input_token_limit) model.reported_input_token_limit = metadata.reported_input_token_limit;
+    if (metadata.reported_output_token_limit) model.reported_output_token_limit = metadata.reported_output_token_limit;
+    if (!input || input <= 0) return;
+    if (!(Number(model.context_window_tokens) > 0)) model.context_window_tokens = input;
+    if (!(Number(model.max_input_tokens) > 0)) model.max_input_tokens = input;
+    provider.models = entries;
+  });
 }
 function validate(rows: Row[]): string {
   const ids = new Set<string>();

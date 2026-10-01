@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { resources } from "@/api/resources";
+import { api } from "@/api/client";
+vi.mock("@/api/client", () => ({ api: { post: vi.fn() } }));
 import ProviderPoolEditor from "./ProviderPoolEditor.vue";
 
 vi.mock("@/api/resources", () => ({
@@ -79,4 +81,49 @@ describe("ProviderPoolEditor", () => {
     expect(String(first)).toMatch(/^provider_[a-z0-9]+$/);
     expect(second).not.toBe(first);
   });
+  it("既有模型可以显式采纳探测输入容量，并保留管理员正值与输出预留", async () => {
+    vi.mocked(resources.providerModels).mockResolvedValue({ models: [{ id: "gemini-flash", reported_input_token_limit: 1048576, reported_output_token_limit: 65536 }] });
+    const wrapper = mountEditor([{ ...baseProvider, models: [{ model_id: "gemini-flash", context_window_tokens: 200000, max_output_tokens: 4096 }] }]);
+    await wrapper.findAll("button").find(button => button.text() === "获取可用模型")!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("1048576");
+    expect(wrapper.emitted("update:modelValue")).toBeUndefined();
+    await wrapper.findAll("button").find(button => button.text() === "采纳为保守窗口和输入容量")!.trigger("click");
+    const rows = wrapper.emitted("update:modelValue")?.at(-1)?.[0] as Array<Record<string, unknown>>;
+    const model = (rows[0]?.models as Array<Record<string, unknown>>)[0]!;
+    expect(model.context_window_tokens).toBe(200000);
+    expect(model.max_input_tokens).toBe(1048576);
+    expect(model.max_output_tokens).toBe(4096);
+    expect(model.reported_output_token_limit).toBe(65536);
+  });
+
+  it("预算预览复用服务端结果，只发送容量草稿，编辑后作废旧结果", async () => {
+    vi.mocked(api.post).mockResolvedValue({ models: [{ model_id: "gemini-flash", context_window_tokens: 1050000, effective_input_limit: 525000, source: "configured" }] });
+    const wrapper = mountEditor();
+    await wrapper.findAll("button").find(button => button.text() === "核对生效容量")!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("生效窗口 1050000；输入上限 525000；来源 显式配置");
+    const sent = JSON.stringify(vi.mocked(api.post).mock.calls.at(-1));
+    expect(sent).not.toContain("api_key");
+    expect(sent).not.toContain("secret");
+    await wrapper.setProps({ modelValue: [{ ...baseProvider, models: [{ model_id: "gemini-flash", context_window_tokens: 200000 }] }] });
+    expect(wrapper.text()).not.toContain("输入上限 525000");
+  });
+
+  it("未配置模型显式采纳容量，未知别名不继承基础模型探测数据", async () => {
+    vi.mocked(resources.providerModels).mockResolvedValue({ models: [{ id: "gemini-flash", reported_input_token_limit: 1048576, reported_output_token_limit: 65536 }] });
+    const wrapper = mountEditor([{ ...baseProvider, models: [{ model_id: "gemini-flash", context_window_tokens: 0, max_input_tokens: 0 }, { model_id: "gemini-flash-high" }] }]);
+    await wrapper.findAll("button").find(button => button.text() === "获取可用模型")!.trigger("click");
+    await flushPromises();
+    const adoptButtons = wrapper.findAll("button").filter(button => button.text() === "采纳为保守窗口和输入容量");
+    expect(adoptButtons).toHaveLength(1);
+    await adoptButtons[0]!.trigger("click");
+    const rows = wrapper.emitted("update:modelValue")?.at(-1)?.[0] as Array<Record<string, unknown>>;
+    const models = rows[0]?.models as Array<Record<string, unknown>>;
+    expect(models[0]?.context_window_tokens).toBe(1048576);
+    expect(models[0]?.max_input_tokens).toBe(1048576);
+    expect(models[0]?.max_output_tokens).toBeUndefined();
+    expect(models[1]?.context_window_tokens).toBeUndefined();
+  });
+
 });

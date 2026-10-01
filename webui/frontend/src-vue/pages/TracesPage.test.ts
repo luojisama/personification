@@ -42,6 +42,16 @@ const trace: TraceDetail = {
 };
 
 describe("Vue Traces metrics & triage logic", () => {
+  it("distinguishes execution ceilings from observed steps and full tool disclosure", () => {
+    const summary = stageDisplaySummary({ ...trace.stages[0]!, key: "agent_tool_disclosure", summary: "execution_route=context_only actual_steps=10 executed_steps=1 tool_calls_executed=0 mode=off real_schemas=15 wire_schemas=16 wire_tools=15 excluded=1" });
+    expect(summary).toContain("步数上限=10");
+    expect(summary).toContain("已执行生成步数=1");
+    expect(summary).toContain("已执行工具调用=0");
+    expect(summary).toContain("全量披露（off）");
+    expect(summary).toContain("最终 wire 工具=15");
+    expect(stageDisplaySummary({ ...trace.stages[0]!, key: "attention_decision", summary: "mode=shadow" })).toBe("mode=shadow");
+  });
+
   it("derives first error, slow stages and allowlisted upstream classification", () => {
     const metrics = deriveTraceMetrics(trace);
     expect(metrics).toEqual({
@@ -150,6 +160,20 @@ describe("Trace index route behavior", () => {
     vi.clearAllMocks();
     vi.mocked(resources.traces).mockResolvedValue({ items: [listItem], page: 1, page_size: 20, total: 2, total_pages: 2 });
     vi.mocked(resources.trace).mockResolvedValue(trace);
+  });
+
+  it("shows local context counts and a nonzero budget rejection estimate", async () => {
+    vi.mocked(resources.trace).mockResolvedValue({ ...trace, stages: [
+      { ...trace.stages[0]!, key: "memory_context", context_diagnostic: { status: "local_context_only", profile_count: 2, history_count: 4, state_count: 1, candidate_count: 0, injected_count: 0 } },
+      { ...trace.stages[0]!, key: "context_budget", context_diagnostic: { status: "exceeded", estimated_input_tokens: 19000, input_token_limit: 16384, context_window_tokens: 32768, budget_source: "conservative_fallback", failure_phase: "system" } },
+    ] });
+    const { wrapper, queryClient } = await renderTracePage("/runtime/traces/timeline/trace-safe");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("仅加载本地上下文"));
+    expect(wrapper.text()).toContain("画像 2；近期历史 4；已有状态 1");
+    expect(wrapper.text()).toContain("19000");
+    expect(wrapper.text()).toContain("16384");
+    expect(wrapper.text()).not.toContain("召回候选");
+    wrapper.unmount(); queryClient.clear();
   });
 
   it("keeps old-link index landing on the index instead of auto-selecting a Trace", async () => {

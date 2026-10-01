@@ -63,4 +63,22 @@ describe("Trace 白名单 DTO", () => {
     expect(page).not.toHaveProperty("secret");
     expect(page.items[0]).not.toHaveProperty("hidden_prompt");
   });
+  it("保留真实context诊断白名单并过滤嵌套秘密、非数字与不可信原文", () => {
+    const trace = sanitizeTraceDetail({ stages: [
+      { key: "memory_context", context_diagnostic: { status: "local_context_only", profile_count: 2, history_count: 4,
+        state_count: 1, candidate_count: true, elapsed_ms: Infinity, api_key: "secret", prompt: "private prompt" } },
+      { key: "context_budget", context_diagnostic: { status: "exceeded", diagnostic_code: "provider_context_budget_exceeded",
+        estimated_input_tokens: 19000, input_token_limit: 16384, failure_phase: "system", budget_source: "conservative_fallback",
+        error_type: "private message contains spaces", output_reserve_tokens: -1, tools_tokens: 99999999 } },
+      { key: "tool_result", context_diagnostic: { status: "local_context_only", profile_count: 200 } },
+    ] });
+    expect(trace.stages[0]?.context_diagnostic).toEqual({ status: "local_context_only", profile_count: 2, history_count: 4, state_count: 1 });
+    expect(trace.stages[1]?.context_diagnostic).toEqual({ status: "exceeded", diagnostic_code: "provider_context_budget_exceeded",
+      estimated_input_tokens: 19000, input_token_limit: 16384, failure_phase: "system", budget_source: "conservative_fallback",
+      output_reserve_tokens: 0, tools_tokens: 10000000 });
+    expect(trace.stages[2]?.context_diagnostic).toBeNull();
+    expect(JSON.stringify(trace)).not.toContain("secret");
+    expect(JSON.stringify(trace)).not.toContain("private prompt");
+  });
+
 });

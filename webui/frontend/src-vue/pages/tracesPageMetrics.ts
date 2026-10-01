@@ -114,7 +114,12 @@ export function stageDisplaySummary(stage: TraceStage): string {
   if (hasCompleteMediaDelivery(stage)) {
     return "Agent 媒体证据检查通过；这不表示 QQ 已送达，实际外发结果请以“最终可见回复”中的发送结果为准。";
   }
-  return stage.summary;
+  // Legacy actual_steps denotes a limit, never an observed execution count.
+  const labels: Record<string, string> = { execution_route: "执行路径", effective_max_steps: "步数上限", actual_steps: "步数上限",
+    executed_steps: "已执行生成步数", tool_calls_executed: "已执行工具调用", selected_count: "选中工具", disclosed_count: "披露工具",
+    normalized_excluded_count: "规范化排除", wire_count: "最终 wire 工具", real_schemas: "披露工具 Schema", wire_schemas: "提交 Provider 的 Schema 数", wire_tools: "最终 wire 工具", excluded: "规范化排除工具" };
+  return stage.summary.replace(/\b(mode|execution_route|effective_max_steps|actual_steps|executed_steps|tool_calls_executed|selected_count|disclosed_count|normalized_excluded_count|wire_count|real_schemas|wire_schemas|wire_tools|excluded)=([A-Za-z0-9_-]+)/g,
+    (_match, key: string, value: string) => key === "mode" ? (stage.key !== "agent_tool_disclosure" ? `mode=${value}` : value === "off" ? "工具披露=全量披露（off）" : `披露模式=${value}`) : `${labels[key]}=${value}`);
 }
 
 export function outcomeTone(outcome: TraceDetail["outcome"]): "ok" | "warn" | "error" | "unknown" {

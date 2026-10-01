@@ -79,6 +79,25 @@ export function sanitizeTraceListItem(raw: unknown): TraceListItem {
   };
 }
 
+function sanitizeContextDiagnostic(stage: UnknownRecord): Record<string, string | number> | null {
+  if (!["memory_context", "context_budget"].includes(text(stage.key)) || !isRecord(stage.context_diagnostic)) return null;
+  const raw = stage.context_diagnostic;
+  const result: Record<string, string | number> = {};
+  const counts = ["candidate_count", "injected_count", "state_count", "profile_count", "history_count", "elapsed_ms",
+    "estimated_input_tokens", "original_estimated_input_tokens", "native_input_tokens", "input_token_limit", "context_window_tokens",
+    "system_tokens", "history_tokens", "memory_tokens", "tools_tokens", "media_tokens", "output_reserve_tokens",
+    "thinking_reserve_tokens", "pre_trim_message_count", "post_trim_message_count"];
+  for (const key of counts) {
+    const value = raw[key];
+    if (typeof value === "number" && Number.isFinite(value)) result[key] = Math.max(0, Math.min(10_000_000, Math.trunc(value)));
+  }
+  for (const key of ["status", "state", "budget_source", "token_count_source", "error_type", "failure_phase", "execution_route", "diagnostic_code"]) {
+    const value = raw[key];
+    if (typeof value === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(value)) result[key] = value;
+  }
+  return result;
+}
+
 export function sanitizeTraceDetail(raw: unknown): TraceDetail {
   const source = isRecord(raw) ? raw : {};
   const summary = sanitizeTraceListItem(source);
@@ -121,6 +140,7 @@ export function sanitizeTraceDetail(raw: unknown): TraceDetail {
         summary: text(stage.summary).slice(0, 1_000),
         detail_code: text(stage.detail_code, "stage_unclassified"),
         remaining_ms: finiteNumber(stage.remaining_ms),
+        context_diagnostic: sanitizeContextDiagnostic(stage),
       };
     }),
     tools: rawTools.slice(0, 100).map((value) => {
