@@ -50,6 +50,7 @@ def append_agent_system_prompts(
     budget_profile: Any = None,
     bot_avatar_context: Any = None,
     segment_sink: list[PromptSegment] | None = None,
+    context_only: bool = False,
 ) -> PromptSegmentReport:
     had_preceding_messages = bool(messages)
     segments: list[PromptSegment] = []
@@ -101,8 +102,9 @@ def append_agent_system_prompts(
         and any(marker in str(message.get("content", "") or "") for marker in ("群聊", "群里", "群友", "群成员"))
         for message in list(messages or [])
     )
-    append_segment(_semantic_tool_guidance(), stability="stable", source="semantic_tool_guidance")
-    append_segment(render_command_runtime_prompt(), stability="dynamic", source="command_runtime")
+    if not context_only:
+        append_segment(_semantic_tool_guidance(), stability="stable", source="semantic_tool_guidance")
+        append_segment(render_command_runtime_prompt(), stability="dynamic", source="command_runtime")
     if reply_required:
         append_segment(
                 (
@@ -150,6 +152,37 @@ def append_agent_system_prompts(
                     max_chars_override=length_policy.max_chars,
                 ), stability="dynamic", source="output_mode"
         )
+    if context_only:
+        append_segment(
+            "本轮已由语义规划确定为日常对话。只根据已提供的人格、群风格、用户画像与近期上下文自然接话。"
+            "本轮没有工具、联网搜索或额外记忆检索，也不能中途升级为工具任务；不得输出工具调用或承诺随后查证。"
+            "接住当前消息的一个具体点，保持自己的语气与态度，不复述别人的发言，不把机器人原话归给群友。"
+            "多个话题并行时只使用与当前消息相关的上下文，不拼接不同成员的状态或猜测缺失事实。"
+            "信息不足时只说已有上下文支持的内容；没有合适的具体回复时遵守既有静默与强交互规则。"
+            "最终只输出自然纯文本，不写工具过程、标题或审查清单。",
+            stability="stable", source="context_only_reply_policy",
+        )
+        if turn_plan is not None:
+            append_segment(build_speech_act_policy_prompt(
+                speech_act=str(getattr(turn_plan, "speech_act", "") or ""),
+                output_mode=str(getattr(turn_plan, "output_mode", "") or ""),
+                session_goal=str(getattr(turn_plan, "session_goal", "") or ""),
+                is_group=group_context,
+            ), stability="dynamic", source="speech_act")
+            support_prompt = build_emotional_support_policy_prompt(getattr(turn_plan, "emotional_support", None))
+            if support_prompt:
+                append_segment(support_prompt, stability="dynamic", source="emotional_support")
+            meme_prompt = format_meme_turn_prompt(getattr(turn_plan, "meme_turn_context", None))
+            if meme_prompt:
+                append_segment(meme_prompt, stability="dynamic", source="meme_context")
+        directed_prompt = build_directed_exchange_policy_prompt(
+            is_direct_mention=is_direct_mention, is_group=group_context,
+            speech_act=str(getattr(turn_plan, "speech_act", "") or ""),
+            output_mode=str(getattr(turn_plan, "output_mode", "") or ""),
+        )
+        if directed_prompt:
+            append_segment(directed_prompt, stability="dynamic", source="directed_exchange")
+        return with_preceding_messages(validate_prompt_segments(segments), had_preceding_messages=had_preceding_messages)
     append_segment(
             (
                 "最终对用户的回复必须自然、像群聊里的活人接话。"

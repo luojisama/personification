@@ -270,6 +270,7 @@ class Config(BaseModel):
     # Long-context memory is independently reversible.  It does not alter an
     # existing operator's legacy history/expiry values during configuration
     # load; the runtime decides when the new bounds are enabled.
+    personification_context_only_chat_enabled: bool = True
     personification_memory_context_enabled: bool = True
     personification_context_budget_enabled: bool = True
     personification_private_history_days: int = DEFAULT_PRIVATE_HISTORY_DAYS

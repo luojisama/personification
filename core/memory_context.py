@@ -90,7 +90,8 @@ class PreparedMemoryContext:
 
 async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
                                  messages: list[dict], turn_plan: Any = None,
-                                 surface: str = "chat", refresh: bool = True) -> PreparedMemoryContext:
+                                 surface: str = "chat", refresh: bool = True,
+                                 execution_policy: Any = None) -> PreparedMemoryContext:
     config = runtime.plugin_config
     timezone = str(getattr(config, "personification_timezone", "Asia/Shanghai") or "Asia/Shanghai")
     result = PreparedMemoryContext(history=project_history(messages, timezone), timezone=timezone)
@@ -169,6 +170,18 @@ async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
     except Exception as exc:
         result.diagnostics["profile_status"] = "failed"
         result.diagnostics["profile_error_type"] = type(exc).__name__
+    if bool(getattr(execution_policy, "is_context_only", False)):
+        from .temporal_memory import load_current_states
+        result.states = load_current_states(scope) if "qzone" not in surface else []
+        result.status = "local_context_only"
+        result.diagnostics.update(status=result.status, execution_route="context_only",
+                                  query_planning="skipped", recall="skipped", state_refresh="skipped",
+                                  injected_count=0, profile_count=len(result.profiles),
+                                  state_count=len(result.states), history_count=len(result.history))
+        from .reply_turn_trace import record_stage
+        record_stage(key="memory_context", label="记忆上下文", status="info",
+                     detail=json.dumps(result.diagnostics, ensure_ascii=False))
+        return result
     query = render_history(evidence_messages[-8:], timezone)[-6000:]
     caller = getattr(runtime, "lite_tool_caller", None) or getattr(runtime, "agent_tool_caller", None)
     limit = max(1, min(64, int(getattr(config, "personification_memory_auto_recall_candidate_limit", 32))))

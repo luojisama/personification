@@ -644,14 +644,19 @@ async def plan_turn_with_llm(
         + (f"\n{group_knowledge_hint}" if group_knowledge_hint else "")
     )
     try:
-        response = await tool_caller.chat_with_tools(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            tools=[],
-            use_builtin_search=False,
-        )
+        from ...core.llm_context import reset_llm_context, set_llm_purpose
+        purpose_token = set_llm_purpose("semantic_frame")
+        try:
+            response = await tool_caller.chat_with_tools(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                tools=[],
+                use_builtin_search=False,
+            )
+        finally:
+            reset_llm_context(purpose_token)
         payload = extract_json_payload(str(getattr(response, "content", "") or ""))
         plan = parse_turn_plan_payload(payload) if payload is not None else None
         return _apply_trusted_media_only_turn(apply_group_no_question_turn_policy(

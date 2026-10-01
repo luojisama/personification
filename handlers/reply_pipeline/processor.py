@@ -305,6 +305,7 @@ def _task_exc_logger(label: str, logger: Any) -> Any:
 
 _IMAGE_B64_RE = re.compile(r"\[IMAGE_B64\]([A-Za-z0-9+/=\r\n]+)\[/IMAGE_B64\]")
 _SAFE_PROVIDER_DIAGNOSIS_CODES = {
+    "provider_context_budget_exceeded",
     "provider_auth_failed",
     "provider_call_failed",
     "provider_caller_unavailable",
@@ -1481,14 +1482,6 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         sender_role = extract_sender_role(event)
         if sender_role:
             incoming_relation_metadata["sender_role"] = sender_role
-    if isinstance(event, types.message_event_cls):
-        await _capture_user_protocol_profile(
-            runtime=runtime,
-            bot=bot,
-            event=event,
-            user_id=user_id,
-            source="reply_pipeline",
-        )
 
     user_profile_block = ""
     try:
@@ -2222,10 +2215,32 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             )
         return True
 
+    from ...core.turn_execution_policy import derive_turn_execution_policy
+    execution_policy = derive_turn_execution_policy(
+        semantic_frame=semantic_frame, turn_plan=getattr(semantic_frame, "turn_plan", None),
+        has_media=bool(turn_media_context or tool_image_urls),
+        enabled=bool(getattr(runtime.plugin_config, "personification_context_only_chat_enabled", True)),
+    )
+    if execution_policy.is_context_only:
+        hook_ctx.disable_network_hooks = True
+        disable_network_hooks = True
+        context_deadline = time.monotonic() + 18.0
+        response_deadline = min(response_deadline, context_deadline) if response_deadline is not None else context_deadline
+    reply_turn_trace.record_stage(key="turn_execution_policy", label="回合执行路径", status="info",
+                                 detail=f"route={execution_policy.route} reason={execution_policy.reason}")
+    if not execution_policy.is_context_only and isinstance(event, types.message_event_cls):
+        await _capture_user_protocol_profile(
+            runtime=runtime,
+            bot=bot,
+            event=event,
+            user_id=user_id,
+            source="reply_pipeline",
+        )
+
     from ...core.memory_context import prepare_memory_context
     prepared_memory_context = await prepare_memory_context(
         runtime=runtime, event=event, bot=bot, messages=session_messages_for_model,
-        turn_plan=semantic_frame,
+        turn_plan=semantic_frame, execution_policy=execution_policy,
     )
     session_messages_for_model = prepared_memory_context.history
     # Legacy hooks can still serve alternate entrypoints; this turn already recalled.
@@ -2237,7 +2252,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
         hook_ctx.session_messages = session_messages_for_model
         hook_ctx.semantic_frame = semantic_frame
-        await schedule_pending_topic_extraction(hook_ctx)
+        if not execution_policy.is_context_only:
+            await schedule_pending_topic_extraction(hook_ctx)
         reply_turn_trace.record_stage(
             key="yaml_route",
             label="YAML 回复路径",
@@ -2260,6 +2276,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             media_transport_aliases=media_transport_aliases,
             prepared_visual_projection=yaml_visual_projection,
             prepared_memory_context=prepared_memory_context,
+            execution_policy=execution_policy,
             memory_store=getattr(runtime, "memory_store", None),
             get_configured_api_providers=runtime.get_configured_api_providers,
             vision_caller=runtime.vision_caller,
@@ -2315,16 +2332,17 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     from ...core.context_budget import primary_route_budget
     memory_budget = primary_route_budget(runtime.plugin_config, runtime.logger)
     primary_api_type, primary_model = _get_primary_provider_signature(runtime)
-    context_chunks = await compress_context_if_needed(
-        context_chunks,
-        max_tokens=memory_budget.component_tokens,
-        keep_recent=context_keep_recent_for_route(primary_api_type, primary_model),
-        call_ai_api=runtime.lite_call_ai_api or runtime.call_ai_api,
-    )
+    if not execution_policy.is_context_only:
+        context_chunks = await compress_context_if_needed(
+            context_chunks,
+            max_tokens=memory_budget.component_tokens,
+            keep_recent=context_keep_recent_for_route(primary_api_type, primary_model),
+            call_ai_api=runtime.lite_call_ai_api or runtime.call_ai_api,
+        )
     context_chunks.append(prepared_memory_context.render())
     postlude_chunks = await get_hook_registry().run_all(hook_ctx, phase="system_postlude")
     plugin_summary = ""
-    if runtime.knowledge_store is not None:
+    if not execution_policy.is_context_only and runtime.knowledge_store is not None:
         try:
             plugin_summary = runtime.knowledge_store.get_plugin_summary_for_prompt()
         except Exception as exc:
@@ -2344,7 +2362,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         photo_like=has_photo_input,
         primary_api_type=primary_api_type,
         primary_model=primary_model,
-        native_search_enabled=should_enable_default_builtin_search(
+        native_search_enabled=not execution_policy.is_context_only and should_enable_default_builtin_search(
             runtime.plugin_config,
             get_configured_api_providers=runtime.get_configured_api_providers,
         ),
@@ -2360,7 +2378,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         )
         if qzone_episode_prompt:
             system_prompt += f"\n\n{qzone_episode_prompt}"
-    system_prompt += "\n\n" + render_command_runtime_prompt()
+    if not execution_policy.is_context_only:
+        system_prompt += "\n\n" + render_command_runtime_prompt()
     if user_profile_block:
         system_prompt += f"\n\n{user_profile_block}"
     if media_grounding:
@@ -2842,6 +2861,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         core_persona=(base_prompt.get("system", "") if isinstance(base_prompt, dict) else str(base_prompt or "")),
                         ordered_context=recent_context_hint,
                         semantic_frame=semantic_frame,
+                        execution_policy=execution_policy,
                     )
                     reply_turn_trace.record_stage(
                         key="agent_result",

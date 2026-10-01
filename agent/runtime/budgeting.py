@@ -205,6 +205,7 @@ def render_agent_budget_trace_detail(
         f"budget={profile.mode} "
         f"suggested_steps={profile.suggested_max_steps} "
         f"actual_steps={int(actual_max_steps or 0)} "
+        f"effective_max_steps={int(actual_max_steps or 0)} "
         f"suggested_seconds={suggested_seconds} "
         f"actual_seconds={actual_seconds} "
         f"source={profile.source} "

@@ -678,6 +678,7 @@ async def process_yaml_response_logic(
     reply_required: bool = False,
     response_deadline: float | None = None,
     prepared_memory_context: Any = None,
+    execution_policy: Any = None,
     prepared_inner_state: dict[str, Any] | None = None,
     prepared_emotion_state: dict[str, Any] | None = None,
     turn_media_context: List[Dict[str, Any]] | None = None,
@@ -1409,6 +1410,16 @@ async def process_yaml_response_logic(
         )
         attach_turn_plan_to_semantic_frame(semantic_frame, turn_plan)
     intent_decision = semantic_frame.to_intent_decision()
+    if execution_policy is None:
+        from ...core.turn_execution_policy import derive_turn_execution_policy
+        execution_policy = derive_turn_execution_policy(
+            semantic_frame=semantic_frame, turn_plan=turn_plan,
+            has_media=bool(turn_media_context or last_images),
+            enabled=bool(getattr(plugin_config, "personification_context_only_chat_enabled", True)),
+        )
+    if execution_policy.is_context_only:
+        context_deadline = time.monotonic() + 18.0
+        response_deadline = min(response_deadline, context_deadline) if response_deadline is not None else context_deadline
     if not message_intent:
         message_intent = intent_decision.chat_intent
     if not str(intent_ambiguity_level or "").strip():
@@ -1574,7 +1585,8 @@ async def process_yaml_response_logic(
         system_prompt += "\n\n" + build_plugin_interaction_policy_prompt(
             is_direct_mention=is_direct_mention,
         )
-    system_prompt += "\n\n" + render_command_runtime_prompt()
+    if not execution_policy.is_context_only:
+        system_prompt += "\n\n" + render_command_runtime_prompt()
     primary_api_type, primary_model = primary_route_signature(
         plugin_config,
         get_configured_api_providers=get_configured_api_providers,
@@ -1590,7 +1602,7 @@ async def process_yaml_response_logic(
     )
     if gemini_policy:
         system_prompt += "\n\n" + gemini_policy
-    if knowledge_store is not None:
+    if not execution_policy.is_context_only and knowledge_store is not None:
         try:
             plugin_summary = knowledge_store.get_plugin_summary_for_prompt()
         except Exception as exc:
@@ -1669,7 +1681,7 @@ async def process_yaml_response_logic(
     if not is_private_session:
         topic_hint = get_group_topic_summary(group_id)
     grounding_context = ""
-    if not disable_network_hooks:
+    if not disable_network_hooks and not execution_policy.is_context_only:
         grounding_context = await build_grounding_context(history_last_text, topic_hint)
     if grounding_context:
         input_text = f"{input_text}\n\n## 联网事实校验（自动注入）\n{grounding_context}\n"
@@ -1971,123 +1983,127 @@ async def process_yaml_response_logic(
             expression_review_caller=review_call_ai_api or lite_call_ai_api or call_ai_api,
             runtime=agent_runtime,
         )
-        agent_tool_registry = _clone_tool_registry(tool_registry)
-        register_qq_recall_tool(
-            agent_tool_registry,
-            executor=executor,
-            bot=bot,
-            event=event,
-            cutoff=float(
-                reply_commit_state.get("received_wall_at", 0.0) or time.time()
-            ),
-        )
-        register_current_user_avatar_tool(agent_tool_registry, profile_service, user_id)
-        register_peer_bot_tools(
-            agent_tool_registry,
-            bot=bot,
-            event=event,
-            registry=peer_bot_registry,
-            tracker=peer_bot_tracker,
-            plugin_config=plugin_config,
-            qq_outbound_ledger=qq_outbound_ledger,
-            record_group_msg=record_group_msg,
-            turn_state=reply_commit_state,
-            logger=logger,
-        )
-        register_groupmate_qzone_agent_tools(
-            agent_tool_registry,
-            runtime=avatar_pair_runtime
-            or SimpleNamespace(
-                plugin_config=plugin_config,
-                runtime_bundle=SimpleNamespace(qzone_social_service=None),
-                logger=logger,
-            ),
-            bot=bot,
-            event=event,
-            candidates=resolved_avatar_pair_candidates,
-            policy_authorizer=(
-                user_policy_gate.current_authorization
-                if user_policy_gate is not None
-                else None
-            ),
-        )
-        register_current_group_context_tool(
-            agent_tool_registry,
-            bot=bot,
-            event=event,
-            plugin_config=plugin_config,
-            logger=logger,
-            policy_authorizer=(
-                user_policy_gate.current_authorization
-                if user_policy_gate is not None
-                else None
-            ),
-        )
-        register_group_user_avatar_pair_insight_tool(
-            agent_tool_registry,
-            runtime=avatar_pair_runtime
-            or SimpleNamespace(
-                plugin_config=plugin_config,
-                get_configured_api_providers=get_configured_api_providers,
-            ),
-            bot=bot,
-            event=event,
-            candidates=resolved_avatar_pair_candidates,
-            policy_authorizer=(
-                user_policy_gate.current_authorization
-                if user_policy_gate is not None
-                else None
-            ),
-        )
-        register_group_member_avatar_insight_tool(
-            agent_tool_registry,
-            runtime=avatar_pair_runtime
-            or SimpleNamespace(
-                plugin_config=plugin_config,
-                get_configured_api_providers=get_configured_api_providers,
-            ),
-            bot=bot,
-            event=event,
-            candidates=resolved_avatar_pair_candidates,
-            turn_media_context=turn_media_refs,
-            policy_authorizer=(
-                user_policy_gate.current_authorization
-                if user_policy_gate is not None
-                else None
-            ),
-        )
-        register_send_qq_expression_tools(
-            agent_tool_registry,
-            executor=executor,
-            bot=bot,
-            plugin_config=plugin_config,
-        )
-        register_moderation_for_turn(agent_tool_registry, executor=executor, state=reply_commit_state,
-                                     ordered_context=recent_context_hint, semantic_frame=semantic_frame)
-        try:
-            skill_runtime_for_images = SkillRuntime(
-                plugin_config=plugin_config,
-                logger=logger,
-                get_now=lambda: int(time.time()),
-                vision_caller=vision_caller,
-                tool_caller=agent_tool_caller,
+        if execution_policy.is_context_only:
+            from ...agent.tool_registry import ToolRegistry
+            agent_tool_registry = ToolRegistry()
+        else:
+            agent_tool_registry = _clone_tool_registry(tool_registry)
+            register_qq_recall_tool(
+                agent_tool_registry,
+                executor=executor,
+                bot=bot,
+                event=event,
+                cutoff=float(
+                    reply_commit_state.get("received_wall_at", 0.0) or time.time()
+                ),
             )
-            for tool in build_send_image_tools(skill_runtime_for_images, executor):
-                agent_tool_registry.register(tool)
-        except Exception as exc:
-            logger.debug(f"拟人插件 (YAML)：注册联网搜图发送工具失败: {exc}")
-        try:
-            sticker_dir = resolve_sticker_dir(getattr(plugin_config, "personification_sticker_path", None))
-            if sticker_dir.exists() and sticker_dir.is_dir():
-                agent_tool_registry.register(
-                    build_send_sticker_tool(
-                        sticker_dir,
-                        plugin_config,
-                        executor,
-                    )
+            register_current_user_avatar_tool(agent_tool_registry, profile_service, user_id)
+            register_peer_bot_tools(
+                agent_tool_registry,
+                bot=bot,
+                event=event,
+                registry=peer_bot_registry,
+                tracker=peer_bot_tracker,
+                plugin_config=plugin_config,
+                qq_outbound_ledger=qq_outbound_ledger,
+                record_group_msg=record_group_msg,
+                turn_state=reply_commit_state,
+                logger=logger,
+            )
+            register_groupmate_qzone_agent_tools(
+                agent_tool_registry,
+                runtime=avatar_pair_runtime
+                or SimpleNamespace(
+                    plugin_config=plugin_config,
+                    runtime_bundle=SimpleNamespace(qzone_social_service=None),
+                    logger=logger,
+                ),
+                bot=bot,
+                event=event,
+                candidates=resolved_avatar_pair_candidates,
+                policy_authorizer=(
+                    user_policy_gate.current_authorization
+                    if user_policy_gate is not None
+                    else None
+                ),
+            )
+            register_current_group_context_tool(
+                agent_tool_registry,
+                bot=bot,
+                event=event,
+                plugin_config=plugin_config,
+                logger=logger,
+                policy_authorizer=(
+                    user_policy_gate.current_authorization
+                    if user_policy_gate is not None
+                    else None
+                ),
+            )
+            register_group_user_avatar_pair_insight_tool(
+                agent_tool_registry,
+                runtime=avatar_pair_runtime
+                or SimpleNamespace(
+                    plugin_config=plugin_config,
+                    get_configured_api_providers=get_configured_api_providers,
+                ),
+                bot=bot,
+                event=event,
+                candidates=resolved_avatar_pair_candidates,
+                policy_authorizer=(
+                    user_policy_gate.current_authorization
+                    if user_policy_gate is not None
+                    else None
+                ),
+            )
+            register_group_member_avatar_insight_tool(
+                agent_tool_registry,
+                runtime=avatar_pair_runtime
+                or SimpleNamespace(
+                    plugin_config=plugin_config,
+                    get_configured_api_providers=get_configured_api_providers,
+                ),
+                bot=bot,
+                event=event,
+                candidates=resolved_avatar_pair_candidates,
+                turn_media_context=turn_media_refs,
+                policy_authorizer=(
+                    user_policy_gate.current_authorization
+                    if user_policy_gate is not None
+                    else None
+                ),
+            )
+            register_send_qq_expression_tools(
+                agent_tool_registry,
+                executor=executor,
+                bot=bot,
+                plugin_config=plugin_config,
+            )
+            register_moderation_for_turn(agent_tool_registry, executor=executor, state=reply_commit_state,
+                                         ordered_context=recent_context_hint, semantic_frame=semantic_frame)
+            try:
+                skill_runtime_for_images = SkillRuntime(
+                    plugin_config=plugin_config,
+                    logger=logger,
+                    get_now=lambda: int(time.time()),
+                    vision_caller=vision_caller,
+                    tool_caller=agent_tool_caller,
                 )
-        except Exception as exc:
-            logger.debug(f"拟人插件 (YAML)：注册本地表情包发送工具失败: {exc}")
+                for tool in build_send_image_tools(skill_runtime_for_images, executor):
+                    agent_tool_registry.register(tool)
+            except Exception as exc:
+                logger.debug(f"拟人插件 (YAML)：注册联网搜图发送工具失败: {exc}")
+            try:
+                sticker_dir = resolve_sticker_dir(getattr(plugin_config, "personification_sticker_path", None))
+                if sticker_dir.exists() and sticker_dir.is_dir():
+                    agent_tool_registry.register(
+                        build_send_sticker_tool(
+                            sticker_dir,
+                            plugin_config,
+                            executor,
+                        )
+                    )
+            except Exception as exc:
+                logger.debug(f"拟人插件 (YAML)：注册本地表情包发送工具失败: {exc}")
         image_ctx_token = set_current_image_context(
             tool_image_urls,
             input_text,
@@ -2155,6 +2171,7 @@ async def process_yaml_response_logic(
                     event=event,
                     messages=agent_messages,
                     turn_plan=turn_plan,
+                    execution_policy=execution_policy,
                 )
                 agent_result = await run_agent(
                     messages=agent_messages,
@@ -2179,6 +2196,7 @@ async def process_yaml_response_logic(
                     precomputed_intent=intent_decision,
                     turn_plan=turn_plan,
                     candidate_memories=candidate_memories,
+                    execution_policy=execution_policy,
                     memory_store=memory_store,
                     memory_curator=memory_curator,
                     time_budget_seconds=_compute_agent_time_budget(
@@ -2187,6 +2205,7 @@ async def process_yaml_response_logic(
                             getattr(plugin_config, "personification_response_timeout", 180) or 180
                         ),
                         response_deadline=response_deadline,
+                        reserve_seconds=0.0 if execution_policy.is_context_only else 30.0,
                     ),
                     ack_sender=ack_sender,
                     is_group=not is_private_session,
@@ -4215,6 +4234,8 @@ def build_yaml_response_processor(
             solo_speaker_follow=bool(runtime_overrides.get("solo_speaker_follow", False)),
             reply_required=bool(runtime_overrides.get("reply_required", False)),
             response_deadline=runtime_overrides.get("response_deadline"),
+            prepared_memory_context=runtime_overrides.get("prepared_memory_context"),
+            execution_policy=runtime_overrides.get("execution_policy"),
             prepared_inner_state=runtime_overrides.get("prepared_inner_state"),
             prepared_emotion_state=runtime_overrides.get("prepared_emotion_state"),
             turn_media_context=list(runtime_overrides.get("turn_media_context") or []),

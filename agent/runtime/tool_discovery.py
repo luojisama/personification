@@ -244,7 +244,8 @@ class ToolDisclosureSession:
 
     def client_schemas(self, schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if self.mode == "off":
-            self._last_exposed_names = set(_schema_by_name(schemas))
+            self._candidate_names = set(_schema_by_name(schemas))
+            self._last_exposed_names = set(self._candidate_names)
             return list(schemas)
         schemas = [
             schema

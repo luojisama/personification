@@ -18,6 +18,8 @@ from ...core.metrics import record_counter, record_timing
 from ...core.media_evidence import capture_executed_vision_evidence, merge_media_evidence
 from ...core.turn_media import coerce_turn_media
 from ...core.time_ctx import get_configured_now
+from ...core.llm_context import current_llm_context, reset_llm_context, set_llm_purpose
+from ...core.turn_execution_policy import derive_turn_execution_policy
 from ..tool_registry import ToolRegistry
 from ...core.message_parts import extract_text_from_parts
 from ...core.web_grounding import merge_grounding_topic
@@ -142,12 +144,14 @@ class AgentPhaseDeadlines:
 
 def _derive_agent_phase_deadlines(
     agent_budget_deadline: float | None,
+    *,
+    context_only: bool = False,
 ) -> AgentPhaseDeadlines:
     if agent_budget_deadline is None:
         return AgentPhaseDeadlines(None, None, None, None)
     quality_deadline = float(agent_budget_deadline)
     synthesis_deadline = quality_deadline - _AGENT_QUALITY_RESERVE_SECONDS
-    tool_deadline = synthesis_deadline - _AGENT_SYNTHESIS_RESERVE_SECONDS
+    tool_deadline = None if context_only else synthesis_deadline - _AGENT_SYNTHESIS_RESERVE_SECONDS
     return AgentPhaseDeadlines(
         agent_budget_deadline=quality_deadline,
         tool_deadline=tool_deadline,
@@ -172,6 +176,14 @@ async def _await_with_deadline(
     if remaining <= 0.0:
         raise asyncio.TimeoutError
     return await asyncio.wait_for(factory(), timeout=remaining)
+
+
+async def _with_llm_purpose(purpose: str, factory: Callable[[], Awaitable[Any]]) -> Any:
+    token = set_llm_purpose(purpose)
+    try:
+        return await factory()
+    finally:
+        reset_llm_context(token)
 
 
 def _maybe_inject_date_to_query(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -274,12 +286,16 @@ async def run_agent(
     allow_builtin_search: bool = True,
     turn_media_context: list[Any] | None = None,
     bot_avatar_context: Any = None,
+    execution_policy: Any = None,
 ) -> AgentResult:
     # The main caller may be a vision-capable route whose first response is
     # intentionally expensive.  Keep the final visible-text hygiene pass on
     # the lightweight caller when one is available, while retaining the main
     # caller for the Agent loop and media tools.
     quality_caller = quality_tool_caller or tool_caller
+    context_only = bool(getattr(execution_policy, "is_context_only", False))
+    executed_steps = 0
+    tool_calls_executed = 0
     if cancel_background_social_video_research(executor):
         _record_reply_trace_stage(
             key="background_media_research_cancelled",
@@ -298,11 +314,6 @@ async def run_agent(
         and _caller_supports_builtin_search(tool_caller)
         and bool(allow_builtin_search)
     )
-    disclosure_mode = resolve_tool_disclosure_mode(
-        getattr(plugin_config, "personification_tool_disclosure_mode", "auto"),
-        tool_caller,
-    )
-    tool_disclosure = ToolDisclosureSession(registry, mode=disclosure_mode)
     pending_actions: List[dict] = []
     background_social_job_started = False
     bind_actions = getattr(executor, "bind_pending_actions", None)
@@ -346,6 +357,14 @@ async def run_agent(
             executed_media_evidence.append(projection)
 
     async def _finalize_result(result: AgentResult, *, reason: str) -> AgentResult:
+        if context_only:
+            result.suppress_reply_recovery = True
+        _record_reply_trace_stage(
+            key="agent_execution_summary", label="Agent 执行统计", status="info",
+            detail=(f"execution_route={'context_only' if context_only else 'agent'} "
+                    f"effective_max_steps={effective_max_steps} executed_steps={executed_steps} "
+                    f"tool_calls_executed={max(tool_calls_executed, len(stop_state.tool_result_records))} reason={reason}"),
+        )
         result.tool_calls_made = bool(stop_state.has_tool_call)
         result.media_evidence = merge_media_evidence(executed_media_evidence)
         social = social_evidence_from_records(stop_state.tool_result_records)
@@ -369,7 +388,7 @@ async def run_agent(
             return result
         try:
             finalized = await _await_with_deadline(
-                lambda: finalize_agent_reply_quality(
+                lambda: _with_llm_purpose("reply_review", lambda: finalize_agent_reply_quality(
                     result,
                     tool_caller=quality_caller,
                     messages=messages,
@@ -383,7 +402,7 @@ async def run_agent(
                     logger=logger,
                     reason=reason,
                     response_deadline=phase_deadlines.quality_deadline,
-                ),
+                )),
                 phase_deadlines.quality_deadline,
             )
         except asyncio.TimeoutError:
@@ -508,11 +527,23 @@ async def run_agent(
         == "audio"
     )
     has_visual_media = bool(user_images or user_video_count or user_audio_count)
+    if execution_policy is None and precomputed_intent is not None:
+        execution_policy = derive_turn_execution_policy(
+            turn_plan=turn_plan, intent_decision=precomputed_intent, has_media=has_visual_media,
+            enabled=bool(getattr(plugin_config, "personification_context_only_chat_enabled", True)),
+        )
+        context_only = execution_policy.is_context_only
     preliminary_query_text = _clean_user_query_text(
         contextual_query_text
         or focus_query_text
         or user_text
     )
+    if precomputed_intent is None and context_only:
+        # The upstream semantic policy already owns classification. Do not
+        # make another classification request on the fixed no-tool route.
+        precomputed_intent = metadata_fallback_turn_semantic_frame_for_session(
+            is_group=bool(is_group), is_random_chat=False,
+        ).to_intent_decision()
     if precomputed_intent is not None:
         intent_decision = precomputed_intent
         logger.debug("[agent] using precomputed intent_decision, skipping LLM inference")
@@ -582,6 +613,14 @@ async def run_agent(
         actual_max_steps=effective_max_steps,
         actual_time_budget_seconds=time_budget_seconds,
     )
+    if context_only:
+        effective_max_steps = 1
+        time_budget_seconds = min(18.0, max(0.0, float(time_budget_seconds))) if time_budget_seconds is not None else 18.0
+        budget_profile = replace(
+            budget_profile, mode="light_chat", suggested_max_steps=1,
+            suggested_time_budget_seconds=time_budget_seconds,
+            source="context_only", reason="semantic_context_only",
+        )
     profile_deadline = (
         agent_started_at + max(0.0, float(time_budget_seconds or 0.0))
         if time_budget_seconds is not None
@@ -589,7 +628,10 @@ async def run_agent(
     )
     if profile_deadline is not None:
         budget_deadline = profile_deadline if budget_deadline is None else min(budget_deadline, profile_deadline)
-    phase_deadlines = _derive_agent_phase_deadlines(budget_deadline)
+    inherited_deadline = current_llm_context().get("deadline_monotonic")
+    if context_only and inherited_deadline is not None:
+        budget_deadline = min(budget_deadline, float(inherited_deadline))
+    phase_deadlines = _derive_agent_phase_deadlines(budget_deadline, context_only=context_only)
     record_counter(
         "agent.budget_profile_total",
         mode=budget_profile.mode,
@@ -611,7 +653,8 @@ async def run_agent(
             actual_time_budget_seconds=time_budget_seconds,
         ),
         hint=(
-            "当前已按 adaptive 模式接管本轮 Agent 步数和剩余秒数"
+            "本轮日常对话只生成一次；生成与最终审阅共享截止时间，审阅保留 5 秒"
+            if context_only else "当前已按 adaptive 模式接管本轮 Agent 步数和剩余秒数"
             if budget_applied
             else "当前仅 shadow 观测，不直接改变生产超时或工具步数"
         ),
@@ -622,7 +665,7 @@ async def run_agent(
         status="info",
         detail=(
             f"tool_available_ms={_phase_remaining_ms(phase_deadlines.tool_deadline)} "
-            f"synthesis_reserve_ms={int(_AGENT_SYNTHESIS_RESERVE_SECONDS * 1000)} "
+            f"synthesis_reserve_ms={13000 if context_only else int(_AGENT_SYNTHESIS_RESERVE_SECONDS * 1000)} "
             f"quality_reserve_ms={int(_AGENT_QUALITY_RESERVE_SECONDS * 1000)} "
             f"elapsed_ms={int((time.monotonic() - agent_started_at) * 1000)} "
             "reason=initialized"
@@ -634,11 +677,77 @@ async def run_agent(
         label="Agent 开始",
         status="info",
         detail=(
-            f"max_steps={effective_max_steps} builtin_search={bool(use_builtin_search)} "
+            f"max_steps={effective_max_steps} builtin_search={bool(use_builtin_search and not context_only)} "
             f"images={len(user_images)} videos={user_video_count} required={str(bool(reply_required)).lower()} "
             f"caller={type(tool_caller).__name__} elapsed_ms=0"
         ),
     )
+    if context_only:
+        # A fixed no-tool route must never enter stop-flow lookup recovery,
+        # discovery, evidence research, or background learning.
+        use_builtin_search = False
+        _record_reply_trace_stage(
+            key="agent_execution_route", label="Agent 执行路径", status="info",
+            detail=(f"execution_route=context_only reason={getattr(execution_policy, 'reason', 'semantic_context_only')} "
+                    "effective_max_steps=1 builtin_search=false query_rewrite=skipped"),
+        )
+        rewritten_query = ContextualQueryRewrite(
+            primary_query="", query_candidates=[], context_clues=[],
+            need_image_understanding=False, recommended_tools=[], search_plan=[],
+            source="skipped", fallback_reason="context_only",
+        )
+        prompt_segments = append_agent_system_prompts(
+            messages=messages, runtime_chat_intent=runtime_chat_intent,
+            plugin_query_intent=plugin_query_intent, intent_decision=intent_decision,
+            rewritten_query=rewritten_query, turn_plan=turn_plan, user_images=[],
+            direct_image_input=False, is_group=is_group, is_direct_mention=is_direct_mention,
+            reply_required=reply_required, surface=surface, plugin_config=plugin_config,
+            budget_profile=budget_profile, context_only=True,
+        )
+        _record_reply_trace_stage(
+            key="agent_prompt_segments", label="上下文分段", status="info",
+            detail=f"segments={prompt_segments.segment_count} execution_route=context_only wire_order=preserved",
+        )
+        _record_reply_trace_stage(
+            key="agent_tool_disclosure", label="工具披露", status="info",
+            detail="mode=context_only step=1 intents=0 candidates=0 preloaded=0 real_schemas=0 wire_schemas=0 schema_chars=0 discoveries=0",
+        )
+        try:
+            model_started_at = time.monotonic()
+            async def generate_context_reply() -> Any:
+                nonlocal executed_steps
+                executed_steps += 1
+                return await _with_llm_purpose(
+                    "reply_generation", lambda: tool_caller.chat_with_tools(messages, [], False),
+                )
+            response = await _await_with_deadline(generate_context_reply, phase_deadlines.synthesis_deadline)
+        except asyncio.TimeoutError:
+            return await _finalize_result(AgentResult(
+                text="[NO_REPLY]", pending_actions=pending_actions,
+                failure_code="agent_model_timeout", suppress_reply_recovery=True,
+            ), reason="context_only_model_timeout")
+        observe_model_step(
+            response=response, tool_caller=tool_caller, logger=logger, step=1,
+            selected_names=[], runtime_chat_intent=runtime_chat_intent,
+            model_elapsed_ms=int((time.monotonic() - model_started_at) * 1000),
+            record_trace=_record_reply_trace_stage,
+        )
+        if getattr(response, "tool_calls", None):
+            _record_reply_trace_stage(
+                key="agent_tool_blocked", label="日常对话工具调用已拒绝", status="warn",
+                detail="execution_route=context_only executed=false reason=tools_disabled",
+            )
+            result = AgentResult(text="[NO_REPLY]", pending_actions=pending_actions,
+                                 failure_code="context_only_tool_call_rejected", suppress_reply_recovery=True)
+        else:
+            text = str(getattr(response, "content", "") or "").strip()
+            result = AgentResult(text=text or "[NO_REPLY]", pending_actions=pending_actions,
+                                 failure_code="" if text else "context_only_empty_reply", suppress_reply_recovery=True)
+        return await _finalize_result(result, reason="context_only_reply")
+    disclosure_mode = resolve_tool_disclosure_mode(
+        getattr(plugin_config, "personification_tool_disclosure_mode", "auto"), tool_caller,
+    )
+    tool_disclosure = ToolDisclosureSession(registry, mode=disclosure_mode)
     rewrite_context = _derive_query_rewrite_context(
         messages,
         current_images=user_images,
@@ -1000,6 +1109,7 @@ async def run_agent(
                 f"mode={disclosure_mode} step={_step + 1} intents={len(turn_tool_intents)} "
                 f"candidates={len(tool_disclosure._candidate_names)} preloaded={len(tool_disclosure.loaded_names)} "
                 f"real_schemas={len([name for name in selected_names if name != TOOL_SEARCH_NAME])} "
+                f"wire_schemas={len(wire_schemas)} "
                 f"schema_chars={schema_chars} discoveries={getattr(tool_disclosure, 'discovery_count', 0)}"
             ),
         )
@@ -1029,6 +1139,7 @@ async def run_agent(
         )
         model_started_at = time.monotonic()
         try:
+            executed_steps += 1
             if disclosure_mode == "native":
                 response = await _await_with_deadline(
                     lambda: tool_caller.chat_with_deferred_tools(
@@ -1232,6 +1343,7 @@ async def run_agent(
                 # protocol events, not executed business tools or evidence.
                 stop_state.has_tool_call = True
                 did_execute = True
+                tool_calls_executed += 1
                 tool_disclosure.mark_executed(tool_call.name)
                 tool_args, result = await _execute_tool_with_retries(
                     registry=registry,

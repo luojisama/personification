@@ -1606,7 +1606,12 @@ async def review_response_text(
                 raise asyncio.TimeoutError
             if evidence_message is not None:
                 messages = [*messages[:-1], dict(evidence_message), *messages[-1:]]
-            raw = await asyncio.wait_for(call_ai_api(messages), timeout=remaining)
+            from .llm_context import reset_llm_context, set_llm_purpose
+            purpose_token = set_llm_purpose("reply_review")
+            try:
+                raw = await asyncio.wait_for(call_ai_api(messages), timeout=remaining)
+            finally:
+                reset_llm_context(purpose_token)
             parsed = _parse_review_payload(str(raw or ""))
             if parsed is not None:
                 parsed_action = parsed.action

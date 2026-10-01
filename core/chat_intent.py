@@ -594,14 +594,19 @@ async def infer_turn_semantic_frame_with_llm(
         f"user_attitude={fallback.user_attitude}, bot_emotion={fallback.bot_emotion}"
     )
     try:
-        response = await tool_caller.chat_with_tools(
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": user_content},
-            ],
-            tools=[],
-            use_builtin_search=False,
-        )
+        from .llm_context import reset_llm_context, set_llm_purpose
+        purpose_token = set_llm_purpose("semantic_frame")
+        try:
+            response = await tool_caller.chat_with_tools(
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                tools=[],
+                use_builtin_search=False,
+            )
+        finally:
+            reset_llm_context(purpose_token)
         payload = _extract_json_payload(str(getattr(response, "content", "") or ""))
         frame = _parse_turn_semantic_frame_payload(payload) if payload is not None else None
         if frame is None:

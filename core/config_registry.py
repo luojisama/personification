@@ -1720,6 +1720,12 @@ def _build_entries() -> list[ConfigEntry]:
             parser=_int_parser,
         ),
         ConfigEntry(
+            key="context_only_chat_enabled", field_name="personification_context_only_chat_enabled",
+            display_name="日常闲聊轻量路径", value_type="bool", default=True, scope=GLOBAL_SCOPE,
+            description="语义模型确认无需工具的日常闲聊时，仅使用已有画像、风格与上下文生成并审阅回复。",
+            category="config", group="记忆", help_aliases=("闲聊轻量路径",), parser=_bool_parser,
+        ),
+        ConfigEntry(
             key="memory_context_enabled", field_name="personification_memory_context_enabled",
             display_name="长上下文记忆", value_type="bool", default=True, scope=GLOBAL_SCOPE,
             description="启用按会话范围、时间和消息数量裁剪的长上下文记忆。关闭后回退到原有历史与召回路径。",

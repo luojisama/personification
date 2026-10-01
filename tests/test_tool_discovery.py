@@ -40,6 +40,15 @@ def _registry(count: int = 12) -> ToolRegistry:
     return registry
 
 
+def test_off_disclosure_records_actual_candidates_and_exposed_names() -> None:
+    registry = _registry(15)
+    session = ToolDisclosureSession(registry, mode="off")
+    schemas = registry.openai_schemas()
+    assert session.client_schemas(schemas) == schemas
+    assert len(session._candidate_names) == 15
+    assert session._last_exposed_names == session._candidate_names
+
+
 def test_client_disclosure_exposes_core_and_search_then_loads_schema() -> None:
     registry = _registry()
     session = ToolDisclosureSession(registry, mode="client", core_limit=3, search_limit=2)

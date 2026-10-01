@@ -181,11 +181,16 @@ async def update_current_states(*, scope: dict, messages: list[dict], caller: An
     )
     evidence = [{"source_id": str(m.get("id")), "role": m.get("role"),
                  "text": render_history([m], timezone)} for m in messages if m.get("id") is not None and not m.get("is_summary")]
-    response = await asyncio.wait_for(caller.chat_with_tools(messages=[
-        {"role": "system", "content": system},
-        {"role": "user", "content": json.dumps({"now": timestamp_label(time.time(), timezone),
-            "existing": existing, "pending_topics": pending, "evidence": evidence}, ensure_ascii=False)}],
-        tools=[], use_builtin_search=False), timeout=timeout)
+    from .llm_context import reset_llm_context, set_llm_purpose
+    purpose_token = set_llm_purpose("memory_state_refresh")
+    try:
+        response = await asyncio.wait_for(caller.chat_with_tools(messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps({"now": timestamp_label(time.time(), timezone),
+                "existing": existing, "pending_topics": pending, "evidence": evidence}, ensure_ascii=False)}],
+            tools=[], use_builtin_search=False), timeout=timeout)
+    finally:
+        reset_llm_context(purpose_token)
     from ..agent.runtime.planner import extract_json_payload
     payload = extract_json_payload(str(getattr(response, "content", "") or ""))
     if isinstance(payload, dict) and isinstance(payload.get("updates"), list):
