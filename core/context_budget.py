@@ -19,6 +19,26 @@ class ContextBudgetExceeded(ValueError):
     code = "provider_context_budget_exceeded"
     retryable = False
 
+    def __init__(self, message: str, *, detail: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.budget_detail = dict(detail or {})
+
+
+def budget_failure_detail(messages: list[dict], tools: list[dict], budget: "ContextBudget", phase: str) -> dict[str, Any]:
+    """Numeric request diagnostics; never carry prompt or tool contents."""
+    return {
+        **request_token_categories(messages, tools, multiplier=budget.estimation_multiplier),
+        "estimated_input_tokens": estimate_request_tokens(messages, tools, multiplier=budget.estimation_multiplier),
+        "input_token_limit": budget.effective_input_limit,
+        "context_window_tokens": budget.context_window_tokens,
+        "budget_source": budget.source,
+        "output_reserve_tokens": budget.max_output_tokens,
+        "thinking_reserve_tokens": budget.thinking_reserve_tokens,
+        "failure_phase": phase,
+        "status": "exceeded",
+        "diagnostic_code": ContextBudgetExceeded.code,
+    }
+
 
 _CALIBRATION_LOCK = threading.RLock()
 _ROUTE_ESTIMATE_MULTIPLIERS: dict[str, float] = {}
@@ -66,7 +86,11 @@ class ContextBudget:
         thinking_reserve = positive("thinking_reserve_tokens") or max(512, int(window * 0.05))
         if output + margin + thinking_reserve >= window:
             raise ContextBudgetExceeded(
-                "route output, thinking and safety reserves exceed its context window"
+                "route output, thinking and safety reserves exceed its context window",
+                detail={"context_window_tokens": window, "input_token_limit": 0,
+                        "output_reserve_tokens": output, "thinking_reserve_tokens": thinking_reserve,
+                        "budget_source": source, "failure_phase": "route_reserves",
+                        "status": "exceeded", "diagnostic_code": ContextBudgetExceeded.code},
             )
         physical_input = max(1, window - output - margin - thinking_reserve)
         configured_max = positive("max_input_tokens")
@@ -295,7 +319,8 @@ def fit_request_to_budget(
         removable = next((i for i in range(len(kept)) if i not in protected), None)
         if removable is None:
             raise ContextBudgetExceeded(
-                f"required request exceeds route input budget ({estimate_request_tokens(kept, tools, multiplier=budget.estimation_multiplier)}>{limit})"
+                f"required request exceeds route input budget ({estimate_request_tokens(kept, tools, multiplier=budget.estimation_multiplier)}>{limit})",
+                detail=budget_failure_detail(kept, tools, budget, "required_request"),
             )
         for index in sorted(_removal_indexes(kept, removable), reverse=True):
             kept.pop(index)
@@ -357,7 +382,8 @@ def _refit_trusted_embedded_history(
                         break
             new_rendered = "".join(rendered_parts)
         if not isinstance(new_rendered, str):
-            raise ContextBudgetExceeded("trusted history renderer returned invalid content")
+            raise ContextBudgetExceeded("trusted history renderer returned invalid content",
+                                        detail=budget_failure_detail(messages, tools, budget, "history_renderer"))
         message["content"] = _replace_content_text(content, rendered, new_rendered)
 
 
@@ -403,7 +429,8 @@ def fit_history_to_budget(
     history_limit = min(budget.history_tokens, available)
     if available < 0:
         raise ContextBudgetExceeded(
-            f"fixed request components exceed route input budget ({fixed_tokens}>{budget.effective_input_limit})"
+            f"fixed request components exceed route input budget ({fixed_tokens}>{budget.effective_input_limit})",
+            detail=budget_failure_detail(fixed, tool_schemas, budget, "fixed_components"),
         )
     while estimate_request_tokens(selected, [], multiplier=budget.estimation_multiplier) > history_limit:
         if not selected:
@@ -414,7 +441,8 @@ def fit_history_to_budget(
         # failure rather than a malformed system-free history.
         if str(selected[0].get("role") or "") == "system":
             if len(selected) == 1:
-                raise ContextBudgetExceeded("required history system component exceeds route budget")
+                raise ContextBudgetExceeded("required history system component exceeds route budget",
+                                            detail=budget_failure_detail(fixed + selected, tool_schemas, budget, "required_history"))
             candidate = 1
         else:
             candidate = 0

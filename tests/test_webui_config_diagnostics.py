@@ -709,3 +709,19 @@ def test_provider_model_probe_restores_secret_only_from_valid_ref(
     assert response.status_code == 200, response.text
     assert captured["api_key"] == "probe-provider-secret"
     assert "probe-provider-secret" not in response.text
+
+
+def test_provider_budget_preview_is_admin_only_local_and_secret_free(_runtime_context, monkeypatch):
+    routes = load_personification_module("plugin.personification.webui.routes.config_routes")
+    async def forbidden_probe(*args, **kwargs):
+        raise AssertionError("capacity preview must not contact provider")
+    monkeypatch.setattr(routes, "_probe_http_models", forbidden_probe)
+    client = _build_client(_runtime_context)
+    request = {"provider": {"model": "gemini-3.8-flash-high", "api_key": "private-key", "api_url": "https://private.example"}}
+    assert client.post("/personification/api/config/provider-budget", json=request).status_code in (401, 403)
+    _login_as_admin(client, _runtime_context)
+    response = client.post("/personification/api/config/provider-budget", json=request)
+    assert response.status_code == 200
+    assert response.json()["models"][0]["effective_input_limit"] == 16384
+    assert "private-key" not in response.text
+    assert "private.example" not in response.text

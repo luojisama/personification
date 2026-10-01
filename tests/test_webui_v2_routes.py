@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +24,23 @@ route_capabilities = load_personification_module(
 v2_services = load_personification_module(
     "plugin.personification.webui.v2_services"
 )
+
+
+def test_context_diagnostic_dto_retains_safe_local_counts_and_budget_failure():
+    dto = v2_routes._trace_detail({"trace_id": "local-only", "outcome": "failed", "stages": [
+        {"key": "memory_context", "detail": json.dumps({"status": "local_context_only", "profile_count": 2,
+            "history_count": 8, "state_count": 1, "raw_prompt": "DO_NOT_EXPOSE"})},
+        {"key": "context_budget", "detail": json.dumps({"status": "exceeded", "estimated_input_tokens": 19000,
+            "input_token_limit": 16384, "failure_phase": "required_request",
+            "diagnostic_code": "provider_context_budget_exceeded", "tool_args": "DO_NOT_EXPOSE"})},
+    ]})
+    local = dto["stages"][0]["context_diagnostic"]
+    assert (local["profile_count"], local["history_count"], local["state_count"]) == (2, 8, 1)
+    budget = dto["stages"][1]["context_diagnostic"]
+    assert budget["diagnostic_code"] == "provider_context_budget_exceeded"
+    assert budget["failure_phase"] == "required_request"
+    assert budget["estimated_input_tokens"] == 19000
+    assert "DO_NOT_EXPOSE" not in repr(local) + repr(budget)
 
 
 def test_v2_router_exposes_paged_trace_recovery_capability_and_sse_routes() -> None:

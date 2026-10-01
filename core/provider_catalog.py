@@ -55,6 +55,7 @@ def _model_entry(value: Any, *, fallback_model: str = "") -> dict[str, Any] | No
     }
     for name in (
         "context_window_tokens", "max_input_tokens", "max_output_tokens", "input_token_limit",
+        "reported_input_token_limit", "reported_output_token_limit",
     ):
         try:
             result[name] = max(0, int(raw.get(name, 0) or 0))
@@ -83,7 +84,21 @@ def normalize_catalog_pool(raw: Any, *, index: int = 0) -> dict[str, Any] | None
         parsed = _model_entry(item, fallback_model=_text(item.get("model")))
         if parsed:
             models.append(parsed)
-    legacy_model = _text(item.get("model"))
+    legacy_model = _text(item.get("legacy_capacity_model_id") or item.get("model"))
+    if legacy_model:
+        item["legacy_capacity_model_id"] = legacy_model
+    # Compatibility is exact-model only: zero-filled catalog entries must not
+    # erase a legacy capacity, or transfer it to an unrelated model.
+    for model in models:
+        if model["model_id"] != legacy_model:
+            continue
+        for name in ("context_window_tokens", "max_input_tokens", "max_output_tokens", "input_token_limit"):
+            try:
+                legacy_limit = max(0, int(item.get(name, 0) or 0))
+            except (TypeError, ValueError):
+                legacy_limit = 0
+            if not model.get(name) and legacy_limit:
+                model[name] = legacy_limit
     default_model_id = _text(item.get("default_model_id") or legacy_model)
     known = {model["model_id"] for model in models}
     if default_model_id not in known:

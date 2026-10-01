@@ -304,7 +304,34 @@ def _models_endpoint(provider: dict[str, Any]) -> tuple[str, dict[str, str], dic
     return f"{base}/models", headers, {}, "openai"
 
 
-def _parse_model_list(api_type: str, payload: Any) -> list[dict[str, str]]:
+def _positive_model_limit(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _provider_budget_preview(provider: dict[str, Any], config: Any = None) -> list[dict[str, Any]]:
+    """Use the wire budget algorithm, without credentials or a provider request."""
+    from ...core.provider_catalog import normalize_catalog_pool
+    from ...core.context_budget import ContextBudget, ContextBudgetExceeded
+    normalized = normalize_catalog_pool(provider)
+    result = []
+    for model in (normalized or {}).get("models", []):
+        route = {**provider, **model}
+        for field in ("context_input_ratio", "context_safety_margin_ratio"):
+            if config is not None:
+                route[field] = getattr(config, "personification_" + field, route.get(field))
+        try:
+            budget = ContextBudget.from_route(route)
+            result.append({"model_id": model["model_id"], "context_window_tokens": budget.context_window_tokens,
+                           "effective_input_limit": budget.effective_input_limit, "source": budget.source})
+        except ContextBudgetExceeded:
+            result.append({"model_id": model["model_id"], "source": "invalid_reserves", "error": "provider_context_budget_exceeded"})
+    return result
+
+
+def _parse_model_list(api_type: str, payload: Any) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
     models: list[dict[str, str]] = []
@@ -325,6 +352,8 @@ def _parse_model_list(api_type: str, payload: Any) -> list[dict[str, str]]:
                     "id": model_id,
                     "label": str(item.get("displayName", "") or model_id),
                     "source": "gemini_models",
+                    "reported_input_token_limit": _positive_model_limit(item.get("inputTokenLimit")),
+                    "reported_output_token_limit": _positive_model_limit(item.get("outputTokenLimit")),
                 }
             )
         return models
@@ -1587,6 +1616,13 @@ def build_config_router(*, runtime) -> APIRouter:
             },
             operation_diagnostic,
         )
+
+    @router.post("/provider-budget")
+    async def provider_budget(body: dict | None = None, _: AdminIdentity = Depends(require_admin)) -> dict:
+        provider = (body or {}).get("provider", body or {})
+        if not isinstance(provider, dict):
+            raise HTTPException(status_code=400, detail="provider must be an object")
+        return {"models": _provider_budget_preview(provider, runtime.plugin_config)}
 
     @router.post("/provider-models")
     async def provider_models(

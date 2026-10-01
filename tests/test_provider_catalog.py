@@ -139,3 +139,46 @@ def test_invalid_catalog_vision_pair_never_uses_global_fallback(monkeypatch) -> 
     cfg = _cfg([_pool()], {"vision": {"provider_id": "gateway-a", "model_id": "gone"}})
     monkeypatch.setattr(ai_routes, "resolve_global_fallback_provider", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not fall back")))
     assert ai_routes.build_fallback_vision_caller(cfg, purpose="vision") is None
+
+
+def test_legacy_capacity_inherits_only_exact_model_and_survives_renormalization():
+    pool = _pool() | {"context_window_tokens": 100000, "max_input_tokens": 45000,
+                      "default_model_id": "fast-model"}
+    pool["models"] = [{"model_id": "main-model", "context_window_tokens": 0},
+                      {"model_id": "fast-model"}, {"model_id": "MAIN-MODEL"}]
+    normalized = catalog.normalize_catalog_pool(pool)
+    again = catalog.normalize_catalog_pool(normalized)
+    assert again["models"][0]["context_window_tokens"] == 100000
+    assert again["models"][0]["max_input_tokens"] == 45000
+    assert again["models"][1]["context_window_tokens"] == 0
+    assert again["models"][2]["context_window_tokens"] == 0
+    assert catalog.expand_catalog_pools([again])[0]["context_window_tokens"] == 0
+
+
+def test_explicit_model_capacity_beats_legacy_and_unknown_alias_is_conservative():
+    pool = _pool() | {"context_window_tokens": 100000}
+    assert catalog.normalize_catalog_pool(pool)["models"][0]["context_window_tokens"] == 1050000
+    preview = config_routes._provider_budget_preview({"model": "gemini-3.8-flash-high"})
+    assert preview == [{"model_id": "gemini-3.8-flash-high", "context_window_tokens": 32768,
+                        "effective_input_limit": 16384, "source": "conservative_fallback"}]
+
+
+def test_gemini_list_capacity_is_metadata_not_output_reserve():
+    models = config_routes._parse_model_list("gemini", {"models": [{"name": "models/flash",
+        "inputTokenLimit": 1048576, "outputTokenLimit": 65536,
+        "supportedGenerationMethods": ["generateContent"]}]})
+    assert models[0]["reported_input_token_limit"] == 1048576
+    assert models[0]["reported_output_token_limit"] == 65536
+    normalized = catalog.normalize_catalog_pool({"models": [models[0] | {"model_id": "flash"}]})
+    assert normalized["models"][0]["max_output_tokens"] == 0
+    assert normalized["models"][0]["context_window_tokens"] == 0
+    assert normalized["models"][0]["reported_output_token_limit"] == 65536
+    assert config_routes._parse_model_list("gemini", {"models": [{"name": "models/no-metadata"}]})[0]["reported_input_token_limit"] == 0
+
+
+def test_budget_preview_uses_shared_runtime_ratios_and_reports_invalid_reserves():
+    preview = config_routes._provider_budget_preview({"model": "x", "context_window_tokens": 100000},
+                    SimpleNamespace(personification_context_input_ratio=0.25, personification_context_safety_margin_ratio=0.05))
+    assert preview[0]["effective_input_limit"] == 25000
+    bad = config_routes._provider_budget_preview({"model": "x", "context_window_tokens": 1000, "max_output_tokens": 2000})
+    assert bad[0]["error"] == "provider_context_budget_exceeded"

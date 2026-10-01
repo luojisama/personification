@@ -25,7 +25,7 @@ from .llm_context import (
     wire_budget_remaining,
 )
 from .gemini_transport import safe_upstream_diagnostics
-from .context_budget import ContextBudget, fit_request_to_budget, record_usage_calibration, request_token_categories, route_estimation_multiplier
+from .context_budget import ContextBudget, ContextBudgetExceeded, estimate_request_tokens, fit_request_to_budget, record_usage_calibration, request_token_categories, route_estimation_multiplier
 from .provider_types import (
     PROVIDER_TYPE_REMOVED,
     normalize_removed_provider_type,
@@ -1215,6 +1215,8 @@ class RoutedToolCaller:
         )
         descriptor = self._caller_route_descriptors.get(id(caller), {"caller": type(caller).__name__[:80]})
         shape = dict(request_shape or {})
+        if isinstance(exc, ContextBudgetExceeded):
+            shape.update(exc.budget_detail)
         schema_rejection = classify_schema_rejection(exc)
         upstream = safe_upstream_diagnostics(exc)
         wire_tools_count = _exception_wire_tools_count(exc)
@@ -1315,7 +1317,7 @@ class RoutedToolCaller:
                 status=status,
                 detail=(
                     f"provider={descriptor.get('provider', '-')} api={descriptor.get('api_type', '-')} "
-                    f"model={descriptor.get('model', '-')} purpose={descriptor.get('purpose', 'main')} route={descriptor.get('route_fingerprint', '-')} "
+                    f"model={descriptor.get('model', '-')} purpose={current_llm_context().get('purpose') or descriptor.get('purpose', 'main')} route={descriptor.get('route_fingerprint', '-')} "
                     f"tools={shape.get('tools_count', 0)}/{shape.get('input_tools_count', shape.get('tools_count', 0))} "
                     f"schema={shape.get('tool_schema_hash', '-')} "
                     f"excluded={shape.get('schema_excluded_count', 0)} "
@@ -1425,7 +1427,7 @@ class RoutedToolCaller:
                 status=status,
                 detail=(
                     f"provider={descriptor.get('provider', '-')} api={descriptor.get('api_type', '-')} "
-                    f"model={descriptor.get('model', '-')} purpose={descriptor.get('purpose', 'main')} route={descriptor.get('route_fingerprint', '-')} "
+                    f"model={descriptor.get('model', '-')} purpose={current_llm_context().get('purpose') or descriptor.get('purpose', 'main')} route={descriptor.get('route_fingerprint', '-')} "
                     f"phase={'safety_reframe' if reframe else 'initial'} status={status} code={code} "
                     f"http={status_code} request_kind={shape.get('request_kind', 'text')} "
                     f"messages={max(0, int(shape.get('message_count') or 0))} "
@@ -1439,6 +1441,7 @@ class RoutedToolCaller:
                     f"context_estimate={max(0, int(shape.get('estimated_input_tokens') or 0))}/"
                     f"{max(0, int(shape.get('input_token_limit') or 0))} "
                     f"context_source={shape.get('budget_source') or 'unavailable'} "
+                    f"failure_phase={shape.get('failure_phase') or 'none'} "
                     f"context_calibration={calibration.get('usage_calibration', 'unavailable')}"
                     + (
                         f" exception_type={exception_type} schema_rejection={schema_rejection_code}"
@@ -1508,6 +1511,15 @@ class RoutedToolCaller:
         except asyncio.CancelledError:
             cancelled = True
             raise
+        except ContextBudgetExceeded as exc:
+            error = exc
+            detail = dict(exc.budget_detail)
+            # Invalid reserve configurations fail before a ContextBudget exists.
+            detail.setdefault("estimated_input_tokens", estimate_request_tokens(messages, wire_tools))
+            detail.setdefault("token_count_source", "estimate")
+            request_shape = {**request_shape, **detail}
+            self._record_context_budget_stage(usage_descriptor, detail)
+            raise
         except BaseException as exc:
             error = exc
             raise
@@ -1575,11 +1587,13 @@ class RoutedToolCaller:
                 "native_input_tokens", "input_token_limit", "context_window_tokens", "system_tokens",
                 "history_tokens", "memory_tokens", "tools_tokens", "media_tokens", "output_reserve_tokens",
                 "thinking_reserve_tokens", "pre_trim_message_count", "post_trim_message_count",
+                "failure_phase",
             }
             payload = {name: detail[name] for name in allowed if name in detail}
-            payload.update({"status": "fitted", "diagnostic_code": "context_budget_fitted"})
+            exceeded = detail.get("status") == "exceeded"
+            payload.update({"status": "exceeded" if exceeded else "fitted", "diagnostic_code": "provider_context_budget_exceeded" if exceeded else "context_budget_fitted"})
             record_stage(
-                key="context_budget", label="上下文预算", status="info",
+                key="context_budget", label="上下文预算", status="error" if exceeded else "info",
                 detail=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                 hint="仅记录 Token 计数和安全路由状态，不记录提示词、媒体或工具参数。",
                 elapsed_ms=0,

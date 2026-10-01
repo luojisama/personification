@@ -443,15 +443,15 @@ def _trace_detail(trace: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(value, dict):
             return {"state": "unknown", "diagnostic_code": "context_diagnostic_unparseable"}
         result: dict[str, Any] = {}
-        for name in ("candidate_count", "injected_count", "state_count", "elapsed_ms", "estimated_input_tokens", "original_estimated_input_tokens", "native_input_tokens", "input_token_limit", "context_window_tokens", "system_tokens", "history_tokens", "memory_tokens", "tools_tokens", "media_tokens", "output_reserve_tokens", "thinking_reserve_tokens", "pre_trim_message_count", "post_trim_message_count"):
+        for name in ("candidate_count", "injected_count", "state_count", "profile_count", "history_count", "elapsed_ms", "estimated_input_tokens", "original_estimated_input_tokens", "native_input_tokens", "input_token_limit", "context_window_tokens", "system_tokens", "history_tokens", "memory_tokens", "tools_tokens", "media_tokens", "output_reserve_tokens", "thinking_reserve_tokens", "pre_trim_message_count", "post_trim_message_count"):
             raw = value.get(name)
             if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(float(raw)):
                 result[name] = max(0, min(int(raw), 10_000_000))
-        for name in ("status", "state", "budget_source", "token_count_source", "error_type"):
+        for name in ("status", "state", "budget_source", "token_count_source", "error_type", "failure_phase", "execution_route", "diagnostic_code"):
             raw = str(value.get(name) or "")
             if re.fullmatch(r"[A-Za-z0-9_-]{1,80}", raw):
                 result[name] = raw
-        result["diagnostic_code"] = str(result.get("status") or result.get("state") or "context_diagnostic_observed")
+        result["diagnostic_code"] = str(result.get("diagnostic_code") or result.get("status") or result.get("state") or "context_diagnostic_observed")
         return result
 
     return {

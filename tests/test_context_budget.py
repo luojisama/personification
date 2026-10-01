@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pytest
+import asyncio
+import json
 
 from ._loader import load_personification_module
 
@@ -8,6 +10,41 @@ from ._loader import load_personification_module
 budgeting = load_personification_module("plugin.personification.core.context_budget")
 ai_routes = load_personification_module("plugin.personification.core.ai_routes")
 trace_mod = load_personification_module("plugin.personification.core.reply_turn_trace")
+
+
+def test_rejected_request_reports_budget_without_sending_or_leaking(monkeypatch) -> None:
+    stages = []
+    monkeypatch.setattr(trace_mod, "current_trace_id", lambda: "budget-rejection")
+    monkeypatch.setattr(trace_mod, "record_stage", lambda **kw: stages.append(kw))
+
+    class Caller:
+        async def chat_with_tools(self, *args):
+            pytest.fail("over-budget request must never reach provider")
+
+    caller = Caller()
+    routed = ai_routes.RoutedToolCaller(primary_callers=[caller], fallback_caller=None, logger=None,
+                                      route_descriptors=[{"name": "safe", "model": "unknown-alias"}])
+    messages = [{"role": "system", "content": "PRIVATE_TEXT" * 12000}, {"role": "user", "content": "hello"}]
+    with pytest.raises(budgeting.ContextBudgetExceeded) as raised:
+        asyncio.run(routed._call_provider_with_trace(caller, messages, [], False, {"tools_count": 0}))
+    detail = raised.value.budget_detail
+    assert detail["estimated_input_tokens"] > detail["input_token_limit"] == 16384
+    assert detail["system_tokens"] > 0
+    assert detail["failure_phase"] == "required_request"
+    budget_stage = next(s for s in stages if s["key"] == "context_budget")
+    assert json.loads(budget_stage["detail"])["status"] == "exceeded"
+    provider_stage = next(s for s in stages if s["key"] == "provider_request")
+    assert "context_estimate=0/0" not in provider_stage["detail"]
+    assert "context_source=conservative_fallback" in provider_stage["detail"]
+    assert "PRIVATE_TEXT" not in repr(stages)
+
+
+def test_fixed_components_failure_keeps_numeric_breakdown() -> None:
+    budget = budgeting.ContextBudget.from_route({})
+    with pytest.raises(budgeting.ContextBudgetExceeded) as raised:
+        budgeting.fit_history_to_budget([], fixed_messages=[{"role": "system", "content": "x" * 100000}], budget=budget)
+    assert raised.value.budget_detail["failure_phase"] == "fixed_components"
+    assert raised.value.budget_detail["estimated_input_tokens"] > 16384
 
 
 def test_known_272k_route_preserves_output_and_margin() -> None:
