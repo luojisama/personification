@@ -73,7 +73,7 @@ class ContextBudget:
 
         # Unknown routes must be usable but never inherit Gemini's advertised
         # million-token capacity merely from a model-like string.
-        window = positive("context_window_tokens", 32_768)
+        window = positive("context_window_tokens", 131_072)
         source = "configured" if positive("context_window_tokens") else "conservative_fallback"
         configured_output = positive("max_output_tokens")
         output = configured_output or min(8_192, max(1_024, window // 4))

@@ -28,7 +28,7 @@ def test_rejected_request_reports_budget_without_sending_or_leaking(monkeypatch)
     with pytest.raises(budgeting.ContextBudgetExceeded) as raised:
         asyncio.run(routed._call_provider_with_trace(caller, messages, [], False, {"tools_count": 0}))
     detail = raised.value.budget_detail
-    assert detail["estimated_input_tokens"] > detail["input_token_limit"] == 16384
+    assert detail["estimated_input_tokens"] > detail["input_token_limit"] == 65_536
     assert detail["system_tokens"] > 0
     assert detail["failure_phase"] == "required_request"
     budget_stage = next(s for s in stages if s["key"] == "context_budget")
@@ -42,9 +42,9 @@ def test_rejected_request_reports_budget_without_sending_or_leaking(monkeypatch)
 def test_fixed_components_failure_keeps_numeric_breakdown() -> None:
     budget = budgeting.ContextBudget.from_route({})
     with pytest.raises(budgeting.ContextBudgetExceeded) as raised:
-        budgeting.fit_history_to_budget([], fixed_messages=[{"role": "system", "content": "x" * 100000}], budget=budget)
+        budgeting.fit_history_to_budget([], fixed_messages=[{"role": "system", "content": "x" * 140000}], budget=budget)
     assert raised.value.budget_detail["failure_phase"] == "fixed_components"
-    assert raised.value.budget_detail["estimated_input_tokens"] > 16384
+    assert raised.value.budget_detail["estimated_input_tokens"] > 65_536
 
 
 def test_known_272k_route_preserves_output_and_margin() -> None:
@@ -80,11 +80,29 @@ def test_impossible_output_reserve_is_rejected_not_clamped_to_one_token() -> Non
 
 def test_unknown_route_is_conservative_and_large_tool_media_are_rejected() -> None:
     budget = budgeting.ContextBudget.from_route({"model": "gemini-name-is-not-a-profile"})
-    assert budget.context_window_tokens == 32_768
+    assert budget.context_window_tokens == 131_072
+    assert budget.effective_input_limit == 65_536
+    assert budget.max_output_tokens == 8_192
+    assert budget.source == "conservative_fallback"
     messages = [{"role": "system", "content": "required"}, {"role": "user", "content": {"inline_data": "x" * 50_000}}]
-    tools = [{"type": "function", "function": {"name": "large", "parameters": {"description": "x" * 50_000}}}]
+    tools = [{"type": "function", "function": {"name": "large", "parameters": {"description": "x" * 140_000}}}]
     with pytest.raises(budgeting.ContextBudgetExceeded, match="required request exceeds"):
         budgeting.fit_request_to_budget(messages, tools, budget)
+
+
+def test_unknown_route_accepts_20k_input_but_explicit_small_window_still_rejects() -> None:
+    messages = [{"role": "system", "content": "rules"}, {"role": "user", "content": "x" * 40_000}]
+    budget = budgeting.ContextBudget.from_route({})
+    fitted, detail = budgeting.fit_request_to_budget(messages, [], budget)
+    assert fitted == messages
+    assert 20_000 <= detail["estimated_input_tokens"] < budget.effective_input_limit
+
+    configured = budgeting.ContextBudget.from_route({"context_window_tokens": 32_768})
+    assert configured.source == "configured"
+    assert configured.effective_input_limit == 16_384
+    with pytest.raises(budgeting.ContextBudgetExceeded) as raised:
+        budgeting.fit_request_to_budget(messages, [], configured)
+    assert raised.value.budget_detail["input_token_limit"] == 16_384
 
 
 def test_one_megabyte_base64_image_does_not_consume_text_token_budget() -> None:
