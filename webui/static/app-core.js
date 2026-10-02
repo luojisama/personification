@@ -497,6 +497,35 @@ document.addEventListener("toggle", event => {
   persistDetailState();
 }, true);
 
+let _trustedRenewal = null;
+let _authGeneration = 0;
+let _automaticTrustedRecovery = true;
+
+async function recoverTrustedSession() {
+  if (_trustedRenewal) return _trustedRenewal;
+  const generation = _authGeneration;
+  state.logged = false;
+  state.authChecking = true;
+  clearInMemorySensitiveState();
+  _trustedRenewal = (async () => {
+    const refresh = await fetch(API + "/auth/refresh", { method:"POST", credentials:"include", headers:{"X-Personification-Refresh":"1"} });
+    if (!refresh.ok) { const error = new Error("需要重新验证登录"); error.status = refresh.status; throw error; }
+    const refreshed = await refresh.json();
+    if (!refreshed || refreshed.success !== true) { const error = new Error("需要重新验证登录"); error.status = 401; throw error; }
+    if (generation !== _authGeneration || !_automaticTrustedRecovery) throw new Error("登录恢复已取消");
+    const response = await fetch(API + "/auth/me", { credentials:"include" });
+    if (!response.ok) { const error = new Error("需要重新验证登录"); error.status = response.status; throw error; }
+    const me = await response.json();
+    if (generation !== _authGeneration || !_automaticTrustedRecovery) throw new Error("登录恢复已取消");
+    state.logged = true; state.devicePending = false; state.authUnavailable = false; state.qq = me.qq; state.authIdentity = me;
+    return me;
+  })().finally(() => {
+    if (generation === _authGeneration) state.authChecking = false;
+    _trustedRenewal = null;
+  });
+  return _trustedRenewal;
+}
+
 async function api(path, opts = {}) {
   const method = (opts.method || "GET").toUpperCase();
   const headers = { ...(opts.headers || {}) };
@@ -515,12 +544,24 @@ async function api(path, opts = {}) {
     const requestOpts = { credentials: "include", ...opts, headers };
     try{
       if (method === "GET" && !requestOpts.signal && _viewAbortController) requestOpts.signal = _viewAbortController.signal;
-      const res = await fetch(API + path, requestOpts);
+      let res = await fetch(API + path, requestOpts);
+      if (res.status === 401 && _automaticTrustedRecovery && (path === "/auth/me" || !path.startsWith("/auth/"))) {
+        try {
+          const me = await recoverTrustedSession();
+          if (path === "/auth/me") return me;
+          // Safe reads may be retried once. Mutations need an explicit user retry.
+          if (method === "GET" || method === "HEAD") res = await fetch(API + path, requestOpts);
+          else throw Object.assign(new Error("登录已恢复，请重新执行操作。"), { recovered: true });
+        } catch (error) {
+          if (error.recovered) throw error;
+          state.authUnavailable = !error.status && _automaticTrustedRecovery;
+        }
+      }
       if (res.status === 401) {
         clearInMemorySensitiveState();
         state.logged = false;
         refreshEligibleAdmins().finally(() => render());
-        throw new Error("未登录");
+        const error = new Error("未登录"); error.status = 401; throw error;
       }
       if (!res.ok) {
         let payload = {message:res.statusText || "请求失败"};
@@ -534,7 +575,7 @@ async function api(path, opts = {}) {
   })();
   if (dedupKey) {
     _apiInflight.set(dedupKey, promise);
-    promise.finally(() => { _apiInflight.delete(dedupKey); });
+    promise.then(() => { _apiInflight.delete(dedupKey); }, () => { _apiInflight.delete(dedupKey); });
   }
   return promise;
 }
@@ -594,12 +635,13 @@ function onConfigSearchInput(input, event) {
 }
 
 async function bootstrap() {
+  if (!_automaticTrustedRecovery) { state.logged = false; await refreshEligibleAdmins(); render(); return; }
   // 主题
   const savedTheme = localStorage.getItem("personification_theme") || "dark";
   state.theme = savedTheme;
   document.documentElement.setAttribute("data-theme", savedTheme);
-  try { const me = await api("/auth/me"); state.logged = true; state.devicePending = false; state.qq = me.qq; await loadView(); }
-  catch (e) { state.logged = false; state.devicePending = /DEVICE_PENDING/.test(String(e && e.message || "")); }
+  try { const me = await api("/auth/me"); state.logged = true; state.devicePending = false; state.qq = me.qq; state.authIdentity = me; state.authUnavailable = false; await loadView(); }
+  catch (e) { state.logged = false; state.authUnavailable = state.authUnavailable || !e.status; state.devicePending = /DEVICE_PENDING/.test(String(e && e.message || "")); }
   if (state.devicePending) { render(); return; }
   if (!state.logged) await refreshEligibleAdmins();
   render();

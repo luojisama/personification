@@ -483,14 +483,20 @@
     <PageHeader
       index="31"
       title="设备管理"
-      description="当前、已授权、待审批和历史信任设备分开显示；审批和撤销绑定设备 ID 并写入审计。"
+      description="受信任设备可在当前浏览器自动登录；可随时取消信任，或撤销设备的管理权限。"
     />
 
     <Panel
       :eyebrow="`DEVICES / ${currentSection.toUpperCase()}`"
-      :title="currentSection === 'pending' ? '待审批设备' : currentSection === 'trusted' ? '历史信任设备' : currentSection === 'current' ? '当前设备' : '已授权设备'"
+      :title="currentSection === 'pending' ? '待审批设备' : currentSection === 'trusted' ? '受信任设备' : currentSection === 'current' ? '当前设备' : '已授权设备'"
     >
       <p v-if="currentSection === 'current'">当前设备 ID：<code>{{ currentDeviceId || "—" }}</code></p>
+      <div v-if="currentSection === 'current' && currentDeviceId" class="inline-controls">
+        <p>{{ auth.identity?.trusted ? '当前浏览器已受信任，下次可自动登录。' : '信任个人设备后，下次可自动登录。共享设备请勿开启。信任设备需通过 HTTPS 或本机地址访问。' }}</p>
+        <button v-if="!auth.identity?.trusted" type="button" class="button button-primary" :disabled="deviceActionMutation.isPending.value || !trustAvailable" @click="deviceActionMutation.mutate({ id: currentDeviceId, kind: 'trust' })">信任当前设备</button>
+        <button v-else-if="auth.identity?.trust_id" type="button" class="button button-danger" :disabled="deviceActionMutation.isPending.value" @click="deviceActionMutation.mutate({ id: auth.identity.trust_id, kind: 'untrust' })">取消当前设备信任</button>
+      </div>
+      <p v-if="currentSection === 'trusted'">信任凭证保存在对应浏览器，需通过 HTTPS 或本机地址访问，有效期随使用延长。移除后，该浏览器下次需要验证码。</p>
       <QueryBoundary :pending="devicesQuery.isPending.value" :error="devicesQuery.error.value">
         <div class="table-responsive">
           <table class="data-table" role="table" aria-label="设备列表">
@@ -509,9 +515,9 @@
               </tr>
               <tr v-for="(row, idx) in filteredDevicesRows" :key="textAt(row, 'id') + idx">
                 <td><code>{{ textAt(row, "id") }}</code></td>
-                <td>{{ textAt(row, "label") }}</td>
+                <td>{{ textAt(row, "label") }}<template v-if="currentSection === 'trusted'"><br />最近使用：{{ formatDeviceDate(row.last_seen_at ?? row.last_seen) }}<br />有效期至：{{ formatDeviceDate(row.expires_at) }}</template></td>
                 <td>{{ textAt(row, "ua") || "—" }}</td>
-                <td><StateBadge :tone="resolveStatusTone(row)">{{ textAt(row, "status") || "未知" }}</StateBadge></td>
+                <td><StateBadge :tone="resolveStatusTone(row)">{{ currentSection === 'trusted' ? (row.valid === false ? '已失效' : '受信任') : textAt(row, "status") || "未知" }}</StateBadge></td>
                 <td>
                   <button
                     type="button"
@@ -571,6 +577,7 @@ import SelectField from "@vue-app/components/forms/SelectField.vue";
 import TextField from "@vue-app/components/forms/TextField.vue";
 import TextareaField from "@vue-app/components/forms/TextareaField.vue";
 import { groupIdFromQuery } from "@vue-app/composables/currentGroup";
+import { useAuthStore } from "@vue-app/stores/auth";
 import { useBotStore } from "@vue-app/stores/bot";
 import { useCurrentGroupStore } from "@vue-app/stores/currentGroup";
 
@@ -933,8 +940,15 @@ function executeQqDangerous() {
 }
 
 /* ==================== 6. 设备管理 ==================== */
+const auth = useAuthStore();
+const trustAvailable = window.location.protocol === "https:" || ["localhost", "127.0.0.1", "::1", "[::1]"].includes(window.location.hostname);
 const deviceTargetId = ref("");
 const deviceConfirmation = ref("");
+function formatDeviceDate(value: unknown): string {
+  if (typeof value !== "number" && typeof value !== "string") return "—";
+  const date = new Date(typeof value === "number" && value < 1e12 ? value * 1000 : value);
+  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
 
 const deviceEndpoint = computed(() =>
   currentSection.value === "pending"
@@ -951,13 +965,21 @@ const devicesQuery = useQuery({
 });
 
 const deviceActionMutation = useMutation({
-  mutationFn: ({ id, kind }: { id: string; kind: "approve" | "revoke" | "untrust" }) =>
-    kind === "approve"
+  mutationFn: ({ id, kind }: { id: string; kind: "approve" | "revoke" | "untrust" | "trust" }) =>
+    kind === "trust"
+      ? resources.devicePost(`devices/${encodeURIComponent(id)}/trust`)
+      : kind === "approve"
       ? resources.devicePost(`devices/${encodeURIComponent(id)}/approve`)
       : kind === "untrust"
         ? resources.deviceDelete(`trusted-devices/${encodeURIComponent(id)}`)
         : resources.deviceDelete(`devices/${encodeURIComponent(id)}`),
-  onSuccess: () => {
+  onSuccess: async (_result, action) => {
+    deviceTargetId.value = "";
+    if (action.kind === "trust") await auth.bootstrap();
+    else if (action.kind === "untrust" && action.id === auth.identity?.trust_id) {
+      auth.invalidate();
+      await auth.loadAdmins().catch(() => undefined);
+    }
     void client.invalidateQueries({ queryKey: ["devices"] });
   },
 });

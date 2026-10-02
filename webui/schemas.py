@@ -22,6 +22,7 @@ class VerifyRequest(BaseModel):
     qq: str = Field(..., min_length=4, max_length=20)
     code: str = Field(..., min_length=6, max_length=6)
     device_label: str = Field(default="", max_length=64)
+    trust_device: bool = False
 
 
 class VerifyResponse(BaseModel):
@@ -38,6 +39,8 @@ class DeviceInfo(BaseModel):
     created_at: float
     last_seen: float
     status: str = "approved"
+    trusted: bool = False
+    trust_id: str = ""
 
 
 class DeviceListResponse(BaseModel):

@@ -21,6 +21,7 @@ _RATE_WINDOW_SECONDS = 3600
 _RATE_MAX_ATTEMPTS = 5
 # 设备 token 7 天过期；每次请求会刷新 last_seen 但不延长到期点（严格 7 天滚动）
 _DEVICE_TOKEN_TTL_SECONDS = 7 * 24 * 3600
+TRUSTED_DEVICE_TTL_SECONDS = 365 * 24 * 3600
 # 登录请求（QQ 私聊批准用）有效期
 _LOGIN_REQUEST_TTL_SECONDS = 300
 
@@ -170,7 +171,7 @@ def _prune_expired_codes(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def issue_device_token(qq: str, ua: str, ip: str, label: str = "", status: str = "approved") -> str:
+def issue_device_token(qq: str, ua: str, ip: str, label: str = "", status: str = "approved", *, trust_id: str = "") -> str:
     """生成 device token + CSRF token，写 KV，返回明文 token（设到 cookie）。
 
     status: "approved" 直接可用；"pending" 需已批准管理员确认后才放行。
@@ -191,6 +192,7 @@ def issue_device_token(qq: str, ua: str, ip: str, label: str = "", status: str =
         "expires_at": now_ts + _DEVICE_TOKEN_TTL_SECONDS,
         "csrf_token": secrets.token_urlsafe(24),
         "status": "pending" if str(status) == "pending" else "approved",
+        "trust_id": trust_id,
     }
 
     def _mutate(current: object) -> dict[str, Any]:
@@ -288,6 +290,10 @@ def lookup_device(token: str, *, ua: str = "") -> dict[str, Any] | None:
             if expires_at > 0 and expires_at <= _now():
                 data.pop(token_hash, None)
                 return _prune_expired_devices(data)
+            trust_id = str(entry.get("trust_id", "") or "")
+            if trust_id and not _lookup_trust_id(trust_id):
+                data.pop(token_hash, None)
+                return _prune_expired_devices(data)
             stored_ua = str(entry.get("ua", "") or "")
             if ua and stored_ua and stored_ua != str(ua or "")[:512]:
                 # UA 不一致：怀疑 cookie 被换设备使用，拒绝
@@ -362,16 +368,24 @@ def revoke_device(device_id: str) -> bool:
     if not target:
         return False
     removed = False
+    trust_id = ""
 
     def _mutate(current: object) -> dict[str, Any]:
-        nonlocal removed
+        nonlocal removed, trust_id
         data = current if isinstance(current, dict) else {}
         if target in data:
+            entry = data.get(target)
+            trust_id = str(entry.get("trust_id", "") or "") if isinstance(entry, dict) else ""
             data.pop(target, None)
             removed = True
         return data
 
     get_data_store().mutate_sync(_NS_DEVICES, _mutate)
+    if trust_id:
+        remove_trusted_device(trust_id)
+    for item in list_trusted_devices():
+        if item.get("device_id") == target:
+            remove_trusted_device(item["id"])
     return removed
 
 
@@ -546,6 +560,67 @@ def take_approved_login_request(request_id: str) -> dict[str, Any] | None:
 
 # ──────────────────────── 免验证（信任）设备 ────────────────────────
 
+def _lookup_trust_id(trust_id: str) -> dict[str, Any] | None:
+    data = get_data_store().load_sync(_NS_TRUSTED)
+    entry = data.get(trust_id) if isinstance(data, dict) else None
+    if not isinstance(entry, dict) or entry.get("version") != 2:
+        return None
+    if float(entry.get("expires_at", 0) or 0) <= _now():
+        return None
+    return dict(entry, id=trust_id)
+
+
+def issue_trusted_device(qq: str, ua: str, device_id: str, label: str = "") -> str:
+    """Only a random browser secret proves trust; KV stores its SHA-256 digest."""
+    token = secrets.token_urlsafe(48)
+    trust_id = _hash_token(token)
+    now = _now()
+    record = dict(version=2, qq=qq, ua=str(ua or "")[:512], device_id=device_id,
+                  label=str(label or "")[:64] or "信任设备", created_at=now,
+                  last_seen=now, expires_at=now + TRUSTED_DEVICE_TTL_SECONDS)
+    def mutate(current: object) -> dict[str, Any]:
+        data = current if isinstance(current, dict) else {}
+        data = {key: value for key, value in data.items()
+                if not isinstance(value, dict) or value.get("device_id") != device_id}
+        data[trust_id] = record
+        return data
+    get_data_store().mutate_sync(_NS_TRUSTED, mutate)
+    bound = False
+    def bind(current: object) -> dict[str, Any]:
+        nonlocal bound
+        data = current if isinstance(current, dict) else {}
+        entry = data.get(device_id)
+        if isinstance(entry, dict) and entry.get("qq") == qq:
+            entry["trust_id"] = trust_id
+            bound = True
+        return data
+    get_data_store().mutate_sync(_NS_DEVICES, bind)
+    if not bound:
+        remove_trusted_device(trust_id)
+        raise ValueError("device revoked before trust was issued")
+    return token
+
+
+def lookup_trusted_device(token: str) -> dict[str, Any] | None:
+    return _lookup_trust_id(_hash_token(token)) if token else None
+
+
+def touch_trusted_device(trust_id: str, device_id: str) -> bool:
+    found = False
+    def mutate(current: object) -> dict[str, Any]:
+        nonlocal found
+        data = current if isinstance(current, dict) else {}
+        entry = data.get(trust_id)
+        now = _now()
+        if isinstance(entry, dict) and entry.get("version") == 2 and float(entry.get("expires_at", 0) or 0) > now:
+            entry["last_seen"] = now
+            entry["expires_at"] = now + TRUSTED_DEVICE_TTL_SECONDS
+            entry["device_id"] = device_id
+            found = True
+        return data
+    get_data_store().mutate_sync(_NS_TRUSTED, mutate)
+    return found
+
 def add_trusted_device(qq: str, ua: str, label: str = "") -> str:
     """写入旧版 UA 信任记录；当前登录流程不再消费此记录。"""
     qq_key = str(qq or "").strip()
@@ -623,6 +698,10 @@ def match_trusted_device(qq: str, ua: str) -> dict[str, Any] | None:
 
 
 __all__ = [
+    "TRUSTED_DEVICE_TTL_SECONDS",
+    "issue_trusted_device",
+    "lookup_trusted_device",
+    "touch_trusted_device",
     "create_verify_code",
     "discard_verify_code",
     "VerifyCodeCooldownError",

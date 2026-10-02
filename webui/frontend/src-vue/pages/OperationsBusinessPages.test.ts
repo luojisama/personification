@@ -6,6 +6,7 @@ import { createMemoryHistory, createRouter } from "vue-router";
 
 import OperationsBusinessPages from "../pages/OperationsBusinessPages.vue";
 import { resources } from "@/api/resources";
+import { useAuthStore } from "@vue-app/stores/auth";
 import { useBotStore } from "@vue-app/stores/bot";
 
 vi.mock("@/api/resources", () => ({
@@ -141,5 +142,27 @@ describe("OperationsBusinessPages.vue", () => {
       group_id: "30001",
       datasets: [],
     });
+  });
+  it("当前设备可开启信任，受信任记录可撤销且旧记录标为失效", async () => {
+    const { pinia, queryClient, router } = createTestSetup("/operations/devices/current", "devices");
+    await router.isReady();
+    const auth = useAuthStore(pinia);
+    const bootstrap = vi.spyOn(auth, "bootstrap").mockResolvedValue();
+    const wrapper = mount(OperationsBusinessPages, { props: { mode: "devices" }, global: { plugins: [pinia, [VueQueryPlugin, { queryClient }], router] } });
+    await flushPromises();
+    const trust = wrapper.findAll("button").find(button => button.text() === "信任当前设备")!;
+    await trust.trigger("click"); await flushPromises();
+    expect(resources.devicePost).toHaveBeenCalledWith("devices/dev_1/trust");
+    expect(bootstrap).toHaveBeenCalled();
+    vi.mocked(resources.deviceGet).mockResolvedValueOnce({ devices: [{ id: "legacy_1", label: "旧记录", valid: false }] });
+    await router.push("/operations/devices/trusted"); await flushPromises();
+    expect(wrapper.text()).toContain("已失效");
+    const remove = wrapper.findAll("button").find(button => button.text() === "准备移除信任")!;
+    await remove.trigger("click");
+    await wrapper.get('input[placeholder="输入设备 ID"]').setValue("legacy_1");
+    await wrapper.findAll("button").find(button => button.text() === "确认操作")!.trigger("click");
+    await flushPromises();
+    expect(resources.deviceDelete).toHaveBeenCalledWith("trusted-devices/legacy_1");
+    wrapper.unmount(); queryClient.clear();
   });
 });

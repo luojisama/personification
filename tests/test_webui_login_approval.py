@@ -47,7 +47,7 @@ def test_code_is_bound_to_originating_browser_challenge(_runtime_context) -> Non
     assert original.cookies.get("personification_webui_token")
 
 
-def test_legacy_trusted_device_registration_is_disabled(_runtime_context) -> None:
+def test_trusted_device_registration_requires_browser_secret(_runtime_context) -> None:
     # 先正常登录，拿到会话与固定 UA
     client = _build_client(_runtime_context)
     client.headers["user-agent"] = "TrustUA/1.0"
@@ -56,9 +56,10 @@ def test_legacy_trusted_device_registration_is_disabled(_runtime_context) -> Non
     # 找到当前设备并设为免验证
     devs = client.get("/personification/api/auth/devices").json()["devices"]
     did = devs[0]["id"]
-    disabled = client.post(f"/personification/api/auth/devices/{did}/trust")
-    assert disabled.status_code == 410
-    assert client.get("/personification/api/auth/trusted-devices").json()["devices"] == []
+    registered = client.post(f"/personification/api/auth/devices/{did}/trust")
+    assert registered.status_code == 200
+    assert client.cookies.get("personification_webui_trusted_device")
+    assert len(client.get("/personification/api/auth/trusted-devices").json()["devices"]) == 1
 
     # 新客户端即使 UA 相同也必须重新向管理员发送验证码，不能依赖可伪造 UA 免验证
     sent_before = len(_runtime_context.sent)

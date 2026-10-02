@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import secrets
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 
 from ...core import admin_acl, notify, webui_audit_log, webui_auth_store
 from ...core.operation_diagnostics import detail, diagnostic, exception_diagnostic, step
@@ -14,6 +16,8 @@ from ..deps import (
     get_cookie_name,
     get_user_agent,
     require_admin,
+    is_https_or_loopback,
+    require_https_or_loopback,
 )
 from ..schemas import (
     DeviceInfo,
@@ -28,6 +32,7 @@ from ..schemas import (
 
 _CSRF_COOKIE_NAME = "personification_webui_csrf"
 _LOGIN_CHALLENGE_COOKIE_NAME = "personification_webui_login_challenge"
+_TRUST_COOKIE_NAME = "personification_webui_trusted_device"
 
 
 def _record_device_audit(runtime: Any, **kwargs: Any) -> bool:
@@ -152,7 +157,7 @@ def _raise_device_not_found(*, code: str, title: str, message: str, target: str,
 def _request_uses_https(request: Request) -> bool:
     forwarded_proto = request.headers.get("x-forwarded-proto", "") or ""
     first_proto = forwarded_proto.split(",", 1)[0].strip().lower()
-    return first_proto == "https" or request.url.scheme == "https"
+    return request.url.scheme == "https" or (first_proto == "https" and is_https_or_loopback(request))
 
 
 def build_auth_router(*, runtime) -> APIRouter:
@@ -166,10 +171,22 @@ def build_auth_router(*, runtime) -> APIRouter:
         device_label: str,
         request: Request,
         response: Response,
+        trust_id: str = "",
+        trust_device: bool = False,
     ) -> bool:
         """签发已批准的设备 token。管理员验证码本身就是设备授权。"""
         ip_hash = hashlib.sha256((ip or "").encode("utf-8")).hexdigest()[:16]
-        token = webui_auth_store.issue_device_token(qq, ua, ip, label=device_label, status="approved")
+        if not trust_id:
+            old_trust = webui_auth_store.lookup_trusted_device(request.cookies.get(_TRUST_COOKIE_NAME, ""))
+            if old_trust:
+                webui_auth_store.remove_trusted_device(old_trust["id"])
+            response.delete_cookie(_TRUST_COOKIE_NAME, path="/personification")
+        token = webui_auth_store.issue_device_token(qq, ua, ip, label=device_label, status="approved", trust_id=trust_id)
+        if trust_device:
+            trusted_token = webui_auth_store.issue_trusted_device(qq, ua, hashlib.sha256(token.encode()).hexdigest(), device_label)
+            _set_trust_cookie(request, response, trusted_token)
+        if trust_id and not webui_auth_store.touch_trusted_device(trust_id, hashlib.sha256(token.encode()).hexdigest()):
+            raise HTTPException(status_code=401, detail="信任设备已失效")
         webui_auth_store.reset_login_attempts(f"send:{ip}")
         webui_auth_store.reset_login_attempts(f"verify:{ip}")
         record = webui_auth_store.lookup_device(token, ua=ua) or {}
@@ -194,6 +211,42 @@ def build_auth_router(*, runtime) -> APIRouter:
 
     def _is_current_admin(qq: str) -> bool:
         return qq in runtime.superusers or admin_acl.is_plugin_admin(qq)
+
+    def _set_trust_cookie(request: Request, response: Response, token: str) -> None:
+        response.set_cookie(_TRUST_COOKIE_NAME, token, max_age=webui_auth_store.TRUSTED_DEVICE_TTL_SECONDS,
+                            httponly=True, secure=_request_uses_https(request), samesite="strict", path="/personification")
+
+    def _require_same_origin(request: Request) -> None:
+        origin = request.headers.get("origin") or request.headers.get("referer")
+        if origin:
+            source = urlsplit(origin)
+            target = urlsplit(str(request.url))
+            expected_scheme = "https" if _request_uses_https(request) else target.scheme
+            if (source.scheme, source.netloc) != (expected_scheme, target.netloc):
+                raise HTTPException(status_code=403, detail="信任设备续期要求同源请求")
+        elif not (request.headers.get("sec-fetch-site") == "same-origin" and request.headers.get("x-personification-refresh") == "1"):
+            raise HTTPException(status_code=403, detail="信任设备续期要求同源请求")
+
+    @router.post("/refresh")
+    async def refresh(request: Request, response: Response) -> dict:
+        require_https_or_loopback(request, code="trusted_device_transport_required", message="信任设备需要 HTTPS 或本机连接")
+        _require_same_origin(request)
+        token = request.cookies.get(_TRUST_COOKIE_NAME, "")
+        record = webui_auth_store.lookup_trusted_device(token)
+        if not record:
+            rejected = JSONResponse(status_code=401, content={"detail": "信任设备不存在、已撤销或已过期"})
+            rejected.delete_cookie(_TRUST_COOKIE_NAME, path="/personification")
+            return rejected
+        qq = str(record.get("qq", ""))
+        if not _is_current_admin(qq):
+            webui_auth_store.remove_trusted_device(record["id"])
+            rejected = JSONResponse(status_code=401, content={"detail": "管理员权限已撤销"})
+            rejected.delete_cookie(_TRUST_COOKIE_NAME, path="/personification")
+            return rejected
+        _issue_session(qq=qq, ua=get_user_agent(request), ip=get_client_ip(request), device_label=str(record.get("label", "")),
+                       request=request, response=response, trust_id=record["id"])
+        _set_trust_cookie(request, response, token)
+        return {"success": True}
 
     @router.post("/login", response_model=LoginResponse)
     async def login(payload: LoginRequest, request: Request, response: Response) -> LoginResponse:
@@ -264,6 +317,8 @@ def build_auth_router(*, runtime) -> APIRouter:
 
     @router.post("/verify", response_model=VerifyResponse)
     async def verify(payload: VerifyRequest, request: Request, response: Response) -> VerifyResponse:
+        if payload.trust_device:
+            require_https_or_loopback(request, code="trusted_device_transport_required", message="信任设备需要 HTTPS 或本机连接")
         ip = get_client_ip(request)
         verify_rate_key = f"verify:{ip}"
         if webui_auth_store.is_login_locked(verify_rate_key):
@@ -282,6 +337,7 @@ def build_auth_router(*, runtime) -> APIRouter:
         pending = _issue_session(
             qq=qq, ua=ua, ip=ip, device_label=payload.device_label,
             request=request, response=response,
+            trust_device=payload.trust_device,
         )
         try:
             await notify.startup_notify_admins(
@@ -300,21 +356,37 @@ def build_auth_router(*, runtime) -> APIRouter:
         return VerifyResponse(success=True, message="登录成功")
 
     @router.get("/me")
-    async def me(admin: AdminIdentity = Depends(require_admin)) -> dict[str, str]:
+    async def me(request: Request, admin: AdminIdentity = Depends(require_admin)) -> dict[str, Any]:
         source = "SUPERUSER" if str(admin.qq) in {str(item) for item in (runtime.superusers or set())} else "plugin_admin"
+        record = webui_auth_store.lookup_device(request.cookies.get(get_cookie_name(), "")) or {}
         return {
             "qq": admin.qq,
             "device_id": admin.device_id,
             "label": admin.label,
             "identity_source": source,
+            "trusted": bool(record.get("trust_id")),
+            "trust_id": str(record.get("trust_id", "")),
         }
 
     @router.post("/logout")
-    async def logout(response: Response, admin: AdminIdentity = Depends(require_admin)) -> dict:
-        webui_auth_store.revoke_device(admin.device_id)
+    async def logout(request: Request, response: Response) -> dict:
+        try:
+            admin = require_admin(request)
+        except HTTPException as exc:
+            if exc.status_code != 401:
+                raise
+            require_https_or_loopback(request, code="trusted_device_transport_required", message="信任设备需要 HTTPS 或本机连接")
+            _require_same_origin(request)
+            admin = None
+        if admin:
+            webui_auth_store.revoke_device(admin.device_id)
         response.delete_cookie(get_cookie_name(), path="/personification")
         response.delete_cookie(_CSRF_COOKIE_NAME, path="/personification")
         response.delete_cookie(_LOGIN_CHALLENGE_COOKIE_NAME, path="/personification")
+        trusted = webui_auth_store.lookup_trusted_device(request.cookies.get(_TRUST_COOKIE_NAME, ""))
+        if trusted and (admin is None or trusted.get("qq") == admin.qq):
+            webui_auth_store.remove_trusted_device(trusted["id"])
+        response.delete_cookie(_TRUST_COOKIE_NAME, path="/personification")
         return {"success": True}
 
     @router.get("/eligible-admins")
@@ -352,6 +424,8 @@ def build_auth_router(*, runtime) -> APIRouter:
                 created_at=float(item.get("created_at", 0) or 0),
                 last_seen=float(item.get("last_seen", 0) or 0),
                 status=str(item.get("status", "approved") or "approved"),
+                trusted=bool(item.get("trust_id")),
+                trust_id=str(item.get("trust_id", "")),
             )
             for item in raw
         ]
@@ -466,15 +540,34 @@ def build_auth_router(*, runtime) -> APIRouter:
                 "label": str(it.get("label", "")),
                 "ua": str(it.get("ua", "")),
                 "created_at": float(it.get("created_at", 0) or 0),
+                "last_seen": float(it.get("last_seen", 0) or 0),
+                "expires_at": float(it.get("expires_at", 0) or 0),
+                "device_id": str(it.get("device_id", "")),
+                "valid": bool(it.get("version") == 2 and float(it.get("expires_at", 0) or 0) > webui_auth_store._now()),
+                "legacy": it.get("version") != 2,
             }
             for it in webui_auth_store.list_trusted_devices(admin.qq)
         ]
         return {"devices": items}
 
     @router.post("/devices/{device_id}/trust")
-    async def trust_device(device_id: str, admin: AdminIdentity = Depends(require_admin)) -> dict:
-        """UA 无法证明浏览器身份，旧免验证登记入口已停用。"""
-        raise HTTPException(status_code=410, detail="免验证设备功能已停用；退出或 Session 到期后请重新接收管理员验证码")
+    async def trust_device(device_id: str, request: Request, response: Response, admin: AdminIdentity = Depends(require_admin)) -> dict:
+        require_https_or_loopback(request, code="trusted_device_transport_required", message="信任设备需要 HTTPS 或本机连接")
+        if device_id != admin.device_id:
+            raise HTTPException(status_code=403, detail="只能信任当前浏览器设备")
+        old = webui_auth_store.lookup_trusted_device(request.cookies.get(_TRUST_COOKIE_NAME, ""))
+        if old and old.get("qq") == admin.qq:
+            webui_auth_store.remove_trusted_device(old["id"])
+        token = webui_auth_store.issue_trusted_device(admin.qq, get_user_agent(request), device_id, admin.label)
+        _set_trust_cookie(request, response, token)
+        audit_ok = _record_device_audit(runtime, action="device_trust", qq=admin.qq,
+                                        device_id=admin.device_id, target=device_id, outcome="ok")
+        return _device_result(
+            {"success": True}, changed=True, code="device_trusted", no_op_code="device_trust_noop",
+            title="当前设备已受信任", no_op_title="设备信任未产生变更",
+            message="已保存当前浏览器的信任凭证。", no_op_message="设备信任状态未改变。",
+            target=device_id, persist_label="信任当前设备", audit_ok=audit_ok,
+        )
 
     @router.delete("/trusted-devices/{trust_id}")
     async def untrust_device(trust_id: str, admin: AdminIdentity = Depends(require_admin)) -> dict:

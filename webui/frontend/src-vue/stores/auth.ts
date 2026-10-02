@@ -3,7 +3,7 @@ import { getCurrentScope, onScopeDispose, ref } from "vue";
 
 import { ApiError, authRequest, onAuthenticationInvalid } from "@/api/client";
 
-export interface AdminIdentity { qq: string; device_id: string; label: string; identity_source: "SUPERUSER" | "plugin_admin" }
+export interface AdminIdentity { qq: string; device_id: string; label: string; identity_source: "SUPERUSER" | "plugin_admin"; trusted?: boolean; trust_id?: string }
 export interface EligibleAdmin { qq: string; source: string }
 export type AuthPhase = "checking" | "anonymous" | "verifying" | "pending" | "authenticated" | "unavailable";
 
@@ -15,15 +15,19 @@ function detailText(error: unknown): string {
 
 export const useAuthStore = defineStore("auth", () => {
   const phase = ref<AuthPhase>("checking");
+  const bootstrapInProgress = ref(false);
   const identity = ref<AdminIdentity | null>(null);
   const admins = ref<EligibleAdmin[]>([]);
   const message = ref("");
   const logoutUnconfirmed = ref(false);
   let generation = 0;
   let pollTimer: number | null = null;
+  let renewal: Promise<void> | null = null;
+  let automaticRecovery = true;
 
   function cancelPending(): void {
     generation += 1;
+    bootstrapInProgress.value = false;
     if (pollTimer !== null) window.clearTimeout(pollTimer);
     pollTimer = null;
   }
@@ -36,7 +40,9 @@ export const useAuthStore = defineStore("auth", () => {
   }
 
   const removeAuthenticationInvalidListener = onAuthenticationInvalid(() => {
-    if (phase.value === "authenticated") invalidate();
+    if (phase.value === "authenticated" && automaticRecovery && !renewal) {
+      renewal = bootstrap().finally(() => { renewal = null; });
+    }
   });
   if (getCurrentScope()) onScopeDispose(() => {
     cancelPending();
@@ -49,11 +55,26 @@ export const useAuthStore = defineStore("auth", () => {
   }
 
   async function bootstrap(): Promise<void> {
+    if (!automaticRecovery) {
+      identity.value = null; phase.value = "anonymous";
+      try { await loadAdmins(); } catch { admins.value = []; }
+      return;
+    }
     const current = ++generation;
+    bootstrapInProgress.value = true;
     phase.value = "checking";
     message.value = "";
     try {
-      const me = await authRequest<AdminIdentity>("/me");
+      let me: AdminIdentity;
+      try { me = await authRequest<AdminIdentity>("/me"); }
+      catch (error) {
+        if (current !== generation) return;
+        if (!(error instanceof ApiError) || error.status !== 401 || !automaticRecovery) throw error;
+        const refreshed = await authRequest<{ success: boolean }>("/refresh", { method: "POST", headers: { "X-Personification-Refresh": "1" } });
+        if (current !== generation) return;
+        if (refreshed.success !== true) throw new ApiError(401, { detail: "Not authenticated" });
+        me = await authRequest<AdminIdentity>("/me");
+      }
       if (current !== generation) return;
       identity.value = me;
       phase.value = "authenticated";
@@ -69,6 +90,8 @@ export const useAuthStore = defineStore("auth", () => {
         phase.value = "unavailable";
         message.value = detailText(error);
       }
+    } finally {
+      if (current === generation) bootstrapInProgress.value = false;
     }
   }
 
@@ -81,11 +104,11 @@ export const useAuthStore = defineStore("auth", () => {
     message.value = response.message ?? "验证码已发送。";
   }
 
-  async function verify(qq: string, code: string, deviceLabel: string): Promise<void> {
+  async function verify(qq: string, code: string, deviceLabel: string, trustDevice = false): Promise<void> {
     const current = ++generation;
     message.value = "";
     const response = await authRequest<{ success: boolean; pending?: boolean; message?: string }>("/verify", {
-      method: "POST", body: { qq, code, device_label: deviceLabel },
+      method: "POST", body: { qq, code, device_label: deviceLabel, trust_device: trustDevice },
     });
     if (current !== generation) return;
     if (response.success !== true) {
@@ -98,6 +121,7 @@ export const useAuthStore = defineStore("auth", () => {
       phase.value = "pending";
       pollPending();
     } else {
+      automaticRecovery = true;
       await bootstrap();
     }
   }
@@ -129,6 +153,7 @@ export const useAuthStore = defineStore("auth", () => {
   }
 
   async function logout(): Promise<void> {
+    automaticRecovery = false;
     cancelPending();
     const current = generation;
     identity.value = null;
@@ -136,7 +161,7 @@ export const useAuthStore = defineStore("auth", () => {
     logoutUnconfirmed.value = false;
     message.value = "正在退出并清理当前页面数据…";
     try {
-      await authRequest("/logout", { method: "POST" });
+      await authRequest("/logout", { method: "POST", headers: { "X-Personification-Refresh": "1" } });
       if (current !== generation) return;
       message.value = "已退出管理台。";
     } catch {
@@ -156,5 +181,5 @@ export const useAuthStore = defineStore("auth", () => {
     try { await loadAdmins(); } catch { admins.value = []; }
   }
 
-  return { phase, identity, admins, message, logoutUnconfirmed, bootstrap, loadAdmins, sendCode, verify, pollPending, logout, returnToLogin, invalidate, cancelPending };
+  return { bootstrapInProgress, phase, identity, admins, message, logoutUnconfirmed, bootstrap, loadAdmins, sendCode, verify, pollPending, logout, returnToLogin, invalidate, cancelPending };
 });

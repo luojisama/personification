@@ -47,9 +47,23 @@ function renderDevices() {
   }).join("");
   return `${renderSmallOperations("device", "设备操作诊断")}<div class="card">
     <h2>已登录设备</h2>
-    <p class="muted">有效 session cookie 会保持登录；退出、撤销或过期后需重新接收管理员验证码。</p>
+    <button class="btn" onclick="setCurrentDeviceTrust()" ${state.authIdentity?.trusted || canTrustThisBrowser() ? "" : "disabled"}>${state.authIdentity?.trusted ? "取消当前设备信任" : "信任当前设备"}</button>
+    <p class="muted">受信任浏览器可自动登录，需通过 HTTPS 或本机地址访问。退出或撤销后需要重新验证。</p>
     <div class="table-wrap table-scroll" tabindex="0" role="region" aria-label="已登录设备列表"><table class="data-table wide"><thead><tr><th scope="col" class="col-model">设备</th><th scope="col" class="col-description">UA</th><th scope="col" class="col-time">最后活跃</th><th scope="col" class="col-actions"><span class="sr-only">操作</span></th></tr></thead><tbody>${rows}</tbody></table></div>
   </div>`;
+}
+
+async function setCurrentDeviceTrust() {
+  const me = state.authIdentity || await api("/auth/me");
+  try {
+    if (me.trusted && me.trust_id) {
+      await api("/auth/trusted-devices/" + encodeURIComponent(me.trust_id), {method:"DELETE"});
+      _automaticTrustedRecovery = false; _authGeneration += 1; state.logged = false; clearInMemorySensitiveState(); await refreshEligibleAdmins(); render();
+    } else {
+      await api("/auth/devices/" + encodeURIComponent(me.device_id) + "/trust", {method:"POST"});
+      state.authIdentity = await api("/auth/me"); await loadView(); render();
+    }
+  } catch (error) { alertFlash("err", "信任设置未完成，请稍后重试。"); }
 }
 
 async function approveDevice(id) {
@@ -73,22 +87,19 @@ async function revokeDevice(id) {
 }
 
 async function doLogout() {
+  _automaticTrustedRecovery = false; _authGeneration += 1; state.authChecking = false; state.authUnavailable = false;
+  const generation = _authGeneration;
+  leaveViewLifecycle(state.view, ""); clearInMemorySensitiveState(); state.logged = false; state.devicePending = false;
+  state.logoutUnconfirmed = false; render();
   try {
-    await api("/auth/logout", { method:"POST" });
-    leaveViewLifecycle(state.view,"");
-    clearInMemorySensitiveState();
-    state.logged = false;
-    await refreshEligibleAdmins();
-    render();
-  } catch (e) {
-    if (!state.logged) {
-      clearInMemorySensitiveState();
-      await refreshEligibleAdmins();
-      render();
-      return;
-    }
-    alertFlash("err", "退出失败：" + e.message);
+    await api("/auth/logout", { method:"POST", headers:{"X-Personification-Refresh":"1"} });
+    if (generation !== _authGeneration) return;
+  } catch (error) {
+    if (generation !== _authGeneration) return;
+    state.logoutUnconfirmed = true;
   }
+  await refreshEligibleAdmins();
+  if (generation === _authGeneration) render();
 }
 
 let _layoutDelegationAttached = false;
@@ -122,7 +133,11 @@ function attachLayout() {
   }
 }
 
+function canTrustThisBrowser() { return location.protocol === "https:" || ["localhost", "127.0.0.1", "::1", "[::1]"].includes(location.hostname); }
+
 function renderLogin() {
+  if (state.authChecking) return `<div class="login-wrap"><div class="card" role="status">正在恢复受信任设备的登录状态…</div></div>`;
+  if (state.authUnavailable) return `<div class="login-wrap"><div class="card" role="alert"><h2>暂时无法连接</h2><p>请检查网络后重试连接。</p><button class="btn primary" onclick="state.authUnavailable=false;bootstrap()">重试连接</button></div></div>`;
   const themeIcon = state.theme === "dark" ? renderIcon("sun") : renderIcon("moon");
   const themeLabel = state.theme === "dark" ? "切换到浅色主题" : "切换到深色主题";
   const eligible = state.eligibleAdmins || [];
@@ -152,9 +167,12 @@ function renderLogin() {
       <input id="login-code" type="text" inputmode="numeric" maxlength="6" placeholder="6 位数字">
       <label style="margin-top:10px">设备名称（便于识别）</label>
       <input id="login-label" type="text" placeholder="例如 公司笔记本">
+      <label style="display:flex;align-items:center;gap:8px;margin-top:14px"><input id="login-trust-device" type="checkbox" ${canTrustThisBrowser() ? "checked" : "disabled"} style="width:auto">信任此设备</label>
+      <p class="muted">个人设备可保持勾选，以后自动登录；共享设备请取消。信任仅保存在当前浏览器，需通过 HTTPS 或本机地址访问。</p>
       <div style="margin-top:14px"><button class="btn primary" onclick="doVerify()">验证并登录</button></div>
     </div>
     <div id="login-msg" class="muted" style="margin-top:14px"></div>
+    ${state.logoutUnconfirmed ? '<p class="alert" role="alert">当前页面已锁定，但服务器未确认注销。请重试注销；关闭并重新打开页面可能仍恢复登录。</p><button class="btn danger" onclick="doLogout()">重试注销</button>' : ''}
   </div></div>`;
 }
 
@@ -181,9 +199,7 @@ async function recheckDevice() {
 }
 
 async function logoutPending() {
-  try { await api("/auth/logout", { method:"POST" }); } catch {}
-  clearInMemorySensitiveState();
-  state.devicePending = false; state.logged = false; render();
+  await doLogout();
 }
 
 async function sendCode() {
@@ -202,19 +218,23 @@ async function sendCode() {
 }
 
 async function doVerify() {
+  const generation = ++_authGeneration;
   const code = document.getElementById("login-code").value.trim();
   const label = document.getElementById("login-label").value.trim();
   const msg = document.getElementById("login-msg");
   msg.textContent = "正在验证…";
   let r;
   try {
-    r = await api("/auth/verify", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ qq: state.pendingQq, code, device_label: label }) });
+    r = await api("/auth/verify", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ qq: state.pendingQq, code, device_label: label, trust_device: document.getElementById("login-trust-device").checked }) });
   } catch (e) { msg.textContent = "验证失败：" + e.message; }
-  if (!r) return;
+  if (!r || generation !== _authGeneration || r.success !== true) return;
+  _automaticTrustedRecovery = true; state.authUnavailable = false; state.logoutUnconfirmed = false;
   clearInMemorySensitiveState();
   if (r.pending) { state.logged = false; state.devicePending = true; state.qq = state.pendingQq; render(); return; }
   state.logged = true; state.devicePending = false; state.qq = state.pendingQq;
   try {
+    state.authIdentity = await api("/auth/me");
+    if (generation !== _authGeneration) return;
     const loaded = await loadView();
     if (loaded) { render(); enterViewLifecycle(state.view); }
   } catch (e) {

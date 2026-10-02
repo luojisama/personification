@@ -152,7 +152,13 @@ def test_sensitive_memory_and_newer_config_drafts_survive_only_their_owner_sessi
     assert "function clearInMemorySensitiveState()" in core
     assert "state.configDrafts = {};" in core
     assert 'if (res.status === 401) {\n        clearInMemorySensitiveState();' in core
-    assert auth.count("clearInMemorySensitiveState();") >= 4
+    # Clear the previous owner's data before waiting for logout or admitting
+    # the newly verified identity. Duplicate success/error cleanup calls are not
+    # an authentication boundary and can legitimately be consolidated.
+    logout = auth.split("async function doLogout() {", 1)[1].split("let _layoutDelegationAttached", 1)[0]
+    assert logout.index("clearInMemorySensitiveState();") < logout.index('await api("/auth/logout"')
+    verify = auth.split("async function doVerify() {", 1)[1]
+    assert verify.index("clearInMemorySensitiveState();") < verify.index("state.logged = true;")
     assert "function clearMcpSensitiveState()" in mcp
     assert "_mcpPendingInstall = null;" in mcp
     assert "const submittedDraft = configDraft(field);" in config

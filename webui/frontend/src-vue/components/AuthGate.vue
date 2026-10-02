@@ -17,6 +17,8 @@
       <form v-else-if="auth.phase === 'verifying'" class="auth-form" @submit.prevent="confirmCode">
         <TextField v-model="code" label="六位验证码" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required />
         <TextField v-model="deviceLabel" label="设备名称" autocomplete="off" maxlength="64" placeholder="例如：我的电脑" />
+        <label class="trust-device-option"><input v-model="trustDevice" type="checkbox" :disabled="!trustAvailable" />信任此设备</label>
+        <p class="auth-note">{{ trustAvailable ? "个人设备可保持勾选，以后自动登录；共享设备请取消勾选。信任仅保存在当前浏览器。" : "信任设备需通过 HTTPS 或本机地址访问；当前仍可使用验证码登录。" }}</p>
         <button type="submit" :disabled="busy || !/^[0-9]{6}$/.test(code)">验证并登录</button>
         <button class="secondary" type="button" :disabled="busy" @click="back">重新选择管理员</button>
       </form>
@@ -51,6 +53,8 @@ const auth = useAuthStore();
 const qq = ref("");
 const code = ref("");
 const deviceLabel = ref("");
+const trustAvailable = window.location.protocol === "https:" || ["localhost", "127.0.0.1", "::1", "[::1]"].includes(window.location.hostname);
+const trustDevice = ref(trustAvailable);
 const busy = ref(false);
 const errorMessage = ref("");
 const title = computed(() => auth.phase === "pending" ? "等待设备审批" : auth.phase === "unavailable" ? "暂时无法连接" : "管理员登录");
@@ -58,7 +62,7 @@ const lead = computed(() => auth.phase === "pending" ? "当前浏览器尚未获
 const adminOptions = computed(() => auth.admins.map((admin) => ({ value: admin.qq, label: `QQ ${admin.qq} · ${sourceLabel(admin.source)}` })));
 
 onMounted(async () => {
-  if (auth.phase === "checking") await auth.bootstrap();
+  if (auth.phase === "checking" && !auth.bootstrapInProgress) await auth.bootstrap();
 });
 
 function sourceLabel(source: string): string { return source.startsWith("SUPERUSERS") ? "超级用户" : "插件管理员"; }
@@ -70,7 +74,7 @@ function explain(error: unknown): string {
   return "操作未完成，请稍后重试。";
 }
 async function requestCode(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.sendCode(qq.value); } catch (error) { errorMessage.value = explain(error); } finally { busy.value = false; } }
-async function confirmCode(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.verify(qq.value, code.value, deviceLabel.value); } catch (error) { errorMessage.value = explain(error); } finally { busy.value = false; } }
+async function confirmCode(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.verify(qq.value, code.value, deviceLabel.value, trustDevice.value); } catch (error) { errorMessage.value = explain(error); } finally { busy.value = false; } }
 async function retry(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.bootstrap(); } finally { busy.value = false; } }
 async function refreshAdmins(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.loadAdmins(); } catch (error) { errorMessage.value = explain(error); } finally { busy.value = false; } }
 async function logout(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.logout(); } finally { busy.value = false; } }
@@ -79,6 +83,7 @@ async function back(): Promise<void> { auth.invalidate(); code.value = ""; error
 </script>
 
 <style scoped>
+.trust-device-option { display: flex; align-items: center; gap: 10px; min-height: 44px; }.trust-device-option input { width: 20px; height: 20px; }
 .auth-stage { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: radial-gradient(circle at top, var(--color-surface-raised), var(--color-canvas)); }
 .auth-card { width: min(100%, 480px); padding: clamp(24px, 5vw, 42px); border: 1px solid var(--color-line); border-radius: 20px; color: var(--color-ink); background: var(--color-surface); box-shadow: var(--shadow-lg); }
 .eyebrow { color: var(--color-signal); letter-spacing: .14em; font-weight: 700; }

@@ -2,6 +2,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { useAuthStore } from "@vue-app/stores/auth";
 import AuthGate from "./AuthGate.vue";
 
 function json(body: unknown, status = 200): Response {
@@ -17,6 +18,7 @@ describe("认证入口", () => {
   it("匿名管理员可选择账号并进入验证码步骤", async () => {
     const fetcher = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(json({ detail: "Not authenticated" }, 401))
+      .mockResolvedValueOnce(json({ detail: "No trusted device" }, 401))
       .mockResolvedValueOnce(json({ admins: [{ qq: "10001", source: "plugin_admins" }] }))
       .mockResolvedValueOnce(json({ sent: true, message: "验证码已发送" }));
     const wrapper = mount(AuthGate);
@@ -24,15 +26,28 @@ describe("认证入口", () => {
     await wrapper.get("select").setValue("10001");
     await wrapper.get('button[type="submit"]').trigger("submit");
     await vi.waitFor(() => expect(wrapper.text()).toContain("六位验证码"));
-    expect(fetcher.mock.calls[2]?.[0]).toBe("/personification/api/auth/login");
+    expect(fetcher.mock.calls[3]?.[0]).toBe("/personification/api/auth/login");
   });
 
   it("匿名管理员列表为空时仍提供刷新入口", async () => {
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(json({ detail: "Not authenticated" }, 401))
+      .mockResolvedValueOnce(json({ detail: "No trusted device" }, 401))
       .mockResolvedValueOnce(json({ admins: [] }));
     const wrapper = mount(AuthGate);
     await vi.waitFor(() => expect(wrapper.text()).toContain("刷新管理员列表"));
     expect(wrapper.text()).toContain("暂未读取到可登录管理员");
+  });
+  it("个人设备默认勾选，取消后验证码请求明确不信任", async () => {
+    const auth = useAuthStore(); auth.phase = "verifying";
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(json({ success: false }));
+    const wrapper = mount(AuthGate);
+    expect((wrapper.get('input[type="checkbox"]').element as HTMLInputElement).checked).toBe(true);
+    await wrapper.get('input[type="checkbox"]').setValue(false);
+    await wrapper.get('input[autocomplete="one-time-code"]').setValue("123456");
+    await wrapper.get("form").trigger("submit");
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body)).trust_device).toBe(false);
+    wrapper.unmount();
   });
 });
