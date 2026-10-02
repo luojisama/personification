@@ -65,8 +65,12 @@ class ActionExecutor:
         return getattr(self.runtime, "plugin_config", None) or self._config
 
     async def _send(self, message: Any, *, surface: str) -> None:
+        from ..core.tim_image_outbound import prepare_tim_message, tim_send_options
+        original_message = message
+        message = await prepare_tim_message(self.bot, message, self.config)
+        send_options = tim_send_options(original_message, message)
         if self.qq_outbound_ledger is None:
-            result = await self.bot.send(self.event, message)
+            result = await self.bot.send(self.event, message, **send_options)
         else:
             context = build_outbound_context(
                 bot=self.bot,
@@ -79,7 +83,7 @@ class ActionExecutor:
             receipt = await self.qq_outbound_ledger.dispatch(
                 context,
                 message,
-                lambda: self.bot.send(self.event, message),
+                lambda: self.bot.send(self.event, message, **send_options),
             )
             self.receipts.append(receipt)
             self.last_delivery_confirmed = receipt.status == "sent"

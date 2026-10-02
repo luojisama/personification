@@ -112,6 +112,7 @@ def test_send_favorite_expression_fetches_url_and_queues_image() -> None:
     async def _run() -> tuple[list[dict], list[str], list[tuple[str, dict]], dict]:
         bot = FakeBot()
         bot.api_results["fetch_custom_face"] = {"url": ["https://example.test/a.png"]}
+        bot.api_results["get_version_info"] = {"app_name": "NapCat"}
         executor = action_executor_mod.ActionExecutor(bot, object(), _config(), _Logger())
         queued: list[dict] = []
         executor.bind_pending_actions(queued)
@@ -122,7 +123,8 @@ def test_send_favorite_expression_fetches_url_and_queues_image() -> None:
 
     queued, sent, calls, payload = asyncio.run(_run())
 
-    assert calls == [("fetch_custom_face", {"count": 3})]
+    # Image dispatch identifies the implementation once; NapCat media stays unchanged.
+    assert calls == [("fetch_custom_face", {"count": 3}), ("get_version_info", {})]
     assert payload["kind"] == "qq_favorite_expression"
     assert queued[0]["type"] == "send_qq_image_expression"
     assert set(queued[0]["params"]) == {"expression_token", "text", "summary", "history_text"}

@@ -2675,7 +2675,6 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         async def _send_reply(payload: Any) -> Any:
             if getattr(runtime, "user_policy_gate", None) is not None:
                 await runtime.user_policy_gate.ensure_current(event)
-            mark_reply_delivery_started(state)
             result = await _dispatch_reply_part(
                 bot=bot,
                 event=event,
@@ -2683,6 +2682,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 ledger=getattr(runtime, "qq_outbound_ledger", None),
                 surface="normal_reply",
                 reply_trace_id=str(state.get("reply_trace_id", "") or ""),
+                on_delivery_started=lambda: mark_reply_delivery_started(state),
+                plugin_config=runtime.plugin_config,
             )
             if is_confirmed_send_result(result):
                 _confirm_reply_delivery()

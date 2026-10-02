@@ -1,0 +1,13 @@
+# TIM Bridge 图片外发适配
+
+TIM图片发送在Agent ActionExecutor._send及普通/YAML共享dispatch_reply_part前准备。get_protocol_adapter.identity复用缓存的get_version_info只读识别，只有app_name精确TIM OneBot Bridge才转换。未知或NapCat保持原对象；普通字符串不升级解析为CQ媒体。
+
+本地Path/fileURI、bytes、PNG/JPEG dataURL与base64统一为base64://，type=None补normal。复制整个Message，不修改候选；任意图片失败在delivery_started/ledger/send之前抛固定安全异常，不单独发送caption。最多4张，内联原始图片合计32MiB，Base64解码前检查encoded长度，文件只读取cwd/data及系统临时目录内resolve后的普通文件，不接受其它任意路径。已审表情流程会先生成不可变dataURL，因此无需再次读取原图库路径。
+
+普通/YAML共用出口的delivery_started回调移到图片准备成功后，准备失败不会误记为已开始派发。TIM图片发送单次bot.send带_timeout=95，其他协议与文本发送不修改超时。手机下行API请求上限需要与32MiB图片的Base64膨胀匹配48MiB；这与手机发往VPS的OkHttp上传缓冲限制方向不同。
+
+成功发送ACK很小，确认送达依旧需要真实message_id。get_msg大图片回读另有响应大小限制，本地适配测试不证明大图片回读通过。插件验证没有生产更新、外发或Provider调用；35项图片/Agent/shared ledger定向隔离测试及最终137项相关回归通过，测试产物位于D:/test_artifacts/personification/tim-bridge-20261002。
+
+身份检测尊重现有protocol adapter配置：自动模式通过只读get_version_info缓存识别；extensions none或forced其它实现会沿用其既定identity，不额外绕过配置探测或读取本地图片。
+
+验证说明：完整回归首轮3846 passed、1 failed；唯一失败为原有表情工具测试未预期新增只读get_version_info。已更新该断言及NapCat fixture，连同协议配置传递、禁用/forced模式、普通/YAML发送状态边界在最终137项中复验通过。聊天模拟9/9、semantic scan与5个改动Python模块编译通过；没有再次运行第二轮完整测试，未宣称第二轮全量通过。

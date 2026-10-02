@@ -861,7 +861,6 @@ async def process_yaml_response_logic(
     async def _send_reply(payload: Any, *, surface: str = "yaml_reply") -> Any:
         if user_policy_gate is not None:
             await user_policy_gate.ensure_current(event)
-        mark_reply_delivery_started(reply_commit_state)
         result = await _dispatch_reply_part(
             bot=bot,
             event=event,
@@ -869,6 +868,8 @@ async def process_yaml_response_logic(
             ledger=qq_outbound_ledger,
             surface=surface,
             reply_trace_id=outbound_reply_trace_id,
+            on_delivery_started=lambda: mark_reply_delivery_started(reply_commit_state),
+            plugin_config=plugin_config,
         )
         if is_confirmed_send_result(result):
             _confirm_reply_delivery()

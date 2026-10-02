@@ -86,9 +86,17 @@ async def dispatch_reply_part(
     ledger: QQOutboundLedger | None,
     surface: str,
     reply_trace_id: str = "",
+    on_delivery_started: Callable[[], Any] | None = None,
+    plugin_config: Any = None,
 ) -> Any:
+    from ...core.tim_image_outbound import prepare_tim_message, tim_send_options
+    original_payload = payload
+    payload = await prepare_tim_message(bot, payload, plugin_config)
+    send_options = tim_send_options(original_payload, payload)
+    if on_delivery_started is not None:
+        on_delivery_started()
     if ledger is None:
-        result = await bot.send(event, payload)
+        result = await bot.send(event, payload, **send_options)
         status = result.get("status") if isinstance(result, dict) else getattr(result, "status", None)
         if (
             not is_confirmed_send_result(result)
@@ -113,7 +121,7 @@ async def dispatch_reply_part(
     return await ledger.dispatch(
         context,
         payload,
-        lambda: bot.send(event, payload),
+        lambda: bot.send(event, payload, **send_options),
     )
 
 
