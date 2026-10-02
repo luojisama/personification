@@ -510,9 +510,9 @@ def _decorate_context_budget_config(providers: List[Dict[str, Any]], plugin_conf
     """Attach global budget switches without overwriting per-route limits."""
     enabled = _to_bool(getattr(plugin_config, "personification_context_budget_enabled", True), True)
     try:
-        input_ratio = float(getattr(plugin_config, "personification_context_input_ratio", 0.50) or 0.50)
+        input_ratio = float(getattr(plugin_config, "personification_context_input_ratio", 0.80) or 0.80)
     except (TypeError, ValueError):
-        input_ratio = 0.50
+        input_ratio = 0.80
     try:
         margin_ratio = float(getattr(plugin_config, "personification_context_safety_margin_ratio", 0.05) or 0.05)
     except (TypeError, ValueError):

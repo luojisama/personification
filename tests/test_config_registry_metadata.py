@@ -130,7 +130,7 @@ def test_memory_and_labeler_defaults_match_long_term_memory_design() -> None:
     assert cfg.personification_memory_auto_recall_candidate_limit == 32
     assert cfg.personification_memory_auto_recall_inject_limit == 12
     assert cfg.personification_session_compress_token_threshold == 0
-    assert entries["context_input_ratio"].default == 0.5
+    assert entries["context_input_ratio"].default == 0.8
     assert entries["context_safety_margin_ratio"].default == 0.05
 
 

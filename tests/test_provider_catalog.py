@@ -159,8 +159,8 @@ def test_explicit_model_capacity_beats_legacy_and_unknown_alias_is_conservative(
     pool = _pool() | {"context_window_tokens": 100000}
     assert catalog.normalize_catalog_pool(pool)["models"][0]["context_window_tokens"] == 1050000
     preview = config_routes._provider_budget_preview({"model": "gemini-3.8-flash-high"})
-    assert preview == [{"model_id": "gemini-3.8-flash-high", "context_window_tokens": 131072,
-                        "effective_input_limit": 65536, "source": "conservative_fallback"}]
+    assert preview == [{"model_id": "gemini-3.8-flash-high", "context_window_tokens": 262144,
+                        "effective_input_limit": 203162, "source": "conservative_fallback"}]
 
 
 def test_gemini_list_capacity_is_metadata_not_output_reserve():

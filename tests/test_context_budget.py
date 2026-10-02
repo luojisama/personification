@@ -24,11 +24,11 @@ def test_rejected_request_reports_budget_without_sending_or_leaking(monkeypatch)
     caller = Caller()
     routed = ai_routes.RoutedToolCaller(primary_callers=[caller], fallback_caller=None, logger=None,
                                       route_descriptors=[{"name": "safe", "model": "unknown-alias"}])
-    messages = [{"role": "system", "content": "PRIVATE_TEXT" * 12000}, {"role": "user", "content": "hello"}]
+    messages = [{"role": "system", "content": "PRIVATE_TEXT" * 40000}, {"role": "user", "content": "hello"}]
     with pytest.raises(budgeting.ContextBudgetExceeded) as raised:
         asyncio.run(routed._call_provider_with_trace(caller, messages, [], False, {"tools_count": 0}))
     detail = raised.value.budget_detail
-    assert detail["estimated_input_tokens"] > detail["input_token_limit"] == 65_536
+    assert detail["estimated_input_tokens"] > detail["input_token_limit"] == 203_162
     assert detail["system_tokens"] > 0
     assert detail["failure_phase"] == "required_request"
     budget_stage = next(s for s in stages if s["key"] == "context_budget")
@@ -42,23 +42,23 @@ def test_rejected_request_reports_budget_without_sending_or_leaking(monkeypatch)
 def test_fixed_components_failure_keeps_numeric_breakdown() -> None:
     budget = budgeting.ContextBudget.from_route({})
     with pytest.raises(budgeting.ContextBudgetExceeded) as raised:
-        budgeting.fit_history_to_budget([], fixed_messages=[{"role": "system", "content": "x" * 140000}], budget=budget)
+        budgeting.fit_history_to_budget([], fixed_messages=[{"role": "system", "content": "x" * 420000}], budget=budget)
     assert raised.value.budget_detail["failure_phase"] == "fixed_components"
-    assert raised.value.budget_detail["estimated_input_tokens"] > 65_536
+    assert raised.value.budget_detail["estimated_input_tokens"] > 203_162
 
 
 def test_known_272k_route_preserves_output_and_margin() -> None:
     budget = budgeting.ContextBudget.from_route(
-        {"context_window_tokens": 272_000, "max_output_tokens": 16_000}
+        {"context_window_tokens": 272_000, "max_output_tokens": 16_000, "context_input_ratio": 0.50}
     )
     assert budget.effective_input_limit == 136_000
     assert budget.safety_margin_tokens == 13_600
     assert (budget.history_tokens, budget.component_tokens, budget.reserve_tokens) == (95_200, 27_200, 13_600)
 
 
-def test_known_105m_route_does_not_use_more_than_default_half_input() -> None:
+def test_known_105m_route_preserves_explicit_half_input() -> None:
     budget = budgeting.ContextBudget.from_route(
-        {"context_window_tokens": 1_050_000, "max_output_tokens": 32_000}
+        {"context_window_tokens": 1_050_000, "max_output_tokens": 32_000, "context_input_ratio": 0.50}
     )
     assert budget.effective_input_limit == 525_000
     assert budget.effective_input_limit < budget.context_window_tokens - budget.max_output_tokens - budget.safety_margin_tokens
@@ -66,7 +66,7 @@ def test_known_105m_route_does_not_use_more_than_default_half_input() -> None:
 
 def test_service_input_capacity_does_not_override_continuity_ratio() -> None:
     budget = budgeting.ContextBudget.from_route(
-        {"context_window_tokens": 272_000, "max_input_tokens": 180_000, "input_token_limit": 170_000}
+        {"context_window_tokens": 272_000, "max_input_tokens": 180_000, "input_token_limit": 170_000, "context_input_ratio": 0.50}
     )
     assert budget.effective_input_limit == 136_000
 
@@ -80,12 +80,12 @@ def test_impossible_output_reserve_is_rejected_not_clamped_to_one_token() -> Non
 
 def test_unknown_route_is_conservative_and_large_tool_media_are_rejected() -> None:
     budget = budgeting.ContextBudget.from_route({"model": "gemini-name-is-not-a-profile"})
-    assert budget.context_window_tokens == 131_072
-    assert budget.effective_input_limit == 65_536
-    assert budget.max_output_tokens == 8_192
+    assert budget.context_window_tokens == 262_144
+    assert budget.effective_input_limit == 203_162
+    assert budget.max_output_tokens == 32_768
     assert budget.source == "conservative_fallback"
     messages = [{"role": "system", "content": "required"}, {"role": "user", "content": {"inline_data": "x" * 50_000}}]
-    tools = [{"type": "function", "function": {"name": "large", "parameters": {"description": "x" * 140_000}}}]
+    tools = [{"type": "function", "function": {"name": "large", "parameters": {"description": "x" * 420_000}}}]
     with pytest.raises(budgeting.ContextBudgetExceeded, match="required request exceeds"):
         budgeting.fit_request_to_budget(messages, tools, budget)
 
@@ -97,7 +97,7 @@ def test_unknown_route_accepts_20k_input_but_explicit_small_window_still_rejects
     assert fitted == messages
     assert 20_000 <= detail["estimated_input_tokens"] < budget.effective_input_limit
 
-    configured = budgeting.ContextBudget.from_route({"context_window_tokens": 32_768})
+    configured = budgeting.ContextBudget.from_route({"context_window_tokens": 32_768, "context_input_ratio": 0.50})
     assert configured.source == "configured"
     assert configured.effective_input_limit == 16_384
     with pytest.raises(budgeting.ContextBudgetExceeded) as raised:
@@ -105,8 +105,26 @@ def test_unknown_route_accepts_20k_input_but_explicit_small_window_still_rejects
     assert raised.value.budget_detail["input_token_limit"] == 16_384
 
 
+def test_default_80_percent_input_is_bounded_by_physical_reserves() -> None:
+    budget = budgeting.ContextBudget.from_route({})
+    assert budget.max_input_tokens == int(262_144 * 0.80)
+    assert budget.effective_input_limit == (
+        budget.context_window_tokens - budget.max_output_tokens
+        - budget.safety_margin_tokens - budget.thinking_reserve_tokens
+    )
+    messages = [{"role": "user", "content": "x" * 300_000}]
+    fitted, detail = budgeting.fit_request_to_budget(messages, [], budget)
+    assert fitted == messages
+    assert 150_000 <= detail["estimated_input_tokens"] < budget.effective_input_limit
+
+    configured = budgeting.ContextBudget.from_route({"context_input_ratio": 0.50})
+    assert configured.effective_input_limit == 131_072
+    with pytest.raises(budgeting.ContextBudgetExceeded):
+        budgeting.fit_request_to_budget(messages, [], configured)
+
+
 def test_one_megabyte_base64_image_does_not_consume_text_token_budget() -> None:
-    budget = budgeting.ContextBudget.from_route({"context_window_tokens": 272_000, "max_output_tokens": 16_000})
+    budget = budgeting.ContextBudget.from_route({"context_window_tokens": 272_000, "max_output_tokens": 16_000, "context_input_ratio": 0.50})
     image_part = {"inline_data": {"mime_type": "image/png", "data": "a" * (1024 * 1024)}}
     messages = [{"role": "system", "content": "persona"}, {"role": "user", "content": [image_part, {"type": "text", "text": "what is this?"}]}]
     fitted, detail = budgeting.fit_request_to_budget(messages, [], budget)
@@ -185,7 +203,7 @@ def test_usage_calibration_is_safe_and_has_no_prompt_content() -> None:
 
 
 def test_yaml_private_history_metadata_is_refit_and_never_sent() -> None:
-    budget = budgeting.ContextBudget.from_route({"context_window_tokens": 12_000, "max_output_tokens": 2_000})
+    budget = budgeting.ContextBudget.from_route({"context_window_tokens": 12_000, "max_output_tokens": 2_000, "context_input_ratio": 0.50})
     old = {"role": "user", "content": "old " + "x" * 9_000}
     recent = {"role": "user", "content": "recent"}
     rendered = "[old]\n[recent]\n"
@@ -206,7 +224,7 @@ def test_yaml_private_history_metadata_is_refit_and_never_sent() -> None:
 
 
 def test_yaml_private_history_refit_handles_multimodal_content() -> None:
-    budget = budgeting.ContextBudget.from_route({"context_window_tokens": 12_000, "max_output_tokens": 2_000})
+    budget = budgeting.ContextBudget.from_route({"context_window_tokens": 12_000, "max_output_tokens": 2_000, "context_input_ratio": 0.50})
     old = {"role": "user", "content": "old " + "x" * 9_000}
     recent = {"role": "user", "content": "recent"}
     messages = [{"role": "system", "content": "persona"}, {"role": "user", "content": [

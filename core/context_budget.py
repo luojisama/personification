@@ -73,10 +73,10 @@ class ContextBudget:
 
         # Unknown routes must be usable but never inherit Gemini's advertised
         # million-token capacity merely from a model-like string.
-        window = positive("context_window_tokens", 131_072)
+        window = positive("context_window_tokens", 262_144)
         source = "configured" if positive("context_window_tokens") else "conservative_fallback"
         configured_output = positive("max_output_tokens")
-        output = configured_output or min(8_192, max(1_024, window // 4))
+        output = configured_output or min(32_768, max(1_024, window // 4))
         try:
             margin_ratio = float(route.get("context_safety_margin_ratio", 0.05) or 0.05)
         except (TypeError, ValueError):
@@ -95,13 +95,13 @@ class ContextBudget:
         physical_input = max(1, window - output - margin - thinking_reserve)
         configured_max = positive("max_input_tokens")
         configured_limit = positive("input_token_limit")
-        # Default input allocation is intentionally only half of the window;
+        # Default input allocation is intentionally 80% of the window;
         # remaining tokens stay available for output, thinking, and provider
         # accounting that a rough local estimator cannot observe.
         try:
-            input_ratio = float(route.get("context_input_ratio", 0.50) or 0.50)
+            input_ratio = float(route.get("context_input_ratio", 0.80) or 0.80)
         except (TypeError, ValueError):
-            input_ratio = 0.50
+            input_ratio = 0.80
         input_ratio = min(0.90, max(0.05, input_ratio))
         default_input = max(1, int(window * input_ratio))
         hard_input_caps = [physical_input, default_input]
@@ -529,7 +529,7 @@ def primary_route_budget(plugin_config: Any, logger: Any = None) -> ContextBudge
     return ContextBudget.from_route(
         {
             "context_budget_enabled": getattr(plugin_config, "personification_context_budget_enabled", True),
-            "context_input_ratio": getattr(plugin_config, "personification_context_input_ratio", 0.50),
+            "context_input_ratio": getattr(plugin_config, "personification_context_input_ratio", 0.80),
             "context_safety_margin_ratio": getattr(plugin_config, "personification_context_safety_margin_ratio", 0.05),
         }
     )

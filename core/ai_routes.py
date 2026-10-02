@@ -1199,7 +1199,7 @@ class RoutedToolCaller:
                 "max_output_tokens": source.get("max_output_tokens", 0),
                 "input_token_limit": source.get("input_token_limit", 0),
                 "context_budget_enabled": source.get("context_budget_enabled", True),
-                "context_input_ratio": source.get("context_input_ratio", 0.50),
+                "context_input_ratio": source.get("context_input_ratio", 0.80),
                 "context_safety_margin_ratio": source.get("context_safety_margin_ratio", 0.05),
             }
 
@@ -1476,6 +1476,7 @@ class RoutedToolCaller:
             usage_route_id=str(usage_descriptor.get("usage_route_id") or ""),
             usage_provider=str(usage_descriptor.get("api_type") or ""),
         )
+        output_limit_token = None
         try:
             descriptor = self._caller_route_descriptors.get(id(caller), {})
             if descriptor.get("context_budget_enabled", True) is not False:
@@ -1500,6 +1501,11 @@ class RoutedToolCaller:
                 self._record_context_budget_stage(descriptor, budget_detail)
             else:
                 bounded_messages = messages
+            from .llm_context import set_llm_output_limit
+            output_limit_token = set_llm_output_limit(
+                budget.max_output_tokens if descriptor.get("context_budget_enabled", True) is not False
+                else max(1, int(descriptor.get("max_output_tokens") or 32_768))
+            )
             assert_current_generation()
             response = await caller.chat_with_tools(
                 self._strip_route_markers(bounded_messages),
@@ -1524,6 +1530,8 @@ class RoutedToolCaller:
             error = exc
             raise
         finally:
+            if output_limit_token is not None:
+                reset_llm_context(output_limit_token)
             reset_llm_context(wire_retry_token)
             try:
                 self._record_provider_request(

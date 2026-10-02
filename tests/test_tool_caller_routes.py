@@ -148,7 +148,7 @@ def test_custom_gemini_endpoint_uses_google_header_and_v1beta(monkeypatch) -> No
     assert captured["params"] == {}
     assert captured["client_kwargs"]["timeout"].read == 77
     assert captured["client_kwargs"]["follow_redirects"] is False
-    assert "generationConfig" not in captured["json"]
+    assert captured["json"]["generationConfig"] == {"maxOutputTokens": 32_768}
     assert response.content == "ok"
     assert response.usage["total_tokens"] == 2
 

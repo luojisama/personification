@@ -26,6 +26,7 @@ from plugin.personification.core.gemini_transport import (
 )
 from plugin.personification.core.llm_context import (
     current_llm_context,
+    current_llm_output_limit,
     reserve_wire_attempt,
     use_single_attempt_retry_policy,
     use_single_wire_attempt_policy,
@@ -1877,6 +1878,7 @@ class OpenAIToolCaller(ToolCaller):
                     payload: Dict[str, Any] = {
                         "model": self.model,
                         "input": input_items,
+                        "max_output_tokens": current_llm_output_limit(),
                         "tools": response_tools,
                         "tool_choice": "auto",
                     }
@@ -1968,6 +1970,8 @@ class OpenAIToolCaller(ToolCaller):
                         "model": self.model,
                         "messages": normalized_messages,
                     }
+                    output_key = "max_completion_tokens" if str(self.model).lower().startswith(("gpt-5", "gpt-6", "o1", "o3", "o4")) else "max_tokens"
+                    payload[output_key] = current_llm_output_limit()
                     payload_tools = all_tools if use_original_tools else filtered_tools
                     if payload_tools:
                         payload["tools"] = payload_tools
@@ -2125,16 +2129,14 @@ class GeminiToolCaller(ToolCaller):
         if use_builtin_search:
             tool_payload.append(_gemini_builtin_search_tool(self.model))
 
-        payload: Dict[str, Any] = {"contents": contents}
+        payload: Dict[str, Any] = {"contents": contents, "generationConfig": {"maxOutputTokens": current_llm_output_limit()}}
         if system_instruction:
             payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
         if tool_payload:
             payload["tools"] = tool_payload
         if self.thinking_mode != "none":
-            payload["generationConfig"] = {
-                "thinkingConfig": {
-                    "thinkingBudget": GEMINI_THINKING_BUDGET_MAP[self.thinking_mode]
-                }
+            payload["generationConfig"]["thinkingConfig"] = {
+                "thinkingBudget": GEMINI_THINKING_BUDGET_MAP[self.thinking_mode]
             }
 
         self.last_probe_request_shape = _probe_request_shape(payload, "gemini")
@@ -2341,7 +2343,7 @@ class AnthropicToolCaller(ToolCaller):
             payload: Dict[str, Any] = {
                 "model": self.model,
                 "messages": anthropic_messages,
-                "max_tokens": 1024,
+                "max_tokens": current_llm_output_limit(),
             }
             if system_instruction:
                 payload["system"] = system_instruction
@@ -2349,8 +2351,9 @@ class AnthropicToolCaller(ToolCaller):
                 payload["tools"] = tool_payload
             thinking = _maybe_anthropic_thinking(self.thinking_mode)
             if thinking:
+                if "budget_tokens" in thinking:
+                    thinking = {**thinking, "budget_tokens": min(int(thinking["budget_tokens"]), max(1, current_llm_output_limit() - 1))}
                 payload["thinking"] = thinking
-                payload["max_tokens"] = max(1024, int(thinking.get("budget_tokens", 0)) + 1024)
 
             if self.streaming_mode == "buffered":
                 assembler: BufferedToolResponseAssembler | None = None
@@ -4550,6 +4553,7 @@ class GeminiCliToolCaller(ToolCaller):
             request_obj: Dict[str, Any] = {
                 "contents": contents,
                 "generationConfig": {
+                    "maxOutputTokens": current_llm_output_limit(),
                     "thinkingConfig": {
                         "thinkingBudget": GEMINI_THINKING_BUDGET_MAP[self.thinking_mode]
                     }
@@ -5183,6 +5187,7 @@ class AntigravityCliToolCaller(GeminiCliToolCaller):
             request_obj: Dict[str, Any] = {
                 "contents": contents,
                 "generationConfig": {
+                    "maxOutputTokens": current_llm_output_limit(),
                     "thinkingConfig": {
                         "thinkingBudget": GEMINI_THINKING_BUDGET_MAP[self.thinking_mode]
                     }

@@ -722,6 +722,6 @@ def test_provider_budget_preview_is_admin_only_local_and_secret_free(_runtime_co
     _login_as_admin(client, _runtime_context)
     response = client.post("/personification/api/config/provider-budget", json=request)
     assert response.status_code == 200
-    assert response.json()["models"][0]["effective_input_limit"] == 65_536
+    assert response.json()["models"][0]["effective_input_limit"] == 203_162
     assert "private-key" not in response.text
     assert "private.example" not in response.text

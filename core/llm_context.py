@@ -56,6 +56,17 @@ def current_llm_context() -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def set_llm_output_limit(max_output_tokens: int) -> contextvars.Token:
+    """Bind a route's output ceiling to this request, without mutating callers."""
+    value = dict(current_llm_context())
+    value["max_output_tokens"] = max(1, int(max_output_tokens))
+    return _LLM_CONTEXT.set(value)
+
+
+def current_llm_output_limit() -> int:
+    return max(1, int(current_llm_context().get("max_output_tokens", 32_768)))
+
+
 def use_single_attempt_retry_policy() -> bool:
     return str(current_llm_context().get("retry_policy", "") or "") == LLM_RETRY_POLICY_SINGLE_ATTEMPT
 
