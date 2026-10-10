@@ -94,10 +94,12 @@ async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
                                  execution_policy: Any = None) -> PreparedMemoryContext:
     config = runtime.plugin_config
     timezone = str(getattr(config, "personification_timezone", "Asia/Shanghai") or "Asia/Shanghai")
-    result = PreparedMemoryContext(history=project_history(messages, timezone), timezone=timezone)
+    result = PreparedMemoryContext(timezone=timezone)
+    history_messages = messages
     evidence_messages = list(messages)
     result.diagnostics["surface"] = surface
     if not bool(getattr(config, "personification_memory_context_enabled", True)):
+        result.history = project_history(history_messages, timezone)
         result.status = "disabled"
         return result
     from .llm_context import current_llm_context
@@ -134,11 +136,14 @@ async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
                   for m in group_history if not m.get("message_id") or str(m["message_id"]) not in known]
         # The current user request stays last. All historical sources remain labelled.
         historical = sorted(extras + messages[:-1], key=lambda m: float(m.get("timestamp", m.get("time", 0)) or 0))
-        result.history = project_history(historical + messages[-1:], timezone)
+        history_messages = historical + messages[-1:]
         target_id = str(getattr(event, "user_id", "") or "")
         selected = [m for m in historical if str(m.get("user_id") or "") == target_id
                     or (quoted_id and str(m.get("message_id") or "") == quoted_id)]
         evidence_messages = selected[-23:] + messages[-1:]
+    # Merge and filter sources first: projecting the session before this point
+    # would serialize every session message again when group history is added.
+    result.history = project_history(history_messages, timezone)
     if not bool(getattr(config, "personification_memory_enabled", True)):
         result.status = "disabled"
         return result

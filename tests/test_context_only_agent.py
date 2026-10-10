@@ -43,7 +43,9 @@ def _forbid_optional_stages(monkeypatch):
     def forbidden(*_args, **_kwargs):
         pytest.fail("context-only route entered an optional tool/research stage")
     for name in ("contextual_query_rewriter", "handle_model_stop", "_select_tool_schemas",
-                 "start_active_learning_task", "_infer_intent_decision_with_context", "synthesize_evidence_with_llm"):
+                 "start_active_learning_task", "_infer_intent_decision_with_context", "synthesize_evidence_with_llm",
+                 "_extract_focus_query_text", "_clean_user_query_text",
+                 "_recover_followup_query_from_context", "_extract_group_topic_hint"):
         monkeypatch.setattr(runner, name, forbidden)
 
 
@@ -90,6 +92,30 @@ def test_context_only_wire_is_empty_and_shared_quality_preserves_scope(monkeypat
     summary = next(stage for stage in stages if stage["key"] == "agent_execution_summary")
     assert "executed_steps=1" in summary["detail"] and "tool_calls_executed=0" in summary["detail"]
     assert "effective_max_steps=1" in summary["detail"]
+
+
+@pytest.mark.parametrize("derived_policy", [False, True])
+def test_context_only_skips_query_preparation_but_reviews_original_user_text(monkeypatch, derived_policy):
+    _forbid_optional_stages(monkeypatch)
+    reviewed = []
+
+    async def quality(result, **kwargs):
+        reviewed.append(kwargs["current_user_text"])
+        return result
+
+    monkeypatch.setattr(runner, "finalize_agent_reply_quality", quality)
+    caller = _FakeToolCaller([_response()])
+    registry = _register_query_tool(lambda **_kwargs: pytest.fail("unexpected tool"))
+    kwargs = _kwargs(caller, registry)
+    if derived_policy:
+        kwargs["execution_policy"] = None
+        kwargs["precomputed_intent"].llm_source = "primary"
+        kwargs["turn_plan"].ambiguity_level = "low"
+    result = asyncio.run(runner.run_agent(**kwargs))
+    assert result.text == "这局输得挺有节目效果。"
+    assert reviewed == ["又寄了"]
+    assert len(caller.calls) == 1
+    assert {"role": "user", "content": "又寄了"} in caller.calls[0]["messages"]
 
 
 def test_context_only_rejects_unexpected_tool_call_and_never_recovers(monkeypatch):

@@ -504,9 +504,6 @@ async def run_agent(
     last_evidence_tool_count = 0
     max_evidence_synthesis_rounds = 2
     user_text = _extract_latest_user_text(messages)
-    focus_query_text = _clean_user_query_text(_extract_focus_query_text(user_text))
-    contextual_query_text = _recover_followup_query_from_context(user_text, focus_query_text)
-    context_hint = _extract_group_topic_hint(messages)
     user_images = list(current_image_urls or [])
     if not user_images:
         user_images = _extract_latest_user_images(messages)
@@ -533,11 +530,17 @@ async def run_agent(
             enabled=bool(getattr(plugin_config, "personification_context_only_chat_enabled", True)),
         )
         context_only = execution_policy.is_context_only
-    preliminary_query_text = _clean_user_query_text(
-        contextual_query_text
-        or focus_query_text
-        or user_text
-    )
+    # The fixed no-tool route consumes the original messages directly. Query
+    # preparation is only needed for intent inference or the tool route.
+    focus_query_text = ""
+    contextual_query_text = ""
+    preliminary_query_text = ""
+    if not context_only:
+        focus_query_text = _clean_user_query_text(_extract_focus_query_text(user_text))
+        contextual_query_text = _recover_followup_query_from_context(user_text, focus_query_text)
+        preliminary_query_text = _clean_user_query_text(
+            contextual_query_text or focus_query_text or user_text
+        )
     if precomputed_intent is None and context_only:
         # The upstream semantic policy already owns classification. Do not
         # make another classification request on the fixed no-tool route.
@@ -744,6 +747,7 @@ async def run_agent(
             result = AgentResult(text=text or "[NO_REPLY]", pending_actions=pending_actions,
                                  failure_code="" if text else "context_only_empty_reply", suppress_reply_recovery=True)
         return await _finalize_result(result, reason="context_only_reply")
+    context_hint = _extract_group_topic_hint(messages)
     disclosure_mode = resolve_tool_disclosure_mode(
         getattr(plugin_config, "personification_tool_disclosure_mode", "auto"), tool_caller,
     )

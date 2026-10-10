@@ -32,6 +32,8 @@ Gemini模型发现保留 `inputTokenLimit`、`outputTokenLimit` 为 `reported_in
 
 ## 验证与上线边界
 
+无真实机器时，可运行[轻量化离线验收入口](lightweight-plan-2026-10-10.md)。它记录普通/YAML 的实际模型调用账本、取消与送达合同，生成带源码指纹的 JSON/JUnit 证据。
+
 本地使用隔离数据和模拟Provider，验证真实普通/YAML入口、无工具wire、记忆跳过、审阅截止时间、确认/未知回执，以及容量继承和界面。源码交付不等于VPS部署或真实Provider/QQ验收。
 
 2026-10-02本地验收：完整Python测试3816通过，前端43个文件174项测试通过，聊天模拟9/9通过，语义扫描、项目Ruff检查、类型检查与生产构建通过。隔离mock浏览器检查1440×1000桌面和390×844窄屏的容量采纳及Trace详情，无横向溢出，console无错误或警告。证据位于 `D:/test_artifacts/personification/context-only-20261002/`；这些结果不代表真实上游P50/P95。

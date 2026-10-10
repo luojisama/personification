@@ -10,6 +10,7 @@ from scripts.quality_eval.pipeline_adapter import _event_from, run_full_path_cas
 from tests._loader import load_personification_module
 
 db = load_personification_module("plugin.personification.core.db")
+llm_context = load_personification_module("plugin.personification.core.llm_context")
 
 
 class _LoopbackCaller:
@@ -20,9 +21,15 @@ class _LoopbackCaller:
     async def chat_with_tools(self, messages, _tools, _search):  # noqa: ANN001
         self.calls.append([*list(messages), {"_tool_count": len(_tools)}])
         system = "\n".join(str(item.get("content", "")) for item in messages if item.get("role") == "system")
-        if _tools:
+        # Agent and plain processor generation use distinct purposes; both
+        # prompts may include speech_act schema words. This fixture verifies
+        # confirmed history across either normal generation route.
+        purpose = llm_context.current_llm_context().get("purpose")
+        if purpose in {"reply", "reply_generation"}:
+            content = "<output><message>FIRST_REPLY_SENTINEL</message></output>"
+        elif _tools:
             content = "FIRST_REPLY_SENTINEL"
-        elif "speech_act" in system:
+        elif purpose == "semantic_frame":
             content = '{"reply_action":"reply","speech_act":"answer","memory_need":"none","research_need":"none","vision_need":"none","output_mode":"chat_short","tool_intent":[],"ambiguity_level":"low","message_target":"bot","confidence":0.9,"reason":"直接回答"}'
         elif "JSON" in system or "独立复核" in system:
             content = '{"action":"accept","text":"","flags":[],"persona_verdict":"consistent"}'
@@ -129,6 +136,7 @@ def test_confirmed_reply_is_visible_as_assistant_on_next_turn(tmp_path: Path, su
 
     assert result["status"] == "completed"
     assert result["confirmed_history"] >= 1
+    assert "FIRST_REPLY_SENTINEL" in result["turns"][0]["reply"]
     if pipeline == "normal":
         # Normal mode carries confirmed bot history as the actual assistant
         # role and preserves its production provenance projection.

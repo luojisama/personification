@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 from ._loader import load_personification_module
@@ -26,7 +27,14 @@ def _init_store(tmp_path):
     return cfg, store
 
 
-def test_public_meme_seed_query(tmp_path) -> None:
+def test_public_meme_seed_query(tmp_path, monkeypatch) -> None:
+    # Exercise seed ingestion without depending on ignored installation data.
+    seed_file = tmp_path / "meme_seeds.json"
+    seed_file.write_text(json.dumps([
+        {"term": "典", "meaning": "典型场景的简写"},
+        {"term": "绷", "meaning": "绷不住的简写"},
+    ], ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(meme_dictionary, "_SEED_FILE", seed_file)
     _init_store(tmp_path)
     meme_dictionary.ensure_public_meme_seeds()
 
