@@ -457,7 +457,7 @@ class TelegramConnections:
     def consume_test(self, bot_id: str, text: str) -> bool:
         for ident, (nonce, expires) in list(self.nonces.items()):
             row = self.records[ident]
-            if row["token"].split(":", 1)[0] == bot_id and expires > time.time() and secrets.compare_digest(text.strip(), "/start pf_" + nonce):
+            if row["token"].split(":", 1)[0] == bot_id and expires > time.time() and secrets.compare_digest(text.strip().encode("utf-8"), ("/start pf_" + nonce).encode("utf-8")):
                 del self.nonces[ident]
                 return True
         return False

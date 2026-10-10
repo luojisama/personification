@@ -134,3 +134,62 @@ def test_startup_cookie_refresh_covers_every_bot_once() -> None:
         ("10001", ("10001", "10002")),
         ("10002", ("10001", "10002")),
     ]
+
+
+def test_startup_cookie_refresh_filters_telegram_before_bot_id_deduplication() -> None:
+    from .test_telegram_bridge import bot as telegram_bot
+
+    native, telegram_calls = telegram_bot()
+    first_qq = SimpleNamespace(self_id=native.self_id)
+    second_qq = SimpleNamespace(self_id="456")
+    seen = []
+    async def update_qzone_cookie(bot, *, connected_bot_ids):
+        seen.append((bot, connected_bot_ids))
+        return True, "ok"
+    ok = asyncio.run(qzone_startup.refresh_qzone_cookie_on_available_bot(
+        enabled=True,
+        get_bots=lambda: {"telegram": native, "qq": first_qq, "qq-other": second_qq},
+        update_qzone_cookie=update_qzone_cookie, logger=_Logger(), wait_seconds=0,
+    ))
+    assert ok is True
+    assert seen == [(first_qq, ("123", "456")), (second_qq, ("123", "456"))]
+    assert telegram_calls == []
+
+
+def test_startup_cookie_refresh_skips_telegram_only() -> None:
+    from .test_telegram_bridge import bot as telegram_bot
+
+    native, telegram_calls = telegram_bot()
+    seen = []
+    async def update_qzone_cookie(bot, **kwargs):
+        seen.append(bot)
+        return True, "unexpected"
+    ok = asyncio.run(qzone_startup.refresh_qzone_cookie_on_available_bot(
+        enabled=True, get_bots=lambda: {"telegram": native},
+        update_qzone_cookie=update_qzone_cookie, logger=_Logger(), wait_seconds=0,
+    ))
+    assert ok is False
+    assert seen == []
+    assert telegram_calls == []
+
+
+def test_startup_cookie_refresh_waits_for_qq_when_only_telegram_is_connected() -> None:
+    from .test_telegram_bridge import bot as telegram_bot
+
+    native, telegram_calls = telegram_bot()
+    qq_bot = SimpleNamespace(self_id="456")
+    snapshots = iter(({"telegram": native}, {"telegram": native, "qq": qq_bot}))
+    waits, seen = [], []
+    async def sleep(delay):
+        waits.append(delay)
+    async def update_qzone_cookie(bot, *, connected_bot_ids):
+        seen.append((bot, connected_bot_ids))
+        return True, "ok"
+    ok = asyncio.run(qzone_startup.refresh_qzone_cookie_on_available_bot(
+        enabled=True, get_bots=lambda: next(snapshots), update_qzone_cookie=update_qzone_cookie,
+        logger=_Logger(), wait_seconds=5, poll_interval=.25, sleep=sleep,
+    ))
+    assert ok is True
+    assert waits == [.25]
+    assert seen == [(qq_bot, ("456",))]
+    assert telegram_calls == []

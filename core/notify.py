@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Iterable
 
+from .telegram_connections import native_telegram
+
 
 async def send_to_admin(get_bots: Callable[[], dict[str, Any]], qq: str, message: str) -> bool:
     """通过任意可用 bot 给指定 QQ 发私聊。
@@ -15,6 +17,8 @@ async def send_to_admin(get_bots: Callable[[], dict[str, Any]], qq: str, message
     except Exception:
         bots = {}
     for bot in list(bots.values()):
+        if native_telegram(bot):
+            continue
         try:
             await bot.call_api("send_private_msg", user_id=int(target), message=str(message or ""))
             return True

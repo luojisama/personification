@@ -41,6 +41,19 @@ def service(tmp_path, monkeypatch, factory=FakeBot):
 SETTINGS = {"token": "123:" + "a" * 30, "scope": "all"}
 
 
+def test_private_unicode_does_not_consume_connection_test(tmp_path, monkeypatch):
+    import time
+
+    manager = service(tmp_path, monkeypatch)
+    manager.records["connection"] = SETTINGS.copy()
+    manager.nonces["connection"] = ("test_nonce", time.time() + 600)
+    for text in ("你好", "😀", "/start pf_测试", "/start"):
+        assert manager.consume_test("123", text) is False
+        assert "connection" in manager.nonces
+    assert manager.consume_test("123", "/start pf_test_nonce") is True
+    assert manager.consume_test("123", "/start pf_test_nonce") is False
+
+
 def test_secret_store_public_dto_and_duplicate_identity(tmp_path, monkeypatch):
     manager = service(tmp_path, monkeypatch)
     async def run():

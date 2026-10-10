@@ -4,6 +4,8 @@ import asyncio
 import time
 from typing import Any, Awaitable, Callable
 
+from .telegram_connections import native_telegram
+
 
 async def refresh_qzone_cookie_on_available_bot(
     *,
@@ -15,7 +17,7 @@ async def refresh_qzone_cookie_on_available_bot(
     poll_interval: float = 2.0,
     sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
 ) -> bool:
-    """Refresh every connected Bot once after startup without cross-Bot reuse."""
+    """Refresh every connected QQ Bot once without cross-Bot reuse."""
     if not enabled:
         return False
 
@@ -33,6 +35,8 @@ async def refresh_qzone_cookie_on_available_bot(
         if bots:
             seen_ids: set[str] = set()
             for key, bot in bots.items():
+                if native_telegram(bot):
+                    continue
                 bot_id = str(getattr(bot, "self_id", key) or key).strip()
                 if not bot_id or bot_id in seen_ids:
                     continue

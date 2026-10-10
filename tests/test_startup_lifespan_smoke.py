@@ -278,7 +278,9 @@ plugin.StickerLabeler = type("Labeler", (), {"__init__": lambda self, *a, **k: N
 
 webui = types.ModuleType("plugin.personification.webui"); webui.install_webui = lambda **kwargs: False
 sys.modules[webui.__name__] = webui
-tasks = importlib.import_module("plugin.personification.core.tasks_service"); tasks.restore_tasks_on_startup = noop
+tasks = importlib.import_module("plugin.personification.core.tasks_service")
+task_callers = []
+tasks.restore_tasks_on_startup = lambda scheduler, root, caller: task_callers.append(caller)
 social = importlib.import_module("plugin.personification.flows.social_intelligence")
 social.setup_social_intelligence_jobs = lambda **kwargs: 0
 
@@ -305,6 +307,43 @@ async def main():
     assert set(config_info["imported_fields"]) <= {"personification_data_dir", "personification_favorability_attitudes"}
     assert len(events) >= 40 and {item.kind for item in events} == {"message", "notice", "command"}
     assert {"reply_matcher", "record_msg_matcher", "approve_login"} <= plugin.matcher_handles.keys()
+
+    # Exercise the real restored-task callback, including both outbound modes.
+    # A typed native Telegram Bot must never receive QQ friend/send APIs.
+    from plugin.personification.tests.test_telegram_bridge import bot as telegram_bot
+    native, telegram_calls = telegram_bot()
+    qq_calls, ledger_calls = [], []
+    class QQBot:
+        self_id = "10001"
+        async def get_friend_list(self):
+            qq_calls.append(("get_friend_list", {}))
+            return [{"user_id": 42}]
+        async def send_private_msg(self, **kwargs):
+            qq_calls.append(("send_private_msg", kwargs))
+            return {"message_id": 99}
+    class Ledger:
+        async def dispatch(self, context, message, send):
+            ledger_calls.append((context.bot_id, context.surface, message))
+            await send()
+            return SimpleNamespace(status="sent")
+    qq_bot = QQBot()
+    for with_ledger in (False, True):
+        bundle.qq_outbound_ledger = Ledger() if with_ledger else None
+        await plugin._restore_user_tasks()
+        callback = task_callers[-1]
+        plugin.get_bots = lambda: {"telegram": native}
+        skipped = {"user_id": "42", "message": "测试提醒", "last_status": "pending"}
+        await callback(skipped)
+        assert skipped["last_status"] == "pending"
+        assert telegram_calls == []
+        qq_calls.clear(); ledger_calls.clear()
+        plugin.get_bots = lambda: {"telegram": native, "qq": qq_bot}
+        sent = {"user_id": "42", "message": "测试提醒", "last_status": "pending"}
+        await callback(sent)
+        assert sent["last_status"] == "sent"
+        assert qq_calls == [("get_friend_list", {}), ("send_private_msg", {"user_id": 42, "message": "测试提醒"})]
+        assert ledger_calls == ([("10001", "scheduled_user_task", "测试提醒")] if with_ledger else [])
+        assert telegram_calls == []
     await driver._lifespan.shutdown()
 asyncio.run(main())
 print("lifespan-ok", len(events))
