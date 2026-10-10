@@ -70,6 +70,8 @@ NoneBot 2.4.4 的进程内 Bot 注册表以原始 self_id 为键：若 QQ Bot �
 
 CI 安装 `requirements-telegram.txt` 后执行 `python -m pytest tests`；未安装可选适配器时真实协议测试跳过。隔离 wheel 可通过 `PERSONIFICATION_TELEGRAM_ADAPTERS` 指向其 `nonebot/adapters` 目录，不要求在生产环境安装测试包。
 
-没有使用真实 TG Token、账号、群或外部模型完成本轮验收；连接体检的群权限/可见性也不能由离线测试代替。真实 30 段失败对话、20 段保留集和人工质量发布判断尚待提供。功能交付不宣称自然度提升，不自动启用 B/C 或部署到生产。
+2026-10-10 经用户授权部署到指定 VPS，使用现有监控脚本重启。实机已验证凭据、无 Webhook 冲突、持续长轮询及用户 `/start`/中文消息接收；发现并修复中文 nonce 校验异常和旧 QQ 后台任务误选 TG，补丁隔离回归 66 项通过。真实回复送达、群权限/可见性、媒体与管理操作尚未完成验收。
+
+合并隔离回归 522 项通过，前端 191 项测试、类型检查、构建及浏览器 mock 流程通过；初轮全量 3989 项通过、1 项失败已修复，未对最新源码再次执行完整全量。真实 30 段失败对话、20 段保留集和人工质量发布判断尚待提供。功能交付不宣称自然度提升，生产表达仍为 A，B/C 保持实验配置。
 
 复用来源（2026-10-10 核对）：[官方适配器](https://github.com/nonebot/adapter-telegram)、[PyPI b20](https://pypi.org/project/nonebot-adapter-telegram/0.1.0b20/)、[Telegram Bot API](https://core.telegram.org/bots/api)、[Promptfoo Python Provider](https://www.promptfoo.dev/docs/providers/python/)。沿用官方适配器 MIT 许可；不引入第二套 Telegram 框架。
