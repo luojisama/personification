@@ -624,7 +624,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
         envelope_bot_id = ""
         if isinstance(interaction_envelope, InteractionEnvelope):
             envelope_platform = str(interaction_envelope.platform or "").strip()
-            envelope_bot_id = str(interaction_envelope.bot_id or "").strip()
+            envelope_bot_id = str((interaction_envelope.bot_namespace if interaction_envelope.platform == "telegram" else interaction_envelope.bot_id) or "").strip()
         token = set_llm_context(
             group_id=str(getattr(event, "group_id", "") or ""),
             user_id=str(getattr(event, "user_id", "") or ""),
@@ -846,6 +846,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     persona = deps.persona
     runtime = deps.runtime
     types = deps.types
+    from ...core.reply_timeliness import capture_reply_timeliness
+    timeliness = capture_reply_timeliness(runtime.plugin_config, event, bot, getattr(runtime, "user_policy_gate", None))
     started_at = time.monotonic()
 
     if hasattr(event, "message_id") and runtime.is_msg_processed(event.message_id):
@@ -3196,6 +3198,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             review_decision = await final_dialogue_gate(
                 runtime.review_call_ai_api or runtime.lite_call_ai_api or runtime.call_ai_api,
                 candidate_text=reply_content,
+                timeliness=timeliness,
                 raw_message_text=raw_message_text or message_text or message_content,
                 recent_context=recent_context_hint,
                 relationship_hint=relationship_hint,
@@ -4234,8 +4237,10 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             memory_group_id = "" if is_private_session else str(group_id)
             if hasattr(runtime.memory_curator, "schedule_turn_capture"):
                 runtime.memory_curator.schedule_turn_capture(
+                    source_message_id=str(getattr(event, "message_id", "") or ""),
+                    delivery_confirmed=bool(confirmed_history_text),
                     user_utterance=raw_message_text or message_text or message_content,
-                    bot_response=final_visible_reply_text,
+                    bot_response=confirmed_history_text,
                     user_id=user_id,
                     group_id=memory_group_id,
                     vision_summary=image_summary_suffix,

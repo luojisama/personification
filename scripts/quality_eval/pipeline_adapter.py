@@ -233,6 +233,7 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
     root = Path(isolated_dir).resolve()
     root.mkdir(parents=True, exist_ok=True)
     processor = importlib.import_module("plugin.personification.handlers.reply_pipeline.processor")
+    pipeline_context = importlib.import_module("plugin.personification.handlers.reply_pipeline.pipeline_context")
     yaml_mod = importlib.import_module("plugin.personification.handlers.yaml_pipeline.processor")
     config_mod = importlib.import_module("plugin.personification.config")
     registry_mod = importlib.import_module("plugin.personification.agent.tool_registry")
@@ -257,7 +258,7 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
     # and provider-native search off so no delegated/provider path can bypass
     # that single accounting boundary during an evaluation run.
     values = dict(behavior_config or {})
-    values.update(personification_data_dir=str(root), personification_qq_expression_enabled=False, personification_tts_enabled=False, personification_schedule_global=False, personification_tool_disclosure_mode="off", personification_model_builtin_search_enabled=False, personification_builtin_search=False)
+    values.update(personification_data_dir=str(root), personification_sticker_path=str(root / "disabled-stickers"), personification_skills_path=str(root / "disabled-skills"), personification_skill_remote_enabled=False, personification_qq_expression_enabled=False, personification_tts_enabled=False, personification_schedule_global=False, personification_tool_disclosure_mode="off", personification_model_builtin_search_enabled=False, personification_builtin_search=False)
     config = config_mod.Config(**values)
     session_data: dict[str, list[dict[str, Any]]] = {}
     confirmed_history: list[dict[str, Any]] = []
@@ -362,6 +363,15 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
     original_sticker_feedback = yaml_mod.load_sticker_feedback
     tool_registrars = ("register_qq_recall_tool", "register_current_user_avatar_tool", "register_peer_bot_tools", "register_current_group_context_tool", "register_send_qq_expression_tools", "register_group_user_avatar_pair_insight_tool", "register_group_member_avatar_insight_tool", "register_moderation_for_turn")
     original_registrars = {name: getattr(yaml_mod, name) for name in tool_registrars}
+    # Both pipelines build turn-local registries even when the injected base
+    # registry is empty. Disable registration *before* those helpers can read
+    # production stores or expose external tools. Restore after the fixture.
+    normal_registrars = {name: getattr(pipeline_context, name) for name in (*tool_registrars, "register_groupmate_qzone_agent_tools")}
+    original_image_builders = (yaml_mod.build_send_image_tools, pipeline_context.build_send_image_tools)
+    for name in normal_registrars:
+        setattr(pipeline_context, name, lambda *_a, **_k: None)
+    yaml_mod.build_send_image_tools = lambda *_a, **_k: []
+    pipeline_context.build_send_image_tools = lambda *_a, **_k: []
     yaml_mod.get_group_topic_summary = lambda *_a, **_k: ""
     yaml_mod.get_recent_group_msgs = lambda *_a, **_k: list(group_window)
     # QZone registration reads its own persistent settings and may expose write
@@ -387,14 +397,21 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
     try:
         turns: list[dict[str, Any]] = []
         for index, event_data in enumerate(events):
+            from plugin.personification.core.quality_variant import quality_turn
             event = _event_from(case, event_data, bot.self_id, index)
             captured_group_replies.clear()
             before = len(bot.sent)
             state = {"response_deadline": asyncio.get_running_loop().time() + float(config.personification_response_timeout), "disable_network_hooks": True, "is_random_chat": bool(case.get("is_random_chat", False)), "batched_events": [], "turn_media_context": []}
-            await processor.process_response_logic(bot, event, state, processor.ReplyProcessorDeps(session=session, persona=persona, runtime=runtime, types=type_deps))
+            with quality_turn(surface=str(case.get("surface", "group")), direct=event_data.get("kind") == "mention"):
+                await processor.process_response_logic(bot, event, state, processor.ReplyProcessorDeps(session=session, persona=persona, runtime=runtime, types=type_deps))
             new_payloads = bot.sent[before:]
             turn_reply = "".join(str(value or "") for value in new_payloads)
             turns.append({"mode": "yaml" if isinstance(prompt, dict) else "normal", "input": event.get_plaintext(), "reply": turn_reply, "sent": len(new_payloads), "reply_delivery_confirmed": bool(state.get("reply_delivery_confirmed", False)), "delivery_unknown": bool(state.get("delivery_unknown", False))})
+            from plugin.personification.core.reply_turn_trace import get_trace
+            trace = get_trace(str(state.get("reply_trace_id", ""))) or {}
+            length_stages = [stage for stage in trace.get("stages", []) if stage.get("key") == "reply_length_policy"]
+            turns[-1]["length_observations"] = len(length_stages)
+            turns[-1]["truncated"] = any("truncated=true" in str(stage.get("detail", "")) for stage in length_stages)
             if logger.failed or (new_payloads and receipt != "confirmed"):
                 break
             if str(case.get("surface", "group")) != "private":
@@ -410,6 +427,9 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
         yaml_mod.register_groupmate_qzone_agent_tools = original_qzone_register
         for name, value in original_registrars.items():
             setattr(yaml_mod, name, value)
+        for name, value in normal_registrars.items():
+            setattr(pipeline_context, name, value)
+        yaml_mod.build_send_image_tools, pipeline_context.build_send_image_tools = original_image_builders
         yaml_mod.load_sticker_feedback = original_sticker_feedback
     reply = ""
     for payload in bot.sent:

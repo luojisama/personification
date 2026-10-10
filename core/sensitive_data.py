@@ -18,6 +18,7 @@ _KEY_VALUE_PATTERN = re.compile(
 _BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+")
 _BASIC_PATTERN = re.compile(r"(?i)\bbasic\s+([a-z0-9+/=_-]+)")
 _OPENAI_KEY_PATTERN = re.compile(r"(?i)\b(sk-[a-z0-9_-]{8})[a-z0-9_-]+")
+_TELEGRAM_TOKEN_PATTERN = re.compile(r"(?i)(/(?:file/)?bot)[0-9]+:[A-Za-z0-9_-]+")
 _URL_PATTERN = re.compile(r"(?i)https?://[^\s\"'<>]+")
 _SENSITIVE_KEY_PATTERN = re.compile(
     r"(?i)(?<![a-z0-9])(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|"
@@ -91,6 +92,8 @@ def _sanitize_basic_auth(match: re.Match[str]) -> str:
 
 def sanitize_text(value: Any, *, limit: int = 4000) -> str:
     text = str(value or "")
+    # Redact before truncation so a truncated credential cannot survive.
+    text = _TELEGRAM_TOKEN_PATTERN.sub(r"\1***", text)
     if len(text) > limit:
         text = text[: max(0, limit - 12)] + "...<truncated>"
     text = _URL_PATTERN.sub(_sanitize_url, text)
@@ -124,6 +127,7 @@ def contains_sensitive_value(value: Any) -> bool:
         _HEADER_PATTERN.search(text)
         or _KEY_VALUE_PATTERN.search(text)
         or _BEARER_PATTERN.search(text)
+        or _TELEGRAM_TOKEN_PATTERN.search(text)
         or _BASIC_PATTERN.sub(_sanitize_basic_auth, text) != text
     )
 

@@ -273,6 +273,18 @@ async def _init_personification_runtime() -> None:
 
     flow_handles = setup_flows(deps=runtime_bundle.make_flow_setup_deps())
     check_proactive_messaging = flow_handles["check_proactive_messaging"]
+    from .flows.telegram_proactive import register_telegram_proactive_job
+    _telegram_flow_deps = runtime_bundle.make_flow_setup_deps()
+    register_telegram_proactive_job(
+        scheduler=scheduler, plugin_config=plugin_config, get_bots=get_bots,
+        load_prompt=_telegram_flow_deps.load_prompt,
+        call_ai_api=_telegram_flow_deps.call_ai_api,
+        get_now=_telegram_flow_deps.get_now,
+        load_proactive_state=_telegram_flow_deps.load_proactive_state,
+        save_proactive_state=_telegram_flow_deps.save_proactive_state,
+        logger=logger,
+        review_call_ai_api=runtime_bundle.reply_processor_deps.runtime.review_call_ai_api,
+    )
 
     job_handles = setup_jobs(
         scheduler=scheduler,
@@ -369,6 +381,19 @@ async def _init_personification_runtime() -> None:
         )
     except Exception as exc:
         logger.debug(f"[satori] optional reply bridge unavailable: {exc}")
+    from .handlers.telegram_reply_bridge import register_telegram_reply_bridge
+    from .handlers.reply_pipeline.processor import process_response_logic as _telegram_processor
+    from .handlers.reply_buffer import run_buffer_timer as _telegram_buffer_timer
+    matcher_handles.update(register_telegram_reply_bridge(
+        personification_rule=runtime_bundle.personification_rule,
+        process_response_logic=_telegram_processor,
+        reply_processor_deps=runtime_bundle.reply_processor_deps,
+        msg_buffer=runtime_bundle.msg_buffer,
+        message_cls=Message, message_segment_cls=MessageSegment,
+        message_event_cls=MessageEvent, group_message_event_cls=GroupMessageEvent,
+        private_message_event_cls=PrivateMessageEvent, poke_event_cls=PokeNotifyEvent,
+        logger=logger, plugin_config=plugin_config, run_buffer_timer=_telegram_buffer_timer,
+    ))
     globals().update(matcher_handles)
 
     if runtime_bundle.persona_store is not None:
@@ -379,6 +404,21 @@ async def _init_personification_runtime() -> None:
             logger=logger,
         )
         globals().update(persona_matcher_handles)
+
+
+@get_driver().on_startup
+async def _restore_telegram_connections() -> None:
+    from .core.telegram_connections import ConnectionFault, get_connections
+    try:
+        await get_connections(plugin_config).restore()
+    except ConnectionFault as exc:
+        logger.warning(f"Telegram 托管连接未恢复：{exc.code}")
+
+
+@get_driver().on_shutdown
+async def _stop_telegram_connections() -> None:
+    from .core.telegram_connections import get_connections
+    await get_connections(plugin_config).close()
 
 
 @get_driver().on_startup

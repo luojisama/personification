@@ -1,0 +1,11 @@
+.upgrade-form { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,16rem),1fr)); gap:1rem; }
+.upgrade-form label { display:grid; gap:.4rem; }
+.upgrade-form input,.upgrade-form select,.upgrade-form textarea { width:100%; min-width:0; padding:.6rem; border:1px solid var(--color-line); border-radius:var(--radius-sm); background:var(--color-surface-sunken); color:var(--color-ink); }
+.upgrade-form textarea { min-height:10rem; resize:vertical; }
+.upgrade-form p,.upgrade-form .upgrade-wide { grid-column:1/-1; }
+.upgrade-actions { display:flex; flex-wrap:wrap; gap:.6rem; align-items:center; }
+.upgrade-card { padding:1rem 0; border-bottom:1px solid var(--color-line); overflow-wrap:anywhere; }
+.upgrade-facts { display:grid; grid-template-columns:minmax(8rem,1fr) 2fr; gap:.5rem; }
+.upgrade-facts dd { margin:0; }
+.upgrade-page pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:32rem; overflow:auto; }
+.upgrade-candidates { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,17rem),1fr)); gap:1rem; }

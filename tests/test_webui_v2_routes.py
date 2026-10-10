@@ -566,6 +566,10 @@ def test_bot_identity_uses_controlled_avatar_and_connected_runtime() -> None:
     assert rows == [
         {
             "bot_id": "12345",
+            "raw_bot_id": "12345",
+            "platform": "onebot",
+            "source": "native",
+            "capabilities": {"chat": True, "topics": False, "moderation": True, "qzone": True, "qq_profile": True},
             "nickname": "测试 Bot",
             "avatar_url": "https://q1.qlogo.cn/g?b=qq&nk=12345&s=640",
             "online": True,

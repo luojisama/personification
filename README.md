@@ -4,6 +4,8 @@
 
 当前仓库是源码型插件，不是独立发布的 PyPI package。仓库默认放在 NoneBot 项目的 `plugin/personification`，由 `plugin_dirs = ["plugin"]` 自动加载。
 
+新增 [Telegram 网页托管与 NoneBot 原生接入](docs/telegram-integration.md)、[聊天实验室](docs/quality-lab.md)、[共同经历与发言时效](docs/experience-and-timeliness.md)。Telegram 使用可选官方适配器；表达候选只在隔离实验室运行，经历和时效开关默认关闭。真实 TG 与自然度盲评仍需单独验收。
+
 ### 双轨仓库说明
 
 - **本地开发版**：代码目录为 `plugin/personification`，命名空间为 `plugin.personification`，源码主页是 [`luojisama/personification`](https://github.com/luojisama/personification)。

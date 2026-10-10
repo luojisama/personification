@@ -21,12 +21,14 @@ from .reply_pipeline.processor import TypeDeps
 
 def _namespaced_message_id(envelope: InteractionEnvelope) -> str:
     raw = envelope.message_id
-    return f"{envelope.bot_namespace}:m{len(raw)}:{raw}" if raw else ""
+    scope = envelope.conversation_namespace if envelope.platform == "telegram" else envelope.bot_namespace
+    return f"{scope}:m{len(raw)}:{raw}" if raw else ""
 
 
 def _namespaced_reply_id(envelope: InteractionEnvelope) -> str:
     raw = str(envelope.reply_to_message_id or "").strip()
-    return f"{envelope.bot_namespace}:m{len(raw)}:{raw}" if raw else ""
+    scope = envelope.conversation_namespace if envelope.platform == "telegram" else envelope.bot_namespace
+    return f"{scope}:m{len(raw)}:{raw}" if raw else ""
 
 
 def _pipeline_envelope(envelope: InteractionEnvelope) -> InteractionEnvelope:
@@ -62,13 +64,14 @@ class _SatoriPipelineEvent:
         self.message = message
         self.raw_message = envelope.text
         self.user_id = envelope.sender_id
-        self.group_id = envelope.conversation_id if envelope.conversation_kind == "channel" else ""
+        self.group_id = envelope.conversation_id if envelope.conversation_kind in {"channel", "group"} else ""
+        self.platform = envelope.platform
         self.message_id = envelope.message_id
         self.self_id = envelope.bot_namespace
         self.to_me = bool(getattr(source, "to_me", False))
         self.reply_to_message_id = envelope.reply_to_message_id
         self.reply = None
-        self.sender = type("SatoriSender", (), {"user_id": self.user_id, "nickname": ""})()
+        self.sender = type("SatoriSender", (), {"user_id": self.user_id, "nickname": "", "card": ""})()
 
     def get_plaintext(self) -> str:
         return self.raw_message
@@ -209,11 +212,15 @@ async def dispatch_satori_reply(
     logger: Any,
     plugin_config: Any,
     run_buffer_timer: Any = None,
+    interaction_adapter: Any = None,
+    source_envelope: Any = None,
+    proxy_factory: Any = None,
+    projected_callback: Any = None,
 ) -> None:
-    adapter = SatoriInteractionAdapter()
+    adapter = interaction_adapter or SatoriInteractionAdapter()
     if not adapter.capabilities(bot).text:
         return
-    source_envelope = adapter.normalize(event, bot_id=str(getattr(bot, "self_id", "") or ""))
+    source_envelope = source_envelope or adapter.normalize(event, bot_id=str(getattr(bot, "self_id", "") or ""))
     if not source_envelope.sender_id or not source_envelope.conversation_id:
         return
     envelope = _pipeline_envelope(source_envelope)
@@ -223,8 +230,22 @@ async def dispatch_satori_reply(
         envelope=envelope,
         message=_onebot_message_from_envelope(envelope, message_cls=message_cls, segment_cls=message_segment_cls),
     )
+    if source_envelope.platform == "telegram" and getattr(event, "reply_to_message", None) is not None:
+        from types import SimpleNamespace
+        quoted = adapter.normalize(event.reply_to_message, bot_id=source_envelope.bot_id)
+        quoted = replace(quoted, conversation_id=source_envelope.conversation_id, topic_id=source_envelope.topic_id)
+        projected_quote = _pipeline_envelope(quoted)
+        quoted_sender = envelope.bot_namespace if quoted.sender_id == source_envelope.bot_id else projected_quote.sender_id
+        pipeline_event.reply = SimpleNamespace(
+            message_id=projected_quote.message_id,
+            user_id=quoted_sender,
+            sender=SimpleNamespace(user_id=quoted_sender, nickname=""),
+            message=_onebot_message_from_envelope(projected_quote, message_cls=message_cls, segment_cls=message_segment_cls),
+        )
     state["interaction_envelope"] = envelope
     state["turn_media_context"] = serialize_turn_media(envelope.ordered_media)
+    if projected_callback is not None:
+        await projected_callback(pipeline_event, state)
     if not await personification_rule(pipeline_event, state):
         return
     types = reply_processor_deps.types
@@ -262,7 +283,7 @@ async def dispatch_satori_reply(
         )
 
     await handle_reply_event(
-        _SatoriBotProxy(bot, event, envelope, adapter), pipeline_event, state,
+        (proxy_factory or _SatoriBotProxy)(bot, event, envelope, adapter), pipeline_event, state,
         poke_event_cls=poke_event_cls,
         message_event_cls=(message_event_cls, _SatoriPipelineEvent),
         group_message_event_cls=(group_message_event_cls, _SatoriPipelineGroupEvent),

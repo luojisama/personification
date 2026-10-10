@@ -37,7 +37,7 @@ except Exception:  # pragma: no cover - fallback for lightweight unit-test stubs
 def _is_group_event(event: Any, group_event_cls: Any) -> bool:
     envelope = getattr(event, "_personification_interaction_envelope", None)
     if envelope is not None:
-        return str(getattr(envelope, "conversation_kind", "") or "") == "channel"
+        return str(getattr(envelope, "conversation_kind", "") or "") in {"channel", "group"}
     return isinstance(event, group_event_cls)
 
 
@@ -139,7 +139,7 @@ async def personification_rule(
                 return False
             if _is_group_event(event, group_event_cls):
                 group_id = str(event.group_id)
-                if not is_group_whitelisted(group_id, plugin_whitelist):
+                if not (state.get("telegram_scope_admitted") and getattr(event, "platform", "") == "telegram") and not is_group_whitelisted(group_id, plugin_whitelist):
                     return False
                 if is_group_muted(group_id):
                     return False
@@ -161,7 +161,7 @@ async def personification_rule(
 
     if _is_group_event(event, group_event_cls):
         group_id = str(event.group_id)
-        if not is_group_whitelisted(group_id, plugin_whitelist):
+        if not (state.get("telegram_scope_admitted") and getattr(event, "platform", "") == "telegram") and not is_group_whitelisted(group_id, plugin_whitelist):
             return False
         if is_group_muted(group_id):
             logger.debug(f"拟人插件：群 {group_id} 处于 bot 禁言期，本轮不进入回复流程。")
@@ -226,7 +226,10 @@ async def personification_rule(
             getattr(event, "message", []) or [],
             bot_self_id=str(getattr(event, "self_id", "") or ""),
         )
-        adapter_direct_without_reply = bool(event.to_me) and not extract_reply_message_id(event)
+        adapter_direct_without_reply = bool(event.to_me) and (
+            not extract_reply_message_id(event)
+            or (getattr(event, "platform", "") == "telegram" and state.get("telegram_scope_admitted"))
+        )
         if explicitly_at_bot or adapter_direct_without_reply or is_name_mentioned:
             state["is_random_chat"] = False
             state["message_target"] = TARGET_BOT

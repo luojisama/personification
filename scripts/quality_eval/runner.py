@@ -33,6 +33,13 @@ _OPTIONAL_PIPELINE_FAILURES = {
 # It excludes providers/credentials, URLs/proxies, filesystem paths, schedulers
 # and every feature which can contact an external service.
 BEHAVIOR_KEYS = (
+    "personification_max_output_chars", "personification_chat_max_output_chars",
+    "personification_tool_max_output_chars",
+    "personification_response_review_enabled", "personification_context_only_chat_enabled",
+    "personification_persona_responder_json_enabled", "personification_persona_enabled",
+    "personification_humanize_fragment_style", "personification_reply_terminal_punctuation_policy",
+    "personification_humanize_typing_enabled", "personification_humanize_typing_cps",
+    "personification_humanize_typing_max_delay",
     "personification_turn_planner_enabled", "personification_turn_planner_shadow_enabled",
     "personification_semantic_frame_timeout", "personification_evidence_synthesizer_enabled",
     "personification_agent_max_steps", "personification_agent_budget_mode",
@@ -344,7 +351,7 @@ async def run_agent_case(case: dict[str, Any], config: dict[str, Any]) -> EvalRe
     therefore agent tools cannot send QQ/QZone or mutate production memory.
     """
     started = time.monotonic()
-    route = _load_fixed_gemini_route(str(config["config_path"]))
+    route = dict(config["frozen_route"]) if config.get("frozen_route") else _load_fixed_gemini_route(str(config["config_path"]))
     _bootstrap_runtime()
     from plugin.personification.agent.runtime.runner import run_agent
     from plugin.personification.agent.tool_registry import ToolRegistry
@@ -352,7 +359,7 @@ async def run_agent_case(case: dict[str, Any], config: dict[str, Any]) -> EvalRe
     from plugin.personification.core import reply_turn_trace
     from plugin.personification.core.response_review import final_dialogue_gate
     from plugin.personification.core.llm_context import LLM_RETRY_POLICY_SINGLE_ATTEMPT, reset_llm_context, set_llm_context, set_wire_retry_disabled
-    from plugin.personification.skills.skillpacks.tool_caller.scripts.impl import GeminiToolCaller
+    from plugin.personification.skills.skillpacks.tool_caller.scripts.impl import GeminiToolCaller, OpenAIToolCaller
 
     # This proxy contains no saved output and does not alter the loaded config.
     isolated_dir = Path(str(config["isolated_db_path"]))
@@ -369,9 +376,11 @@ async def run_agent_case(case: dict[str, Any], config: dict[str, Any]) -> EvalRe
     )
     # Direct project Gemini caller: its custom-endpoint path uses one httpx
     # request. Context below blocks auth negotiation/stream fallback.
-    base_caller = GeminiToolCaller(
+    caller_type = OpenAIToolCaller if route.get("api_type") == "openai" else GeminiToolCaller
+    caller_options = {"proxy": str(route.get("proxy", ""))} if caller_type is OpenAIToolCaller else {"auth_mode": str(route.get("gemini_auth_mode", "bearer"))}
+    base_caller = caller_type(
         api_key=str(route.get("api_key", "") or ""), base_url=str(route.get("api_url", "") or ""),
-        model=str(route["model"]), auth_mode="bearer", streaming_mode="off",
+        model=str(route["model"]), thinking_mode=str(route.get("thinking_mode", "none")), streaming_mode="off", **caller_options,
     )
     budget = CallBudget(config["budget_db"], int(config.get("call_limit", DEFAULT_LIMIT)))
     caller = BudgetedCaller(base_caller, budget)
@@ -490,7 +499,7 @@ async def invoke_case(case: dict[str, Any], config: dict[str, Any]) -> EvalResul
     if mode != "real":
         return EvalResult(status="blocked", execution_mode=mode, error="real execution requires execution_mode=real")
     try:
-        if config.get("config_path"):
+        if config.get("config_path") or config.get("frozen_route"):
             return await run_agent_case(case, config)
         if not config.get("runtime_entrypoint") or not config.get("caller"):
             return EvalResult(status="blocked", execution_mode=mode, error="real execution requires config_path or an in-process test entrypoint")

@@ -30,6 +30,9 @@ const flatRedirectRoutes: RouteRecordRaw[] = Object.entries(FLAT_ROUTE_REDIRECTS
 );
 
 export const routes: RouteRecordRaw[] = [
+  { path: "/operations/connections/bots", component: () => import("@vue-app/pages/ConnectionsPage.vue"), meta: { title: "Telegram 接入" } },
+  { path: "/runtime/quality/cases", component: () => import("@vue-app/pages/QualityPage.vue"), meta: { title: "聊天实验室" } },
+  { path: "/persona/experiences/cards", component: () => import("@vue-app/pages/ExperiencesPage.vue"), meta: { title: "共同经历" } },
   { path: "/", redirect: "/runtime/overview/summary" },
   { path: "/runtime/overview/summary", name: "runtime-overview-summary", component: OverviewPage, meta: { title: "运行摘要" } },
   { path: "/runtime/agent/:section", name: "runtime-agent", component: AgentStatusPage, meta: { title: "Agent 状态" } },

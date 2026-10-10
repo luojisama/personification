@@ -47,6 +47,14 @@ _GROUP_IDLE_LOCK = _asyncio.Lock()
 _last_group_idle_sent_at: float = 0.0
 
 
+def _non_telegram_bots(bots: dict[str, Any]) -> dict[str, Any]:
+    """Legacy QQ friend/group jobs cannot select a Telegram transport."""
+    return {key: bot for key, bot in bots.items() if not (
+        type(bot).__module__.startswith("nonebot.adapters.telegram")
+        or getattr(bot, "platform", None) == "telegram"
+    )}
+
+
 async def _review_proactive_text(*, caller: Any, text: str, core_persona: Any, context: str, is_private: bool) -> str:
     """Fail closed shared final review for proactive visible text."""
     if not callable(caller) or not str(core_persona or "").strip():
@@ -1023,7 +1031,7 @@ async def run_proactive_messaging(
     if not rest_ok:
         return False
 
-    bots = get_bots() or {}
+    bots = _non_telegram_bots(get_bots() or {})
     if not bots:
         return False
     bot, friend_profiles = await _get_friend_capable_bot(bots, logger)
@@ -1360,7 +1368,7 @@ async def run_group_idle_topic(
         logger.debug("[group_idle] 当前处于深夜禁发时段，跳过")
         return 0
 
-    bots = get_bots() or {}
+    bots = _non_telegram_bots(get_bots() or {})
     if not bots:
         return 0
     bot = list(bots.values())[0]

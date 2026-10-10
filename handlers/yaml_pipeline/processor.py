@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, List
 
 from nonebot.exception import FinishedException
+from ...core.quality_variant import relaxed_style
+from ...core.telegram_tool_policy import is_telegram_context, filter_telegram_tools
 
 from ...agent.inner_state import get_personification_data_dir
 from ...agent.runtime.planner import (
@@ -705,6 +707,8 @@ async def process_yaml_response_logic(
     outbound_reply_trace_id = str(
         reply_trace_id or reply_commit_state.get("reply_trace_id", "") or ""
     ).strip()
+    from ...core.reply_timeliness import capture_reply_timeliness
+    timeliness = capture_reply_timeliness(plugin_config, event, bot, user_policy_gate)
     started_at = time.monotonic()
     begin_reply_lifecycle(reply_commit_state, "yaml_pipeline")
     lite_tool_caller = lite_tool_caller or agent_tool_caller
@@ -1550,7 +1554,7 @@ async def process_yaml_response_logic(
                 "强交互只索取一个明确且对方能提供的必要条件，不要播报无法确认或查证无结果。"
             )
         if arbitration == "clarify":
-            system_prompt += "\n- 这轮高歧义但对方像是在直接问你；群聊里不要用澄清问句追问，能判断就给保守短反应，不能判断就保持沉默。"
+            system_prompt += ("\n- 这轮理解存在歧义；需要必要条件时可问一个具体问题，不要硬猜。" if relaxed_style() else "\n- 这轮高歧义但对方像是在直接问你；群聊里不要用澄清问句追问，能判断就给保守短反应，不能判断就保持沉默。")
     system_prompt += (
         "\n\n## 基础输出规则\n"
         "- 输出纯文本，禁止使用 markdown 格式（不要用 **加粗**、*斜体*、# 标题、- 列表符号、`代码块`等）。\n"
@@ -1617,7 +1621,7 @@ async def process_yaml_response_logic(
             render_bot_avatar_vision_prompt,
         )
 
-        bot_avatar_context = get_bot_avatar_insight_context(profile_service, bot_self_id)
+        bot_avatar_context = get_bot_avatar_insight_context(profile_service, str(getattr(bot, "self_id", "") or ""))
         bot_avatar_prompt = render_bot_avatar_vision_prompt(bot_avatar_context)
         if bot_avatar_prompt:
             system_prompt += f"\n\n{bot_avatar_prompt}"
@@ -1989,98 +1993,99 @@ async def process_yaml_response_logic(
             agent_tool_registry = ToolRegistry()
         else:
             agent_tool_registry = _clone_tool_registry(tool_registry)
-            register_qq_recall_tool(
-                agent_tool_registry,
-                executor=executor,
-                bot=bot,
-                event=event,
-                cutoff=float(
-                    reply_commit_state.get("received_wall_at", 0.0) or time.time()
-                ),
-            )
-            register_current_user_avatar_tool(agent_tool_registry, profile_service, user_id)
-            register_peer_bot_tools(
-                agent_tool_registry,
-                bot=bot,
-                event=event,
-                registry=peer_bot_registry,
-                tracker=peer_bot_tracker,
-                plugin_config=plugin_config,
-                qq_outbound_ledger=qq_outbound_ledger,
-                record_group_msg=record_group_msg,
-                turn_state=reply_commit_state,
-                logger=logger,
-            )
-            register_groupmate_qzone_agent_tools(
-                agent_tool_registry,
-                runtime=avatar_pair_runtime
-                or SimpleNamespace(
+            if not is_telegram_context(event):
+                register_qq_recall_tool(
+                    agent_tool_registry,
+                    executor=executor,
+                    bot=bot,
+                    event=event,
+                    cutoff=float(
+                        reply_commit_state.get("received_wall_at", 0.0) or time.time()
+                    ),
+                )
+                register_current_user_avatar_tool(agent_tool_registry, profile_service, user_id)
+                register_peer_bot_tools(
+                    agent_tool_registry,
+                    bot=bot,
+                    event=event,
+                    registry=peer_bot_registry,
+                    tracker=peer_bot_tracker,
                     plugin_config=plugin_config,
-                    runtime_bundle=SimpleNamespace(qzone_social_service=None),
+                    qq_outbound_ledger=qq_outbound_ledger,
+                    record_group_msg=record_group_msg,
+                    turn_state=reply_commit_state,
                     logger=logger,
-                ),
-                bot=bot,
-                event=event,
-                candidates=resolved_avatar_pair_candidates,
-                policy_authorizer=(
-                    user_policy_gate.current_authorization
-                    if user_policy_gate is not None
-                    else None
-                ),
-            )
-            register_current_group_context_tool(
-                agent_tool_registry,
-                bot=bot,
-                event=event,
-                plugin_config=plugin_config,
-                logger=logger,
-                policy_authorizer=(
-                    user_policy_gate.current_authorization
-                    if user_policy_gate is not None
-                    else None
-                ),
-            )
-            register_group_user_avatar_pair_insight_tool(
-                agent_tool_registry,
-                runtime=avatar_pair_runtime
-                or SimpleNamespace(
+                )
+                register_groupmate_qzone_agent_tools(
+                    agent_tool_registry,
+                    runtime=avatar_pair_runtime
+                    or SimpleNamespace(
+                        plugin_config=plugin_config,
+                        runtime_bundle=SimpleNamespace(qzone_social_service=None),
+                        logger=logger,
+                    ),
+                    bot=bot,
+                    event=event,
+                    candidates=resolved_avatar_pair_candidates,
+                    policy_authorizer=(
+                        user_policy_gate.current_authorization
+                        if user_policy_gate is not None
+                        else None
+                    ),
+                )
+                register_current_group_context_tool(
+                    agent_tool_registry,
+                    bot=bot,
+                    event=event,
                     plugin_config=plugin_config,
-                    get_configured_api_providers=get_configured_api_providers,
-                ),
-                bot=bot,
-                event=event,
-                candidates=resolved_avatar_pair_candidates,
-                policy_authorizer=(
-                    user_policy_gate.current_authorization
-                    if user_policy_gate is not None
-                    else None
-                ),
-            )
-            register_group_member_avatar_insight_tool(
-                agent_tool_registry,
-                runtime=avatar_pair_runtime
-                or SimpleNamespace(
+                    logger=logger,
+                    policy_authorizer=(
+                        user_policy_gate.current_authorization
+                        if user_policy_gate is not None
+                        else None
+                    ),
+                )
+                register_group_user_avatar_pair_insight_tool(
+                    agent_tool_registry,
+                    runtime=avatar_pair_runtime
+                    or SimpleNamespace(
+                        plugin_config=plugin_config,
+                        get_configured_api_providers=get_configured_api_providers,
+                    ),
+                    bot=bot,
+                    event=event,
+                    candidates=resolved_avatar_pair_candidates,
+                    policy_authorizer=(
+                        user_policy_gate.current_authorization
+                        if user_policy_gate is not None
+                        else None
+                    ),
+                )
+                register_group_member_avatar_insight_tool(
+                    agent_tool_registry,
+                    runtime=avatar_pair_runtime
+                    or SimpleNamespace(
+                        plugin_config=plugin_config,
+                        get_configured_api_providers=get_configured_api_providers,
+                    ),
+                    bot=bot,
+                    event=event,
+                    candidates=resolved_avatar_pair_candidates,
+                    turn_media_context=turn_media_refs,
+                    policy_authorizer=(
+                        user_policy_gate.current_authorization
+                        if user_policy_gate is not None
+                        else None
+                    ),
+                )
+                register_send_qq_expression_tools(
+                    agent_tool_registry,
+                    executor=executor,
+                    bot=bot,
                     plugin_config=plugin_config,
-                    get_configured_api_providers=get_configured_api_providers,
-                ),
-                bot=bot,
-                event=event,
-                candidates=resolved_avatar_pair_candidates,
-                turn_media_context=turn_media_refs,
-                policy_authorizer=(
-                    user_policy_gate.current_authorization
-                    if user_policy_gate is not None
-                    else None
-                ),
-            )
-            register_send_qq_expression_tools(
-                agent_tool_registry,
-                executor=executor,
-                bot=bot,
-                plugin_config=plugin_config,
-            )
-            register_moderation_for_turn(agent_tool_registry, executor=executor, state=reply_commit_state,
-                                         ordered_context=recent_context_hint, semantic_frame=semantic_frame)
+                )
+                register_moderation_for_turn(agent_tool_registry, executor=executor, state=reply_commit_state,
+                                             ordered_context=recent_context_hint, semantic_frame=semantic_frame)
             try:
                 skill_runtime_for_images = SkillRuntime(
                     plugin_config=plugin_config,
@@ -2105,6 +2110,7 @@ async def process_yaml_response_logic(
                     )
             except Exception as exc:
                 logger.debug(f"拟人插件 (YAML)：注册本地表情包发送工具失败: {exc}")
+        filter_telegram_tools(agent_tool_registry, event)
         image_ctx_token = set_current_image_context(
             tool_image_urls,
             input_text,
@@ -2757,6 +2763,7 @@ async def process_yaml_response_logic(
                         {
                             "role": "system",
                             "content": (
+                                "当前是群聊多人复读/接龙场景，请根据上下文自然接话，不机械复用上一轮表达。" if relaxed_style() else
                                 "当前是群聊多人复读/接龙场景。"
                                 "请输出一句不超过24字、像群友顺势跟一句的话。"
                                 "优先：原句轻微口语化复读；其次：半复读+半句吐槽。"
@@ -2817,6 +2824,7 @@ async def process_yaml_response_logic(
         review_decision = await final_dialogue_gate(
             review_call_ai_api,
             candidate_text=assistant_text,
+            timeliness=timeliness,
             raw_message_text=raw_message_text or history_last_text or trigger_reason,
             recent_context=recent_context_hint,
             relationship_hint=relationship_hint,
@@ -4006,8 +4014,10 @@ async def process_yaml_response_logic(
         memory_group_id = "" if is_private_session else group_id
         if hasattr(memory_curator, "schedule_turn_capture"):
             memory_curator.schedule_turn_capture(
+                source_message_id=str(getattr(event, "message_id", "") or ""),
+                delivery_confirmed=bool(confirmed_history_text),
                 user_utterance=raw_message_text or history_last_text or trigger_reason,
-                bot_response=assistant_history_text,
+                bot_response=confirmed_history_text,
                 user_id=user_id,
                 group_id=memory_group_id,
                 vision_summary=image_summary_suffix,

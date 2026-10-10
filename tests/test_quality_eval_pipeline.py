@@ -59,6 +59,21 @@ def test_full_path_private_normal_uses_public_processor_and_persona(tmp_path: Pa
     assert any("自然、不端着" in str(message) for call in caller.calls for message in call)
 
 
+@pytest.mark.parametrize("pipeline", ["normal", "yaml"])
+def test_evaluation_agent_cannot_register_external_tools(tmp_path: Path, pipeline: str) -> None:
+    caller = _LoopbackCaller()
+    db.init_db_sync(tmp_path)
+    try:
+        result = asyncio.run(run_full_path_case(
+            _case("private", pipeline), caller=caller, isolated_dir=str(tmp_path),
+            behavior_config={"personification_context_only_chat_enabled": False},
+        ))
+    finally:
+        asyncio.run(db.close_db())
+    assert result["status"] == "completed"
+    assert all(item["_tool_count"] == 0 for call in caller.calls for item in call if "_tool_count" in item)
+
+
 def test_full_path_group_yaml_routes_from_normal_and_uses_group_source(tmp_path: Path) -> None:
     caller = _LoopbackCaller()
     db.init_db_sync(tmp_path)

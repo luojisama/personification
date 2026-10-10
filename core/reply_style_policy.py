@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+from .quality_variant import relaxed_style, soft_length_target
+
+
+def _expression_preference() -> str:
+    target = soft_length_target()
+    return (
+        "## 表达偏好\n贴着当前话题和关系，用人设自然表达。可以提问、反问或接梗；"
+        "避免连续多轮重复相同开头，别为互动而机械追问。有具体内容再说，没有则可沉默。"
+    ) + (f"本轮长度参考 {target[0]}–{target[1]} 字软目标；不设最低字数，允许按内容超出。" if target else "")
+
 
 _SPEECH_ACT_DESCRIPTIONS = {
     "participate": (
@@ -37,6 +47,8 @@ _SPEECH_ACT_DESCRIPTIONS = {
 
 
 def build_formulaic_tic_policy_prompt() -> str:
+    if relaxed_style():
+        return _expression_preference()
     return (
         "## 固定起手与口癖复用纪律（高优先级）\n"
         "- 不要把“等下，”“等一下，”当成万能开头；除非真的在请求暂停或纠正前文，否则直接接话。\n"
@@ -96,6 +108,8 @@ def build_conversational_baseline_policy_prompt() -> str:
 
 
 def build_group_no_question_policy_prompt() -> str:
+    if relaxed_style():
+        return _expression_preference()
     return (
         "## 群聊不追问纪律（高优先级）\n"
         "- 群聊里的可见回复默认不要用问句、反问句、澄清问句或征询式结尾来索要更多信息、把判断责任丢回给群友。\n"
@@ -143,6 +157,8 @@ def build_directed_exchange_policy_prompt(
 
 
 def build_observer_posture_policy_prompt() -> str:
+    if relaxed_style():
+        return "优先参与当前话题；没有具体想表达的内容时可以沉默。"
     return (
         "## 观望与旁白式发言纪律（高优先级）\n"
         "- 群里没人明确需要你表态时，不要用“我先潜水/围观/看看情况/先看看情况/等会再说/蹲一下/路过”"
@@ -153,6 +169,11 @@ def build_observer_posture_policy_prompt() -> str:
 
 
 def build_empty_evidence_output_policy_prompt() -> str:
+    if relaxed_style():
+        return (
+            "## 证据边界\n没有证据时不得猜测出处、群内约定、人物关系或事实来源。"
+            "需要用户提供必要条件时可以自然地问一个具体问题；不机械追加追问，没有适合说的内容可以沉默。"
+        )
     return (
         "## 空证据可见输出纪律（高优先级）\n"
         "- 没有新事实、具体态度或可执行下一步时，无法确认、没有理解、来源不明或查证没有结果本身不算一条回复；"
@@ -187,6 +208,13 @@ def build_reply_style_policy_prompt(
     photo_like: bool = False,
     is_group: bool = False,
 ) -> str:
+    if relaxed_style():
+        return "\n".join([
+            _expression_preference(),
+            "保持受信任的人设与身份；不要虚构群友反应、经历、关系或未知媒体事实。",
+            build_context_continuity_policy_prompt(),
+            build_media_understanding_output_policy_prompt(),
+        ])
     lines = [
         "## 人设与输出风格（高优先级）",
         "- 你是当前人设本人，不是图片讲解员、资料解释器或互联网梗百科。",
@@ -219,7 +247,7 @@ def build_speech_act_policy_prompt(
     normalized = str(speech_act or "").strip()
     if normalized not in _SPEECH_ACT_DESCRIPTIONS:
         normalized = "participate"
-    if is_group and normalized in {"ask_followup", "clarify"}:
+    if is_group and not relaxed_style() and normalized in {"ask_followup", "clarify"}:
         normalized = "participate"
     lines = [
         "## 本轮说话动作（高优先级）",
@@ -231,7 +259,7 @@ def build_speech_act_policy_prompt(
     goal = str(session_goal or "").strip()
     if goal:
         lines.append(f"- 本轮短目标：{goal[:80]}。围绕这个目标说，别把上下文扩写成旁白。")
-    if is_group:
+    if is_group and not relaxed_style():
         lines.append(
             "- 当前是群聊：不要把 ask_followup/clarify 写成可见问句；改为具体短反应、保守判断或 [NO_REPLY]。"
         )

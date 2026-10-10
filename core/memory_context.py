@@ -81,7 +81,7 @@ class PreparedMemoryContext:
 
     def render(self) -> str:
         data = {"profiles": self.profiles, "current_states": [{**item, "trust": "untrusted_data_only", "usage": "reference_only"} for item in self.states], "recalled_evidence": [
-            {key: item.get(key) for key in ("memory_id", "summary", "time_created", "time_hint", "source_kind")}
+            {key: item.get(key) for key in ("memory_id", "summary", "time_created", "time_hint", "source_kind", "confirmation", "source_refs")}
             for item in self.memories
         ]}
         return (TEMPORAL_POLICY + "\n当前时间：" + timestamp_label(time.time(), self.timezone)
@@ -175,6 +175,28 @@ async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
     except Exception as exc:
         result.diagnostics["profile_status"] = "failed"
         result.diagnostics["profile_error_type"] = type(exc).__name__
+    experience_candidates = []
+    if bool(getattr(config, "personification_experience_cards_enabled", False)) and surface == "chat":
+        from .experience_cards import ExperienceScope, ExperienceService
+        try:
+            cards = ExperienceService(store)
+            card_scope = ExperienceScope(**scope, topic_id=str(getattr(event, "topic_id", "") or getattr(event, "message_thread_id", "") or ""))
+            experience_candidates = cards.list(card_scope, limit=20, active_only=True)
+            if scope["group_id"] and scope["user_id"]:
+                from dataclasses import replace
+                experience_candidates += cards.list(replace(card_scope, user_id=""), limit=20, active_only=True)
+            policy = getattr(runtime, "user_policy_gate", None)
+            if policy is not None:
+                source_rows = [ref for item in experience_candidates for ref in item.get("source_refs", [])]
+                _, excluded = await policy.filter_context_messages(source_rows, bot_self_id=scope["bot_id"])
+                experience_candidates = [item for item in experience_candidates if not set(item.get("participants") or []) & set(excluded)]
+            stable = [item for item in experience_candidates if item.get("kind") == "stable_identity" and item.get("confirmation") == "confirmed" and float(item.get("expires_at") or 0) > time.time()]
+            if stable:
+                result.profiles.append({"confirmed_identity_evidence": stable[:8], "trust": "untrusted_data_only", "usage": "reference_only"})
+            experience_candidates = [item for item in experience_candidates if item.get("kind") == "experience"]
+        except Exception as exc:
+            result.diagnostics["experience_status"] = "unavailable"
+            result.diagnostics["experience_error_type"] = type(exc).__name__
     if bool(getattr(execution_policy, "is_context_only", False)):
         from .temporal_memory import load_current_states
         result.states = load_current_states(scope) if "qzone" not in surface else []
@@ -203,7 +225,7 @@ async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
         if bool(getattr(config, "personification_memory_query_planning_enabled", True)):
             planned = await plan_memory_query(query, result.states, caller, timeout=min(1.5, timeout * .3), turn_plan=turn_plan)
         result.diagnostics["query_planning"] = planned.status
-        candidate_map = {}
+        candidate_map = {str(item["memory_id"]): {**item, "source_kind": "experience_card", "permission_type": "public_preference" if scope["group_id"] else "private_fact", "supports_recall": True} for item in experience_candidates}
         expressions = list(planned.queries)
         # Event ids only refer to already scoped states. Their locally stored
         # statements enrich lexical retrieval without accepting model SQL/ids.

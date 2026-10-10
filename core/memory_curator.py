@@ -55,6 +55,8 @@ class MemoryCurator:
         user_id: str = "",
         group_id: str = "",
         evidence_refs: list[str] | None = None,
+        source_message_id: str = "",
+        delivery_confirmed: bool = False,
         vision_summary: str = "",
         semantic_frame: Any = None,
         scope: str = "",
@@ -79,6 +81,8 @@ class MemoryCurator:
                 user_id=user_id,
                 group_id=group_id,
                 evidence_refs=list(evidence_refs or []),
+                source_message_id=source_message_id,
+                delivery_confirmed=delivery_confirmed,
                 vision_summary=vision_summary,
                 semantic_frame=semantic_frame,
                 scope=scope,
@@ -204,6 +208,8 @@ class MemoryCurator:
         user_id: str = "",
         group_id: str = "",
         evidence_refs: list[str] | None = None,
+        source_message_id: str = "",
+        delivery_confirmed: bool = False,
         vision_summary: str = "",
         semantic_frame: Any = None,
         scope: str = "",
@@ -219,6 +225,19 @@ class MemoryCurator:
         else:
             summary = f"bot 回：{bot_text}"
         summary = normalize_text(summary)[:800]
+        if (source_message_id and delivery_confirmed
+                and bool(getattr(getattr(self.memory_store, "plugin_config", None), "personification_experience_cards_enabled", False))):
+            from .experience_cards import ExperienceScope, ExperienceService
+            from .llm_context import current_llm_context
+            identity = current_llm_context()
+            try:
+                card_scope = ExperienceScope(platform=str(identity.get("platform") or ""), bot_id=str(identity.get("bot_id") or ""), group_id=str(group_id or ""), user_id=str(user_id or ""))
+                await asyncio.to_thread(ExperienceService(self.memory_store).create, card_scope,
+                    summary=summary, source_refs=[{"message_id": source_message_id}], confirmation="pending")
+                return
+            except (ValueError, KeyError):
+                # Missing source evidence must not create a free-floating card.
+                pass
         combined = f"{user_text} {bot_text}".strip()
         topic_tags: list[str] = []
         for token in tokenize(combined):

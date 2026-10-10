@@ -103,6 +103,7 @@ function group(id: NavigationGroupId, label: string, icon: IconName, pages: Page
 
 export const NAVIGATION_TREE: NavigationNode[] = [
   group("runtime", "运行", "signal", [
+    { id: "quality", label: "聊天实验室", aliases: ["quality"], icon: "tool", dataSource: "/api/v2/quality", leaves: [{ id: "cases", label: "聊天实验室", slug: "cases" }] },
     { id: "overview", label: "总览", aliases: ["首页", "告警"], icon: "overview", dataSource: "/api/v2/overview", leaves: [{ id: "summary", label: "运行摘要", slug: "summary" }] },
     { id: "agent", label: "Agent 状态", aliases: ["运行时", "回合", "内存"], icon: "signal", legacy: "agent_status", dataSource: "/api/v2/runtime/agent", leaves: [{ id: "status", label: "实时状态", slug: "status" }, { id: "traces", label: "最近回合", slug: "traces" }] },
     { id: "tokens", label: "Token 统计", aliases: ["令牌", "模型消耗"], icon: "data", legacy: "dashboard", dataSource: "/api/v2/metrics/summary", leaves: [{ id: "24h", label: "24 小时", slug: "24h" }, { id: "7d", label: "7 天", slug: "7d" }, { id: "30d", label: "30 天", slug: "30d" }, { id: "all", label: "累计", slug: "all" }] },
@@ -115,6 +116,7 @@ export const NAVIGATION_TREE: NavigationNode[] = [
     { id: "qzone", label: "QQ 空间", aliases: ["动态", "评论", "点赞"], icon: "signal", legacy: "qzone", dataSource: "/api/v2/qzone", leaves: [{ id: "capabilities", label: "能力矩阵", slug: "capabilities" }, { id: "auth", label: "登录与恢复", slug: "auth" }, { id: "feeds", label: "只读动态", slug: "feeds" }, { id: "operations", label: "写操作", slug: "operations" }, { id: "history", label: "操作历史", slug: "history" }] },
   ]),
   group("persona", "拟人与记忆", "data", [
+    { id: "experiences", label: "共同经历", aliases: ["experiences"], icon: "data", dataSource: "/api/v2/experiences", leaves: [{ id: "cards", label: "共同经历", slug: "cards" }] },
     { id: "personas", label: "用户画像", aliases: ["用户", "头像", "好感度"], icon: "data", legacy: "personas", dataSource: "/api/v2/personas", leaves: [{ id: "list", label: "画像列表", slug: "list" }, { id: "detail", label: "画像详情", slug: "detail" }, { id: "refresh", label: "后台刷新", slug: "refresh" }] },
     { id: "groups", label: "群信息", aliases: ["群目录", "成员", "群知识", "Peer Bot", "空间互动"], icon: "data", legacy: "groups", dataSource: "/api/v2/groups", leaves: [{ id: "list", label: "群列表", slug: "list" }, { id: "detail", label: "群详情", slug: "detail" }, { id: "knowledge", label: "知识与风格", slug: "knowledge" }, { id: "members", label: "成员与别名", slug: "members" }, { id: "peer-bots", label: "Peer Bot 协作", slug: "peer-bots" }, { id: "qzone-agent", label: "空间互动", slug: "qzone-agent" }] },
     { id: "group-switches", label: "群开关", aliases: ["白名单", "启用群"], icon: "settings", legacy: "group_switch", dataSource: "/api/v2/group-switches", leaves: [{ id: "list", label: "开关列表", slug: "list" }] },
@@ -133,6 +135,7 @@ export const NAVIGATION_TREE: NavigationNode[] = [
     { id: "plugins", label: "插件管理", aliases: ["版本", "更新", "测速"], icon: "system", legacy: "plugin_manager", dataSource: "/api/v2/plugin-update", leaves: [{ id: "status", label: "插件状态", slug: "status" }, { id: "update", label: "更新与测速", slug: "update" }, { id: "history", label: "提交与操作历史", slug: "history" }] },
   ]),
   group("operations", "运维", "settings", [
+    { id: "connections", label: "Telegram 接入", aliases: ["connections"], icon: "route", dataSource: "/api/v2/connections", leaves: [{ id: "bots", label: "Telegram 接入", slug: "bots" }] },
     { id: "config", label: "配置中心", aliases: ["模型配置", "媒体路由", "快速筛选"], icon: "settings", legacy: "config", dataSource: "/api/v2/config", leaves: [{ id: "general", label: "分类与配置", slug: "general" }, { id: "models", label: "模型与供应商", slug: "models" }, { id: "media", label: "媒体路由", slug: "media" }, { id: "integrations", label: "CLI 与集成", slug: "integrations" }] },
     { id: "user-policies", label: "用户策略与黑名单", aliases: ["黑名单", "门控"], icon: "shield", legacy: "user_policy", dataSource: "/api/v2/user-policies", leaves: [{ id: "list", label: "策略列表", slug: "list" }, { id: "detail", label: "详情与证据", slug: "detail" }, { id: "edit", label: "新增与修改", slug: "edit" }] },
     { id: "outbound", label: "近期 Bot 消息", aliases: ["发件箱", "撤回", "发送证据"], icon: "signal", legacy: "outbound", dataSource: "/api/v2/outbound", leaves: [{ id: "list", label: "消息记录", slug: "list" }, { id: "detail", label: "详情与证据", slug: "detail" }] },
@@ -171,7 +174,7 @@ const NAVIGATION_SECTION_INPUTS: NavigationSectionInput[] = [
     label: "调试与恢复",
     aliases: ["体检", "模型测试", "路由", "Trace", "恢复"],
     icon: "recovery",
-    page_ids: ["runtime.health", "runtime.model-tests", "runtime.routes", "runtime.proactive", "runtime.traces", "runtime.recovery"],
+    page_ids: ["runtime.health", "runtime.quality", "runtime.model-tests", "runtime.routes", "runtime.proactive", "runtime.traces", "runtime.recovery"],
   },
   {
     id: "profiles-groups",
@@ -185,7 +188,7 @@ const NAVIGATION_SECTION_INPUTS: NavigationSectionInput[] = [
     label: "记忆与表达",
     aliases: ["记忆", "表情", "人设", "Prompt"],
     icon: "trace",
-    page_ids: ["persona.memories", "persona.memory-palace", "persona.stickers", "persona.persona-preview", "persona.persona-builder"],
+    page_ids: ["persona.memories", "persona.experiences", "persona.memory-palace", "persona.stickers", "persona.persona-preview", "persona.persona-builder"],
   },
   {
     id: "capabilities-plugins",
@@ -206,7 +209,7 @@ const NAVIGATION_SECTION_INPUTS: NavigationSectionInput[] = [
     label: "系统与数据",
     aliases: ["配置", "迁移", "审计", "日志", "设备", "系统", "设置"],
     icon: "system",
-    page_ids: ["operations.config", "operations.data-transfer", "operations.audit", "operations.logs", "operations.devices", "operations.systems", "operations.settings"],
+    page_ids: ["operations.config", "operations.connections", "operations.data-transfer", "operations.audit", "operations.logs", "operations.devices", "operations.systems", "operations.settings"],
   },
 ];
 

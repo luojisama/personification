@@ -242,7 +242,7 @@ config = SimpleNamespace(
     personification_skill_sources=[], personification_plugin_knowledge_build_enabled=False,
     personification_data_dir=str(data_dir),
 )
-runtime = SimpleNamespace(agent_tool_caller=None, lite_tool_caller=None, vision_caller=None, knowledge_store=None, tool_registry=None)
+runtime = SimpleNamespace(agent_tool_caller=None, lite_tool_caller=None, vision_caller=None, knowledge_store=None, tool_registry=None, review_call_ai_api=None)
 bundle = SimpleNamespace(
     personification_rule=noop, poke_rule=noop, poke_notice_rule=noop, msg_buffer={},
     persona_store=None, private_profile_refresh=None, scoped_profile_service=None,
@@ -258,7 +258,7 @@ def matcher_deps(**ignored):
         clear_private_command_keywords=noop, register_private_command_keywords=noop)
     return composition.MatcherSetupDeps(**values)
 bundle.make_matcher_setup_deps = matcher_deps
-bundle.make_flow_setup_deps = lambda: SimpleNamespace()
+bundle.make_flow_setup_deps = lambda: SimpleNamespace(load_prompt=noop, call_ai_api=noop, get_now=noop, load_proactive_state=noop, save_proactive_state=noop)
 bundle.make_job_setup_deps = lambda **kwargs: SimpleNamespace()
 
 plugin.plugin_config = config

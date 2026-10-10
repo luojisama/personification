@@ -502,6 +502,10 @@ export interface ConfigPatchResult {
 
 export interface BotIdentity {
   bot_id: string;
+  raw_bot_id?: string;
+  platform?: string;
+  source?: "managed" | "native";
+  capabilities?: Record<string, boolean>;
   nickname: string;
   avatar_url: string | null;
   online: boolean;

@@ -1726,6 +1726,18 @@ def _build_entries() -> list[ConfigEntry]:
             category="config", group="记忆", help_aliases=("闲聊轻量路径",), parser=_bool_parser,
         ),
         ConfigEntry(
+            key="experience_cards_enabled", field_name="personification_experience_cards_enabled",
+            display_name="共同经历卡", value_type="bool", default=False, scope=GLOBAL_SCOPE,
+            description="按真实消息来源保存待核验经历；身份资料确认并设置有效期后才可稳定注入。",
+            category="config", group="记忆", help_aliases=("共同经历",), parser=_bool_parser,
+        ),
+        ConfigEntry(
+            key="reply_timeliness_enabled", field_name="personification_reply_timeliness_enabled",
+            display_name="发言时效观察", value_type="bool", default=False, scope=GLOBAL_SCOPE,
+            description="为已有最终审阅提供生成期间的新消息，审阅后变化的自主插话停止发送。",
+            category="config", group="回复审阅", help_aliases=("发言时效",), parser=_bool_parser,
+        ),
+        ConfigEntry(
             key="memory_context_enabled", field_name="personification_memory_context_enabled",
             display_name="长上下文记忆", value_type="bool", default=True, scope=GLOBAL_SCOPE,
             description="启用按会话范围、时间和消息数量裁剪的长上下文记忆。关闭后回退到原有历史与召回路径。",

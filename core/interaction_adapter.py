@@ -62,6 +62,9 @@ class InteractionEnvelope:
     reply_to_message_id: str = ""
     ordered_media: tuple[TurnMediaRef, ...] = ()
     text: str = ""
+    topic_id: str = ""
+    update_id: str = ""
+    revision: str = ""
 
     @property
     def bot_namespace(self) -> str:
@@ -71,7 +74,8 @@ class InteractionEnvelope:
 
     @property
     def conversation_namespace(self) -> str:
-        return f"{self.bot_namespace}:c{len(self.conversation_kind)}:{self.conversation_kind}i{len(self.conversation_id)}:{self.conversation_id}"
+        base = f"{self.bot_namespace}:c{len(self.conversation_kind)}:{self.conversation_kind}i{len(self.conversation_id)}:{self.conversation_id}"
+        return base + (f":t{len(self.topic_id)}:{self.topic_id}" if self.topic_id else "")
 
     @property
     def sender_namespace(self) -> str:
@@ -292,6 +296,9 @@ class SatoriInteractionAdapter:
 
 def adapter_for_event(event: Any) -> InteractionAdapter | None:
     module = type(event).__module__.lower()
+    if ".telegram" in module:
+        from .telegram_interaction import TelegramInteractionAdapter
+        return TelegramInteractionAdapter()
     if ".satori" in module:
         return SatoriInteractionAdapter()
     if ".onebot.v11" in module:

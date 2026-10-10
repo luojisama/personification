@@ -763,6 +763,10 @@ class Config(BaseModel):
     # Antigravity/Gemini companion project；留空时先自动解析，再兼容 gemini-cli/gcloud 配置。
     personification_antigravity_cli_project: str = ""
 
+    # Opt-in experience and final-review timeliness experiments.
+    personification_experience_cards_enabled: bool = False
+    personification_reply_timeliness_enabled: bool = False
+
     def model_post_init(self, __context: Any) -> None:
         fields_set = getattr(self, "__pydantic_fields_set__", set())
         if (

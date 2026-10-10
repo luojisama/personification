@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from .quality_variant import soft_length_target
+
 
 _EVIDENCE_TOOL_INTENTS = {
     "lookup_web",
@@ -36,6 +38,7 @@ class ReplyLengthPolicy:
     max_chars: int
     reason: str
     legacy_cap: int = 0
+    soft_target: tuple[int, int] | None = None
 
 
 def _positive_int(value: Any, default: int = 0) -> int:
@@ -162,6 +165,9 @@ def resolve_reply_length_policy(
         else:
             reason = "budget_profile"
 
+    target = soft_length_target()
+    if target and mode == "chat":
+        return ReplyLengthPolicy(mode, legacy_cap, "experimental_soft_target", legacy_cap, target)
     max_chars = min(configured, legacy_cap) if legacy_cap and configured else (legacy_cap or configured)
     return ReplyLengthPolicy(mode, max_chars, reason, legacy_cap)
 
@@ -177,6 +183,14 @@ def render_reply_length_trace(policy: ReplyLengthPolicy, *, before_chars: int, a
 
 def render_reply_length_prompt_hint(policy: ReplyLengthPolicy) -> str:
     """Return a short, model-facing reminder without exposing internal state."""
+
+    if policy.soft_target:
+        low, high = policy.soft_target
+        return (
+            f"本轮聊天可参考 {low}–{high} 字的软目标，不设最低字数，允许按内容超出；"
+            "按真实语境自然表达，不凑字，也不为目标截断必要内容。"
+            + (f"管理员配置的硬上限仍为 {policy.max_chars} 字。" if policy.max_chars else "")
+        )
 
     if policy.mode == "bypass":
         return "证据交付或直接媒体动作必须完整交付；不要主动截断来源链接、结构化证据或媒体标记。"

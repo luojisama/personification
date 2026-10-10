@@ -646,6 +646,9 @@ class TtsService:
             async def _send_record() -> Any:
                 if on_delivery_started is not None:
                     on_delivery_started()
+                trusted_audio = getattr(bot, "_personification_send_audio_file", None)
+                if callable(trusted_audio):
+                    return await trusted_audio(event, audio_file)
                 return await bot.send(event, message)
 
             if self.qq_outbound_ledger is None:

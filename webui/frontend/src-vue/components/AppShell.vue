@@ -10,7 +10,7 @@
         <IdentityAvatar :src="selectedBot?.avatar_url" :label="selectedBot?.nickname || 'P/F'" size="large" square />
         <div class="brand-copy rail-expandable">
           <strong>{{ selectedBot?.nickname || "拟人插件" }}</strong>
-          <small>{{ selectedBot?.bot_id ? `QQ ${selectedBot.bot_id}` : "事件取证台" }}</small>
+          <small>{{ selectedBot?.bot_id ? `${selectedBot.platform === 'telegram' ? 'Telegram' : 'QQ'} ${selectedBot.raw_bot_id || selectedBot.bot_id}` : "事件取证台" }}</small>
         </div>
         <div v-if="bots.length > 1 && !railCollapsed" class="bot-selector">
           <SearchableSelect v-model="selectedBotId" label="选择 Bot" :options="botOptions" hide-label />
@@ -55,7 +55,7 @@
 
       <nav v-if="currentSection" class="section-page-nav" :aria-label="`${currentSection.label}页面`">
         <RouterLink
-          v-for="item in currentSection.children"
+          v-for="item in currentSection.children.filter(platformPageAllowed)"
           :key="item.id"
           :to="item.path || '/runtime/overview/summary'"
           :class="{ active: currentContext?.page.id === item.id }"
@@ -99,7 +99,7 @@
         <nav v-if="currentContext.page.children.length" class="tertiary-navigation" :aria-label="`${currentContext.page.label}页面内导航`">
           <span class="workspace-breadcrumb">{{ currentContext.section.label }} / {{ currentContext.page.label }}</span>
           <RouterLink
-            v-for="item in currentContext.page.children"
+            v-for="item in currentContext.page.children.filter(platformPageAllowed)"
             :key="item.id"
             :to="item.path || '#'"
             :class="{ active: currentContext.leaf.id === item.id }"
@@ -108,7 +108,7 @@
         </nav>
       </div>
 
-      <main id="main-content" class="main-workspace" tabindex="-1"><slot /></main>
+      <main id="main-content" class="main-workspace" tabindex="-1"><slot v-if="!currentContext || platformPageAllowed(currentContext.leaf)" /><p v-else role="status">当前 Telegram Bot 不支持此 QQ 专有功能，请切换 QQ Bot 或选择其他页面。</p></main>
     </SidebarInset>
   </SidebarProvider>
   <div id="operation-live-region" class="sr-only" role="status" aria-live="polite" aria-atomic="true" />
@@ -167,7 +167,7 @@ const selectedBotId = computed({
 });
 const botOptions = computed(() => bots.value.map((bot) => ({
   value: bot.bot_id,
-  label: `${bot.nickname} · ${bot.bot_id}`,
+  label: `${bot.platform === "telegram" ? "Telegram · " : ""}${bot.nickname} · ${bot.raw_bot_id || bot.bot_id}`,
   description: bot.online ? "在线" : "未连接",
 })));
 const currentContext = computed(() => navigationContext(route.path));
@@ -206,6 +206,12 @@ async function logout(): Promise<void> {
   await authStore.logout();
 }
 
+function platformPageAllowed(item: NavigationNode): boolean {
+  if (selectedBot.value?.platform !== "telegram") return true;
+  const id = item.id;
+  return !["runtime.qzone", "operations.qq", "persona.groups.qzone-agent"].some(prefix => id === prefix || id.startsWith(`${prefix}.`));
+}
+
 function visit(path: string): void {
   searchQuery.value = "";
   void router.push(path);
@@ -217,7 +223,7 @@ function visitSection(sectionId: string): void {
   let remembered = "";
   try { remembered = window.localStorage.getItem(`personification.nav.last-section.${section.id}`) ?? ""; } catch { /* 使用默认入口 */ }
   const rememberedContext = remembered ? navigationContext(remembered) : null;
-  visit(rememberedContext?.section.id === section.id ? remembered : section.default_path || "/runtime/overview/summary");
+  visit(rememberedContext?.section.id === section.id && platformPageAllowed(rememberedContext.leaf) ? remembered : section.children.find(platformPageAllowed)?.path || "/runtime/overview/summary");
 }
 
 function compactSearchText(value: string): string {
@@ -245,6 +251,7 @@ const searchResults = computed(() => {
   const needle = compactSearchText(searchQuery.value.trim());
   if (!needle) return [];
   return [...NAVIGATION_ITEMS, ...NAVIGATION_LEAVES].filter((item) => {
+    if (!platformPageAllowed(item)) return false;
     const haystack = compactSearchText(navigationSearchText(item));
     return haystack.includes(needle) || includesInOrder(haystack, needle);
   }).slice(0, 10);

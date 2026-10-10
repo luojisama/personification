@@ -48,6 +48,10 @@ def _runtime_bots(runtime: Any) -> list[Any]:
 
 
 async def _bot_nickname(bot: Any, bot_id: str) -> str:
+    if _bot_platform(bot) == "telegram":
+        # Reading a Telegram identity must never issue QQ get_login_info or
+        # expose a credential-bearing profile-photo URL to the browser.
+        return str(getattr(bot, "username", "") or getattr(bot, "nickname", "") or f"Telegram {bot_id}")[:160]
     now = time.monotonic()
     cached = _BOT_IDENTITY_CACHE.get(bot_id)
     if cached is not None and now - cached[0] <= _BOT_IDENTITY_TTL_SECONDS:
@@ -76,6 +80,23 @@ async def _bot_nickname(bot: Any, bot_id: str) -> str:
     return resolved[:160]
 
 
+def _bot_platform(bot: Any) -> str:
+    module = str(type(bot).__module__)
+    if module.startswith("nonebot.adapters.telegram") or getattr(bot, "platform", None) == "telegram":
+        return "telegram"
+    if module.startswith("nonebot.adapters.satori"):
+        return "satori"
+    return "onebot"
+
+
+def normalized_bot_selector(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.startswith("telegram:"):
+        raw = normalized_numeric_id(text.partition(":")[2])
+        return "telegram:" + raw if raw else ""
+    return normalized_numeric_id(text)
+
+
 async def list_bot_identities(runtime: Any) -> list[dict[str, Any]]:
     bots = _runtime_bots(runtime)
     now = time.time()
@@ -84,11 +105,17 @@ async def list_bot_identities(runtime: Any) -> list[dict[str, Any]]:
         bot_id = normalized_numeric_id(getattr(bot, "self_id", ""))
         if not bot_id:
             continue
+        platform = _bot_platform(bot)
+        telegram = platform == "telegram"
         identities.append(
             {
-                "bot_id": bot_id,
+                "bot_id": "telegram:" + bot_id if telegram else bot_id,
+                "raw_bot_id": bot_id,
+                "platform": platform,
+                "source": "managed" if telegram and getattr(getattr(bot, "adapter", None), "personification_managed", False) else "native",
+                "capabilities": {"chat": True, "topics": telegram, "moderation": True, "qzone": not telegram, "qq_profile": not telegram},
                 "nickname": await _bot_nickname(bot, bot_id),
-                "avatar_url": qq_avatar_url(bot_id),
+                "avatar_url": None if telegram else qq_avatar_url(bot_id),
                 "online": True,
                 "is_default": index == 0,
                 "last_seen_at": now,
@@ -156,7 +183,7 @@ async def build_agent_runtime_snapshot(runtime: Any, bot_id: str = "") -> dict[s
     traces = await asyncio.to_thread(reply_turn_trace.query_recent, limit=80)
     performance = runtime_performance.snapshot()
     identities = await list_bot_identities(runtime)
-    selected_id = normalized_numeric_id(bot_id)
+    selected_id = normalized_bot_selector(bot_id)
     selected = next((item for item in identities if item["bot_id"] == selected_id), None)
     if selected is None:
         selected = next((item for item in identities if item["is_default"]), None)

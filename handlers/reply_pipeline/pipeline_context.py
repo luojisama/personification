@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ...core.telegram_tool_policy import is_telegram_context, filter_telegram_tools
+
 import asyncio
 import json
 import re
@@ -870,87 +872,88 @@ async def run_agent_if_enabled(
         runtime_registry = ToolRegistry()
     else:
         runtime_registry = clone_tool_registry(runtime.tool_registry)
-        register_moderation_for_turn(runtime_registry, executor=executor, state=commit_state,
-                                     ordered_context=ordered_context, semantic_frame=semantic_frame)
-        register_qq_recall_tool(
-            runtime_registry,
-            executor=executor,
-            bot=bot,
-            event=event,
-            cutoff=float(commit_state.get("received_wall_at", 0.0) or time.time()),
-        )
-        register_current_user_avatar_tool(
-            runtime_registry,
-            getattr(runtime, "profile_service", None),
-            str(getattr(event, "user_id", "") or ""),
-        )
-        register_current_group_context_tool(
-            runtime_registry,
-            bot=bot,
-            event=event,
-            plugin_config=runtime.plugin_config,
-            logger=runtime.logger,
-            policy_authorizer=(
-                runtime.user_policy_gate.current_authorization
-                if getattr(runtime, "user_policy_gate", None) is not None
-                else None
-            ),
-        )
-        register_group_user_avatar_pair_insight_tool(
-            runtime_registry,
-            runtime=runtime,
-            bot=bot,
-            event=event,
-            candidates=list(avatar_pair_candidates or []),
-            policy_authorizer=(
-                runtime.user_policy_gate.current_authorization
-                if getattr(runtime, "user_policy_gate", None) is not None
-                else None
-            ),
-        )
-        register_group_member_avatar_insight_tool(
-            runtime_registry,
-            runtime=runtime,
-            bot=bot,
-            event=event,
-            candidates=list(avatar_pair_candidates or []),
-            turn_media_context=list(turn_media_context or []),
-            policy_authorizer=(
-                runtime.user_policy_gate.current_authorization
-                if getattr(runtime, "user_policy_gate", None) is not None
-                else None
-            ),
-        )
-        register_send_qq_expression_tools(
-            runtime_registry,
-            executor=executor,
-            bot=bot,
-            plugin_config=runtime.plugin_config,
-        )
-        register_peer_bot_tools(
-            runtime_registry,
-            bot=bot,
-            event=event,
-            registry=getattr(runtime, "peer_bot_registry", None),
-            tracker=getattr(runtime, "peer_bot_tracker", None),
-            plugin_config=runtime.plugin_config,
-            qq_outbound_ledger=getattr(runtime, "qq_outbound_ledger", None),
-            record_group_msg=getattr(runtime, "record_group_msg", None),
-            turn_state=commit_state,
-            logger=runtime.logger,
-        )
-        register_groupmate_qzone_agent_tools(
-            runtime_registry,
-            runtime=runtime,
-            bot=bot,
-            event=event,
-            candidates=list(avatar_pair_candidates or []),
-            policy_authorizer=(
-                runtime.user_policy_gate.current_authorization
-                if getattr(runtime, "user_policy_gate", None) is not None
-                else None
-            ),
-        )
+        if not is_telegram_context(event):
+            register_moderation_for_turn(runtime_registry, executor=executor, state=commit_state,
+                                         ordered_context=ordered_context, semantic_frame=semantic_frame)
+            register_qq_recall_tool(
+                runtime_registry,
+                executor=executor,
+                bot=bot,
+                event=event,
+                cutoff=float(commit_state.get("received_wall_at", 0.0) or time.time()),
+            )
+            register_current_user_avatar_tool(
+                runtime_registry,
+                getattr(runtime, "profile_service", None),
+                str(getattr(event, "user_id", "") or ""),
+            )
+            register_current_group_context_tool(
+                runtime_registry,
+                bot=bot,
+                event=event,
+                plugin_config=runtime.plugin_config,
+                logger=runtime.logger,
+                policy_authorizer=(
+                    runtime.user_policy_gate.current_authorization
+                    if getattr(runtime, "user_policy_gate", None) is not None
+                    else None
+                ),
+            )
+            register_group_user_avatar_pair_insight_tool(
+                runtime_registry,
+                runtime=runtime,
+                bot=bot,
+                event=event,
+                candidates=list(avatar_pair_candidates or []),
+                policy_authorizer=(
+                    runtime.user_policy_gate.current_authorization
+                    if getattr(runtime, "user_policy_gate", None) is not None
+                    else None
+                ),
+            )
+            register_group_member_avatar_insight_tool(
+                runtime_registry,
+                runtime=runtime,
+                bot=bot,
+                event=event,
+                candidates=list(avatar_pair_candidates or []),
+                turn_media_context=list(turn_media_context or []),
+                policy_authorizer=(
+                    runtime.user_policy_gate.current_authorization
+                    if getattr(runtime, "user_policy_gate", None) is not None
+                    else None
+                ),
+            )
+            register_send_qq_expression_tools(
+                runtime_registry,
+                executor=executor,
+                bot=bot,
+                plugin_config=runtime.plugin_config,
+            )
+            register_peer_bot_tools(
+                runtime_registry,
+                bot=bot,
+                event=event,
+                registry=getattr(runtime, "peer_bot_registry", None),
+                tracker=getattr(runtime, "peer_bot_tracker", None),
+                plugin_config=runtime.plugin_config,
+                qq_outbound_ledger=getattr(runtime, "qq_outbound_ledger", None),
+                record_group_msg=getattr(runtime, "record_group_msg", None),
+                turn_state=commit_state,
+                logger=runtime.logger,
+            )
+            register_groupmate_qzone_agent_tools(
+                runtime_registry,
+                runtime=runtime,
+                bot=bot,
+                event=event,
+                candidates=list(avatar_pair_candidates or []),
+                policy_authorizer=(
+                    runtime.user_policy_gate.current_authorization
+                    if getattr(runtime, "user_policy_gate", None) is not None
+                    else None
+                ),
+            )
         try:
             skill_runtime_for_images = SkillRuntime(
                 plugin_config=runtime.plugin_config,
@@ -977,42 +980,44 @@ async def run_agent_if_enabled(
                 )
         except Exception as exc:
             runtime.logger.debug(f"拟人插件：注册本地表情包发送工具失败: {exc}")
-        friend_ids = await get_cached_friend_ids(bot, runtime.logger)
-        skill_runtime = SkillRuntime(
-            plugin_config=runtime.plugin_config,
-            logger=runtime.logger,
-            get_now=lambda: int(time.time()),
-            get_whitelisted_groups=runtime.get_whitelisted_groups,
-            knowledge_store=runtime.knowledge_store,
-            background_intelligence=runtime.background_intelligence,
-        )
-        runtime_registry.register(
-            build_group_info_tool_for_runtime(
-                bot=bot,
-                runtime=skill_runtime,
+        if not is_telegram_context(event):
+            friend_ids = await get_cached_friend_ids(bot, runtime.logger)
+            skill_runtime = SkillRuntime(
+                plugin_config=runtime.plugin_config,
+                logger=runtime.logger,
+                get_now=lambda: int(time.time()),
+                get_whitelisted_groups=runtime.get_whitelisted_groups,
+                knowledge_store=runtime.knowledge_store,
+                background_intelligence=runtime.background_intelligence,
             )
-        )
-        runtime_registry.register(
-            build_friend_request_tool_for_runtime(
-                bot=bot,
-                runtime=skill_runtime,
-                get_user_data=persona.get_user_data,
-                get_friend_ids=lambda: set(friend_ids),
-                session_interaction_count=interaction_count,
-                is_group_scene=hasattr(event, "group_id") and not str(getattr(event, "group_id", "")).startswith("private_"),
-            )
-        )
-        if (
-            bool(getattr(runtime.plugin_config, "personification_plugin_invoker_enabled", False))
-            and runtime.knowledge_store is not None
-        ):
             runtime_registry.register(
-                build_invoke_plugin_tool_for_runtime(
+                build_group_info_tool_for_runtime(
                     bot=bot,
-                    event=event,
                     runtime=skill_runtime,
                 )
             )
+            runtime_registry.register(
+                build_friend_request_tool_for_runtime(
+                    bot=bot,
+                    runtime=skill_runtime,
+                    get_user_data=persona.get_user_data,
+                    get_friend_ids=lambda: set(friend_ids),
+                    session_interaction_count=interaction_count,
+                    is_group_scene=hasattr(event, "group_id") and not str(getattr(event, "group_id", "")).startswith("private_"),
+                )
+            )
+            if (
+                bool(getattr(runtime.plugin_config, "personification_plugin_invoker_enabled", False))
+                and runtime.knowledge_store is not None
+            ):
+                runtime_registry.register(
+                    build_invoke_plugin_tool_for_runtime(
+                        bot=bot,
+                        event=event,
+                        runtime=skill_runtime,
+                    )
+                )
+    filter_telegram_tools(runtime_registry, event)
     ack_phrase = ""
     if is_direct_mention:
         group_id = str(getattr(event, "group_id", "") or "").strip() or None
@@ -1233,7 +1238,13 @@ def build_base_system_prompt(
         parts.append(emotion_block)
     if plugin_summary:
         parts.append(f"[已安装插件摘要（仅供参考）]\n{str(plugin_summary).strip()}")
-    if is_private_session:
+    from ...core.quality_variant import relaxed_style
+    if relaxed_style():
+        parts.append(
+            "## 当前交流\n保持当前人格，依据最新消息、关系与上下文决定接话、提问或沉默。"
+            "句式和长短由实际内容决定，不机械追问或连续复用开头；不虚构未知事实，不把旧话题当成新请求。"
+        )
+    elif is_private_session:
         parts.append(
             "## 私聊规则\n"
             "1. 私聊里也要像真人聊天，不要像客服或助手。\n"
@@ -1277,7 +1288,7 @@ def build_base_system_prompt(
     parts.append(
         "## 核心行动准则\n"
         "1. 保持自然口吻，拒绝模板化官腔和客服腔。\n"
-        "2. 能用一句说完就别说两句。\n"
+        + ("2. 按当前内容选择自然的表达长度。\n" if relaxed_style() else "2. 能用一句说完就别说两句。\n") +
         "3. 玩梗场景先像群友接话，不要急着解释梗机制或复述笑点。\n"
         "4. 图片/GIF/表情包视觉信息是系统注入的内部语境，只帮助你理解上下文，不要复述给用户，也不作为攻击判定依据。\n"
         "5. [BLOCK] 仅作高风险标记参考，不要轻易触发。\n"
@@ -1305,6 +1316,9 @@ def build_confidence_style_instruction(confidence: float, *, is_group: bool = Fa
         value = 0.0
     if value >= 0.8:
         return ""
+    from ...core.quality_variant import relaxed_style
+    if relaxed_style():
+        return "\n[系统提示] 当前理解存在不确定性，不要硬猜；有必要时可问一个具体问题，也可以保持沉默。"
     if value >= 0.6:
         return (
             "\n[系统提示] 当前语义置信度中等。回复时用“我理解是…”“应该是…”这类留余地的口吻，"

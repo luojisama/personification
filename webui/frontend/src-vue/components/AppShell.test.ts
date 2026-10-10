@@ -71,6 +71,7 @@ describe("AppShell", () => {
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [
+        { path: "/runtime/qzone/capabilities", component: { template: "<div />" } },
         { path: "/runtime/overview/summary", component: { template: "<div />" } },
         { path: "/runtime/agent/status", component: { template: "<div />" } },
         { path: "/runtime/tokens/24h", component: { template: "<div />" } },
@@ -204,4 +205,16 @@ describe("AppShell", () => {
     wrapper.unmount();
     queryClient.clear();
   });
+  it("Telegram 显示平台且阻止 QQ 专属深链接挂载", async () => {
+    vi.mocked(resources.bots).mockResolvedValue({items:[{...bots[0]!,bot_id:"telegram:10001",raw_bot_id:"10001",platform:"telegram"}],total:1,diagnostic_code:"ok"});
+    const {wrapper,router,queryClient} = await renderShell();
+    await vi.waitFor(() => expect(wrapper.text()).toContain("Telegram 10001"));
+    await router.push("/runtime/qzone/capabilities");
+    await nextTick();
+    expect(wrapper.find("#test-content").exists()).toBe(false);
+    expect(wrapper.text()).toContain("当前 Telegram Bot 不支持此 QQ 专有功能");
+    expect(wrapper.find('.section-page-nav a[href$="/runtime/qzone/capabilities"]').exists()).toBe(false);
+    wrapper.unmount(); queryClient.clear();
+  });
+
 });

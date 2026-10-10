@@ -47,6 +47,9 @@ from .routes.v2_routes import build_v2_router
 from .routes.moderation_routes import build_moderation_router
 from .routes.v2_compat_routes import build_v2_business_router
 from .routes.whole_backup_routes import build_whole_backup_router
+from .routes.connection_routes import build_connection_router
+from .routes.quality_routes import build_quality_router
+from .routes.experience_routes import build_experience_router
 from ..core.runtime_performance import register_cache_reporter
 
 
@@ -131,6 +134,9 @@ def build_router() -> APIRouter:
     router.include_router(build_outbound_router(runtime=runtime))
     router.include_router(build_performance_router(runtime=runtime))
     router.include_router(build_v2_router(runtime=runtime))
+    router.include_router(build_connection_router(runtime=runtime))
+    router.include_router(build_quality_router(runtime=runtime))
+    router.include_router(build_experience_router(runtime=runtime))
     router.include_router(build_whole_backup_router(runtime=runtime))
     router.include_router(build_v2_business_router(runtime=runtime))
 
