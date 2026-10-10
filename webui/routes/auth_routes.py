@@ -8,7 +8,8 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
-from ...core import admin_acl, notify, webui_audit_log, webui_auth_store
+from ...core import notify, webui_audit_log, webui_auth_store
+from ...core.webui_admin_identity import configured_telegram_identities, is_qq_identity, is_webui_admin, telegram_identity_id, webui_identity_metadata
 from ...core.operation_diagnostics import detail, diagnostic, exception_diagnostic, step
 from ..deps import (
     AdminIdentity,
@@ -210,7 +211,7 @@ def build_auth_router(*, runtime) -> APIRouter:
         return False
 
     def _is_current_admin(qq: str) -> bool:
-        return qq in runtime.superusers or admin_acl.is_plugin_admin(qq)
+        return is_webui_admin(qq, plugin_config=runtime.plugin_config, superusers=runtime.superusers)
 
     def _set_trust_cookie(request: Request, response: Response, token: str) -> None:
         response.set_cookie(_TRUST_COOKIE_NAME, token, max_age=webui_auth_store.TRUSTED_DEVICE_TTL_SECONDS,
@@ -257,7 +258,7 @@ def build_auth_router(*, runtime) -> APIRouter:
             raise HTTPException(status_code=429, detail="尝试次数过多，请稍后再试")
         if not _is_current_admin(qq):
             webui_auth_store.record_login_attempt(send_rate_key)
-            raise HTTPException(status_code=403, detail="该 QQ 非插件管理员")
+            raise HTTPException(status_code=403, detail="该账号非插件管理员")
         ip_hash = hashlib.sha256((ip or "").encode("utf-8")).hexdigest()[:16]
 
         # 验证码绑定当前浏览器 challenge，其他匿名请求不能消费或覆盖。
@@ -279,7 +280,12 @@ def build_auth_router(*, runtime) -> APIRouter:
         if not sent:
             webui_auth_store.discard_verify_code(qq, challenge_token)
             webui_audit_log.record(action="login_code_sent", qq=qq, ip_hash=ip_hash, outcome="bot_unreachable")
-            raise HTTPException(status_code=502, detail="无法向该 QQ 发送私聊（Bot 离线或非好友）")
+            message = (
+                "无法向该 Telegram 管理员发送验证码，请先私聊启动 Bot 并确认 Bot 在线"
+                if telegram_identity_id(qq) is not None else
+                "无法向该 QQ 发送私聊（Bot 离线或非好友）"
+            )
+            raise HTTPException(status_code=502, detail=message)
         response.set_cookie(
             _LOGIN_CHALLENGE_COOKIE_NAME,
             challenge_token,
@@ -343,9 +349,9 @@ def build_auth_router(*, runtime) -> APIRouter:
             await notify.startup_notify_admins(
                 get_bots=runtime.get_bots, superusers=list(runtime.superusers or []), plugin_admins=[],
                 message=(
-                    (f"【拟人 WebUI】新设备待审批\nQQ：{qq}\n设备：{payload.device_label or '未命名'}\nIP：{ip or '未知'}\n请用已登录设备在「设备」页确认。")
+                    (f"【拟人 WebUI】新设备待审批\n账号：{qq}\n设备：{payload.device_label or '未命名'}\nIP：{ip or '未知'}\n请用已登录设备在「设备」页确认。")
                     if pending else
-                    (f"【拟人 WebUI】新设备登录\nQQ：{qq}\n设备：{payload.device_label or '未命名'}\nIP：{ip or '未知'}")
+                    (f"【拟人 WebUI】新设备登录\n账号：{qq}\n设备：{payload.device_label or '未命名'}\nIP：{ip or '未知'}")
                 ),
             )
         except Exception:
@@ -357,13 +363,12 @@ def build_auth_router(*, runtime) -> APIRouter:
 
     @router.get("/me")
     async def me(request: Request, admin: AdminIdentity = Depends(require_admin)) -> dict[str, Any]:
-        source = "SUPERUSER" if str(admin.qq) in {str(item) for item in (runtime.superusers or set())} else "plugin_admin"
         record = webui_auth_store.lookup_device(request.cookies.get(get_cookie_name(), "")) or {}
         return {
             "qq": admin.qq,
             "device_id": admin.device_id,
             "label": admin.label,
-            "identity_source": source,
+            **webui_identity_metadata(admin.qq, superusers=runtime.superusers or set()),
             "trusted": bool(record.get("trust_id")),
             "trust_id": str(record.get("trust_id", "")),
         }
@@ -391,7 +396,7 @@ def build_auth_router(*, runtime) -> APIRouter:
 
     @router.get("/eligible-admins")
     async def eligible_admins() -> dict:
-        """返回登录页可选管理员；登录页不接受自行输入 QQ。"""
+        """返回登录页可选管理员，平台身份与配置权限保持一致。"""
 
         from ...core import admin_acl as _acl
 
@@ -399,17 +404,19 @@ def build_auth_router(*, runtime) -> APIRouter:
         out: list[dict[str, str]] = []
         for qq in sorted(runtime.superusers or set(), key=str):
             sid = str(qq or "").strip()
-            if sid and sid not in seen:
+            if is_qq_identity(sid) and sid not in seen:
                 seen.add(sid)
-                out.append({"qq": sid, "source": "SUPERUSERS (.env)"})
+                out.append({"qq": sid, "source": "SUPERUSERS (.env)", "platform": "qq", "label": f"QQ {sid}"})
         try:
             for qq in sorted(_acl.load_plugin_admins(), key=str):
                 sid = str(qq or "").strip()
-                if sid and sid not in seen:
+                if is_qq_identity(sid) and sid not in seen:
                     seen.add(sid)
-                    out.append({"qq": sid, "source": "plugin_admins"})
+                    out.append({"qq": sid, "source": "plugin_admins", "platform": "qq", "label": f"QQ {sid}"})
         except Exception:
             pass
+        for sid in sorted(configured_telegram_identities(runtime.plugin_config)):
+            out.append({"qq": sid, "source": "telegram_admins", "platform": "telegram", "label": f"Telegram {sid.removeprefix('telegram:')}"})
         return {"admins": out, "manual_entry": False, "source_hidden": False}
 
     @router.get("/devices", response_model=DeviceListResponse)

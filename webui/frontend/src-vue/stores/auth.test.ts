@@ -40,6 +40,26 @@ describe("认证状态", () => {
     expect(fetcher).toHaveBeenCalledTimes(3);
   });
 
+  it("Telegram 验证码登录与验证保留身份前缀，成功后读取同一管理员", async () => {
+    const qq = "telegram:6035198997";
+    const fetcher = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(json({ sent: true }))
+      .mockResolvedValueOnce(json({ success: true }))
+      .mockResolvedValueOnce(json({ qq, platform: "telegram", device_id: "tg-device", label: "PC", identity_source: "plugin_admin" }));
+    const auth = useAuthStore();
+    await auth.sendCode(qq);
+    expect(auth.phase).toBe("verifying");
+    expect(auth.message).toContain("Telegram 私聊");
+    await auth.verify(qq, "123456", "PC", true);
+    expect(fetcher.mock.calls.map(call => call[0])).toEqual([
+      "/personification/api/auth/login", "/personification/api/auth/verify", "/personification/api/auth/me",
+    ]);
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({ qq });
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({ qq, code: "123456", device_label: "PC", trust_device: true });
+    expect(auth.phase).toBe("authenticated");
+    expect(auth.identity?.qq).toBe(qq);
+  });
+
   it("旧 bootstrap 响应不能覆盖更新的认证结果", async () => {
     let resolveOld!: (value: Response) => void;
     const old = new Promise<Response>((resolve) => { resolveOld = resolve; });

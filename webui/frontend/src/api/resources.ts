@@ -1,5 +1,6 @@
 import { api, API_BASE, rawApiRequest } from "./client";
 import type {
+  AdminIdentity,
   AgentRuntimeSnapshot,
   BotIdentity,
   ConfigPage,
@@ -195,7 +196,7 @@ export const resources = {
   visualRelabelJob(jobId: string, signal?: AbortSignal): Promise<Record<string, unknown>> { return api.get(`/stickers/visual-relabel/jobs/${encodeURIComponent(jobId)}`, undefined, signal); },
   pauseVisualRelabel(jobId: string): Promise<Record<string, unknown>> { return api.post(`/stickers/visual-relabel/jobs/${encodeURIComponent(jobId)}/pause`, {}); },
   resumeVisualRelabel(jobId: string): Promise<Record<string, unknown>> { return api.post(`/stickers/visual-relabel/jobs/${encodeURIComponent(jobId)}/resume`, {}); },
-  adminIdentity(signal?: AbortSignal): Promise<{ qq: string; device_id: string; label: string; identity_source: "SUPERUSER" | "plugin_admin" }> {
+  adminIdentity(signal?: AbortSignal): Promise<AdminIdentity> {
     return api.get("/admin-identity", undefined, signal);
   },
   bots(signal?: AbortSignal): Promise<{ items: BotIdentity[]; total: number; diagnostic_code: string }> {

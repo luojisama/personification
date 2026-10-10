@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 import warnings
 
 from .core.memory_defaults import (
@@ -34,6 +34,13 @@ from .core.favorability import (
 
 
 class Config(BaseModel):
+    @field_validator("personification_telegram_admins", mode="before")
+    @classmethod
+    def _validate_telegram_admins(cls, value: Any) -> list[str]:
+        from .core.webui_admin_identity import normalize_telegram_admins
+
+        return normalize_telegram_admins(value)
+
     def __init__(self, **data: Any) -> None:
         attitudes = data.get("personification_favorability_attitudes")
         if attitudes is None or attitudes == {} or (
@@ -724,6 +731,8 @@ class Config(BaseModel):
     personification_webui_require_device_approval: bool = False
     # 兼容旧配置；当前登录页固定展示可选管理员，不再接受手动输入 QQ。
     personification_webui_expose_admin_list: bool = True
+    # 独立授予 Telegram 用户 WebUI 管理权限；QQ 管理员配置不授予同号 TG 用户。
+    personification_telegram_admins: list[str] = []
     personification_webui_log_retention_days: int = 7
     personification_webui_log_max_entries: int = 10000
     personification_webui_log_capture_level: str = "INFO"

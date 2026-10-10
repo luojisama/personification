@@ -89,7 +89,7 @@
         <details class="top-status-details">
           <summary>诊断状态</summary>
           <span><Icon name="signal" /> 实时事件 {{ realtime.events.value.length }}/500</span>
-          <span v-if="adminIdentity">当前身份 {{ identitySourceLabel(adminIdentity.identity_source) }} · QQ {{ adminIdentity.qq }}</span>
+          <span v-if="adminIdentity">当前身份 {{ identitySourceLabel(adminIdentity.identity_source) }} · {{ adminAccountLabel(adminIdentity.qq, adminIdentity.platform) }}</span>
           <span v-if="realtime.resyncCount.value">REST 重同步 {{ realtime.resyncCount.value }} 次</span>
           <code>{{ route.path }}</code>
         </details>
@@ -121,6 +121,7 @@ import { RouterLink, useRoute, useRouter } from "vue-router";
 
 import { resources } from "@/api/resources";
 import type { BotIdentity } from "@/api/types";
+import { adminAccountLabel } from "@/lib/labels";
 import { NAVIGATION_GROUPS, NAVIGATION_ITEMS, NAVIGATION_LEAVES, NAVIGATION_SECTIONS, navigationContext, navigationSectionForPage, type NavigationNode } from "@/app/navigation";
 import Icon from "@vue-app/components/Icon.vue";
 import IdentityAvatar from "@vue-app/components/IdentityAvatar.vue";

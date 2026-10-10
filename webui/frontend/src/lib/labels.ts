@@ -1,5 +1,13 @@
 import type { CapabilitySource, CapabilityState, RecoveryStatus, TraceOutcome, VerificationState } from "../api/types";
 
+export function adminPlatform(qq: string, platform?: "qq" | "telegram"): "qq" | "telegram" {
+  return platform === "telegram" || qq.startsWith("telegram:") ? "telegram" : "qq";
+}
+
+export function adminAccountLabel(qq: string, platform?: "qq" | "telegram"): string {
+  return adminPlatform(qq, platform) === "telegram" ? `Telegram ${qq.replace(/^telegram:/, "")}` : `QQ ${qq}`;
+}
+
 export function capabilityStateLabel(state: CapabilityState): string {
   return state === "supported" ? "支持" : state === "unsupported" ? "不支持" : "未知";
 }

@@ -8,13 +8,15 @@
       <div v-if="auth.phase === 'checking'" role="status">正在确认当前设备的登录状态…</div>
 
       <form v-else-if="auth.phase === 'anonymous'" class="auth-form" @submit.prevent="requestCode">
-        <SelectField v-model="qq" label="管理员账号" :options="adminOptions" placeholder="请选择接收验证码的管理员" required />
+        <SelectField v-model="selectedIdentity" label="管理员账号" :options="adminOptions" placeholder="请选择接收验证码的管理员" :disabled="busy" required />
         <p v-if="!auth.admins.length" class="auth-note">暂未读取到可登录管理员。请确认 Bot 配置后刷新。</p>
-        <button type="submit" :disabled="busy || !qq">发送私聊验证码</button>
+        <p v-if="selectedIdentity" class="auth-note">{{ deliveryNote }}</p>
+        <button type="submit" :disabled="busy || !selectedIdentity">发送私聊验证码</button>
         <button class="secondary" type="button" :disabled="busy" @click="refreshAdmins">刷新管理员列表</button>
       </form>
 
       <form v-else-if="auth.phase === 'verifying'" class="auth-form" @submit.prevent="confirmCode">
+        <p v-if="selectedIdentity" class="auth-note">登录账号：{{ selectedAccountLabel }}。{{ deliveryNote }}</p>
         <TextField v-model="code" label="六位验证码" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required />
         <TextField v-model="deviceLabel" label="设备名称" autocomplete="off" maxlength="64" placeholder="例如：我的电脑" />
         <label class="trust-device-option"><input v-model="trustDevice" type="checkbox" :disabled="!trustAvailable" />信任此设备</label>
@@ -45,12 +47,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { ApiError } from "@/api/client";
+import { adminAccountLabel, adminPlatform } from "@/lib/labels";
 import SelectField from "@vue-app/components/forms/SelectField.vue";
 import TextField from "@vue-app/components/forms/TextField.vue";
 import { useAuthStore } from "@vue-app/stores/auth";
 
 const auth = useAuthStore();
-const qq = ref("");
+const selectedIdentity = ref("");
 const code = ref("");
 const deviceLabel = ref("");
 const trustAvailable = window.location.protocol === "https:" || ["localhost", "127.0.0.1", "::1", "[::1]"].includes(window.location.hostname);
@@ -58,8 +61,17 @@ const trustDevice = ref(trustAvailable);
 const busy = ref(false);
 const errorMessage = ref("");
 const title = computed(() => auth.phase === "pending" ? "等待设备审批" : auth.phase === "unavailable" ? "暂时无法连接" : "管理员登录");
-const lead = computed(() => auth.phase === "pending" ? "当前浏览器尚未获得管理权限。" : "选择已有管理员，由 Bot 私聊发送一次性验证码。");
-const adminOptions = computed(() => auth.admins.map((admin) => ({ value: admin.qq, label: `QQ ${admin.qq} · ${sourceLabel(admin.source)}` })));
+const lead = computed(() => auth.phase === "pending" ? "当前浏览器尚未获得管理权限。" : "选择 QQ 或 Telegram 管理员，由 Bot 在对应平台私聊发送一次性验证码。");
+const selectedAdmin = computed(() => auth.admins.find(admin => admin.qq === selectedIdentity.value));
+const selectedAccountLabel = computed(() => selectedAdmin.value?.label || adminAccountLabel(selectedIdentity.value, selectedAdmin.value?.platform));
+const selectedPlatform = computed(() => adminPlatform(selectedIdentity.value, selectedAdmin.value?.platform));
+const deliveryNote = computed(() => {
+  if (auth.phase === "verifying") return `请在 ${selectedPlatform.value === "telegram" ? "Telegram" : "QQ"} 与 Bot 的私聊中查看验证码。`;
+  return selectedPlatform.value === "telegram"
+    ? "验证码通过 Telegram 私聊发送；首次使用请先在 Telegram 私聊 Bot 发送 /start。"
+    : "验证码通过 QQ 私聊发送，请确认 QQ Bot 在线且可向你发送消息。";
+});
+const adminOptions = computed(() => auth.admins.map((admin) => ({ value: admin.qq, label: `${admin.label || adminAccountLabel(admin.qq, admin.platform)} · ${sourceLabel(admin.source)}` })));
 
 onMounted(async () => {
   if (auth.phase === "checking" && !auth.bootstrapInProgress) await auth.bootstrap();
@@ -69,12 +81,12 @@ function sourceLabel(source: string): string { return source.startsWith("SUPERUS
 function explain(error: unknown): string {
   if (error instanceof ApiError) {
     const detail = (error.detail as { detail?: unknown } | undefined)?.detail;
-    if (typeof detail === "string" && !/^[A-Z_]+$/.test(detail)) return detail;
+    if (typeof detail === "string" && /[\u4e00-\u9fff]/.test(detail)) return detail;
   }
   return "操作未完成，请稍后重试。";
 }
-async function requestCode(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.sendCode(qq.value); } catch (error) { errorMessage.value = explain(error); } finally { busy.value = false; } }
-async function confirmCode(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.verify(qq.value, code.value, deviceLabel.value, trustDevice.value); } catch (error) { errorMessage.value = explain(error); } finally { busy.value = false; } }
+async function requestCode(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.sendCode(selectedIdentity.value); } catch (error) { errorMessage.value = explain(error); } finally { busy.value = false; } }
+async function confirmCode(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.verify(selectedIdentity.value, code.value, deviceLabel.value, trustDevice.value); } catch (error) { errorMessage.value = explain(error); } finally { busy.value = false; } }
 async function retry(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.bootstrap(); } finally { busy.value = false; } }
 async function refreshAdmins(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.loadAdmins(); } catch (error) { errorMessage.value = explain(error); } finally { busy.value = false; } }
 async function logout(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.logout(); } finally { busy.value = false; } }

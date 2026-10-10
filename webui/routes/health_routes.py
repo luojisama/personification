@@ -14,6 +14,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from ...core.admin_acl import is_plugin_admin, is_superuser
+from ...core.webui_admin_identity import is_webui_admin
 from ...core.operation_diagnostics import (
     detail as operation_detail,
     diagnostic as operation_diagnostic,
@@ -1094,7 +1095,7 @@ def build_health_router(*, runtime) -> APIRouter:
         )
         target_detail = {"group_id": target_group, "user_id": target_user}
         superusers = set(getattr(runtime, "superusers", set()) or set())
-        operator_authorized = is_superuser(admin.qq, superusers) or is_plugin_admin(admin.qq)
+        operator_authorized = is_webui_admin(admin.qq, plugin_config=cfg, superusers=superusers)
         target_authorized = is_superuser(target_user, superusers) or is_plugin_admin(target_user)
         reply_turn_trace.record_stage(
             trace_id=trace_id,
@@ -1126,7 +1127,7 @@ def build_health_router(*, runtime) -> APIRouter:
                 code="health_interaction_test_identity_forbidden",
                 phase="identity_authorization",
                 title="交互测试身份未获授权",
-                message="测试操作者和被注入 QQ 身份都必须是 Bot 超级管理员或插件管理员；未注入事件。",
+                message="测试操作者须有 WebUI 管理权限，被注入 QQ 身份须是 Bot 超级管理员或插件管理员；未注入事件。",
                 details=(
                     operation_detail("操作者授权", operator_authorized, "ok" if operator_authorized else "error"),
                     operation_detail("测试身份授权", target_authorized, "ok" if target_authorized else "error"),

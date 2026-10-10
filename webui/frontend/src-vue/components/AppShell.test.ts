@@ -117,6 +117,15 @@ describe("AppShell", () => {
     queryClient.clear();
   });
 
+  it("当前管理员按 Telegram 身份显示，并兼容未返回平台字段的响应", async () => {
+    vi.mocked(resources.adminIdentity).mockResolvedValue({ qq: "telegram:6035198997", device_id: "device", label: "浏览器", identity_source: "plugin_admin" });
+    const { wrapper, queryClient } = await renderShell();
+    await vi.waitFor(() => expect(wrapper.text()).toContain("当前身份 plugin_admin（插件管理员） · Telegram 6035198997"));
+    expect(wrapper.text()).not.toContain("QQ telegram:");
+    wrapper.unmount();
+    queryClient.clear();
+  });
+
   it("无真实网络即可选择 Bot、搜索页面和控制移动抽屉", async () => {
     installViewport(true);
     const { wrapper, queryClient } = await renderShell();

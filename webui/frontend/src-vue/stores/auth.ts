@@ -2,9 +2,11 @@ import { defineStore } from "pinia";
 import { getCurrentScope, onScopeDispose, ref } from "vue";
 
 import { ApiError, authRequest, onAuthenticationInvalid } from "@/api/client";
+import type { AdminIdentity } from "@/api/types";
+import { adminPlatform } from "@/lib/labels";
 
-export interface AdminIdentity { qq: string; device_id: string; label: string; identity_source: "SUPERUSER" | "plugin_admin"; trusted?: boolean; trust_id?: string }
-export interface EligibleAdmin { qq: string; source: string }
+export type { AdminIdentity } from "@/api/types";
+export interface EligibleAdmin { qq: string; source: string; platform?: "qq" | "telegram"; label?: string }
 export type AuthPhase = "checking" | "anonymous" | "verifying" | "pending" | "authenticated" | "unavailable";
 
 function detailText(error: unknown): string {
@@ -95,20 +97,20 @@ export const useAuthStore = defineStore("auth", () => {
     }
   }
 
-  async function sendCode(qq: string): Promise<void> {
+  async function sendCode(adminIdentity: string): Promise<void> {
     const current = ++generation;
     message.value = "";
-    const response = await authRequest<{ message?: string }>("/login", { method: "POST", body: { qq } });
+    const response = await authRequest<{ message?: string }>("/login", { method: "POST", body: { qq: adminIdentity } });
     if (current !== generation) return;
     phase.value = "verifying";
-    message.value = response.message ?? "验证码已发送。";
+    message.value = response.message ?? `验证码已发送，请查看 ${adminPlatform(adminIdentity) === "telegram" ? "Telegram" : "QQ"} 私聊。`;
   }
 
-  async function verify(qq: string, code: string, deviceLabel: string, trustDevice = false): Promise<void> {
+  async function verify(adminIdentity: string, code: string, deviceLabel: string, trustDevice = false): Promise<void> {
     const current = ++generation;
     message.value = "";
     const response = await authRequest<{ success: boolean; pending?: boolean; message?: string }>("/verify", {
-      method: "POST", body: { qq, code, device_label: deviceLabel, trust_device: trustDevice },
+      method: "POST", body: { qq: adminIdentity, code, device_label: deviceLabel, trust_device: trustDevice },
     });
     if (current !== generation) return;
     if (response.success !== true) {

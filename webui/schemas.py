@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 
 class LoginRequest(BaseModel):
-    qq: str = Field(..., min_length=4, max_length=20, description="管理员 QQ 号")
+    qq: str = Field(..., min_length=4, max_length=32, description="管理员 QQ 号或 telegram:数字用户ID")
 
 
 class LoginResponse(BaseModel):
@@ -19,7 +19,7 @@ class LoginResponse(BaseModel):
 
 
 class VerifyRequest(BaseModel):
-    qq: str = Field(..., min_length=4, max_length=20)
+    qq: str = Field(..., min_length=4, max_length=32)
     code: str = Field(..., min_length=6, max_length=6)
     device_label: str = Field(default="", max_length=64)
     trust_device: bool = False

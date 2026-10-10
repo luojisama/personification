@@ -150,6 +150,12 @@ def _json_array_parser(raw: str) -> list[Any]:
     return parsed
 
 
+def _telegram_admins_parser(raw: str) -> list[str]:
+    from .webui_admin_identity import normalize_telegram_admins
+
+    return normalize_telegram_admins(_json_array_parser(raw))
+
+
 def _web_search_mode_parser(raw: str) -> str:
     text = str(raw or "").strip().lower()
     mapping = {
@@ -3618,7 +3624,9 @@ def _build_extra_entries() -> list[ConfigEntry]:
                 help_aliases=tuple(spec.get("aliases", ())),
                 risk_note=str(spec.get("risk", "")),
                 parser=(
-                    _favorability_levels_parser
+                    _telegram_admins_parser
+                    if field_name == "personification_telegram_admins"
+                    else _favorability_levels_parser
                     if field_name == "personification_favorability_levels"
                     else _favorability_behavior_bands_parser
                     if field_name == "personification_favorability_behavior_bands"

@@ -8,6 +8,16 @@ export interface Page<T> {
 
 export type CatalogItem = Record<string, unknown>;
 
+export interface AdminIdentity {
+  qq: string;
+  platform?: "qq" | "telegram";
+  device_id: string;
+  label: string;
+  identity_source: "SUPERUSER" | "plugin_admin";
+  trusted?: boolean;
+  trust_id?: string;
+}
+
 export interface UpdateSourceProbe {
   source_id: string;
   kind: "mirror" | "official";

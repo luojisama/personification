@@ -18,6 +18,7 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from ...core.pagination import build_page, normalize_pagination, resolve_sort
+from ...core.webui_admin_identity import webui_identity_metadata
 from ...core.diagnostic_media_samples import (
     diagnostic_media_catalog_metadata,
     diagnostic_media_prompt,
@@ -2353,12 +2354,11 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
 
     @router.get("/admin-identity")
     async def admin_identity(admin: AdminIdentity = Depends(require_admin)) -> dict[str, str]:
-        source = "SUPERUSER" if str(admin.qq) in {str(item) for item in (getattr(runtime, "superusers", set()) or set())} else "plugin_admin"
         return {
             "qq": admin.qq,
             "device_id": admin.device_id,
             "label": admin.label,
-            "identity_source": source,
+            **webui_identity_metadata(admin.qq, superusers=getattr(runtime, "superusers", set()) or set()),
         }
 
     @router.get("/admin-index/status")

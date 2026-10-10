@@ -82,14 +82,14 @@ def set_runtime_context(
         logger=logger,
         runtime_bundle=runtime_bundle,
     )
-    from ..core import admin_acl
+    from ..core.webui_admin_identity import is_webui_admin
     from . import deps
 
     def _is_current_admin(qq: str) -> bool:
         context = _RUNTIME
         if context is None:
             return False
-        return qq in context.superusers or admin_acl.is_plugin_admin(qq)
+        return is_webui_admin(qq, plugin_config=context.plugin_config, superusers=context.superusers)
 
     deps.set_admin_authorizer(_is_current_admin)
 
