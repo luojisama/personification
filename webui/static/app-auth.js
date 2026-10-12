@@ -144,25 +144,25 @@ function renderLogin() {
   let picker, hint;
   if (!eligible.length) {
     picker = `<select id="login-qq" disabled style="width:100%;margin-top:6px"><option value="">未配置管理员</option></select>`;
-    hint = `<p class="muted" style="margin-top:14px;font-size:12.5px">请先在 NoneBot 配置中设置 SUPERUSERS，或通过已有管理入口添加 plugin admin。</p>`;
+    hint = `<p class="muted" style="margin-top:14px;font-size:12.5px">请先配置 QQ 管理员或 personification_telegram_admins 中的 Telegram 数字用户 ID。</p>`;
   } else {
     picker = `<select id="login-qq" style="width:100%;margin-top:6px">
-        ${eligible.map(e => `<option value="${escapeAttr(e.qq)}">${escapeHtml(e.qq)}（${escapeHtml(e.source)}）</option>`).join("")}
+        ${eligible.map(e => `<option value="${escapeAttr(e.qq)}">${escapeHtml(e.label || e.qq)}（${escapeHtml(e.platform === "telegram" ? "Telegram 管理员" : e.source)}）</option>`).join("")}
       </select>`;
-    hint = `<p class="muted" style="margin-top:14px;font-size:12.5px">选择一个管理员 QQ，Bot 会向其私聊推送 6 位数验证码，5 分钟内有效。</p>`;
+    hint = `<p class="muted" style="margin-top:14px;font-size:12.5px">选择管理员账号，Bot 将向对应平台私聊发送 6 位验证码，5 分钟内有效。Telegram 管理员须先私聊 Bot 发送 /start。</p>`;
   }
   return `<div class="login-wrap"><div class="card"><div class="between">
       <h2 style="margin:0">拟人插件 WebUI 登录</h2>
        <button class="btn small icon-btn" onclick="toggleTheme()" title="${themeLabel}" aria-label="${themeLabel}">${themeIcon}</button>
     </div>
     <div id="login-step1">
-      <label>管理员 QQ</label>
+      <label>管理员账号（QQ / Telegram）</label>
       ${picker}
       <div style="margin-top:14px"><button class="btn primary" onclick="sendCode()" ${eligible.length ? "" : "disabled"}>发送验证码</button></div>
       ${hint}
     </div>
     <div id="login-step2" style="display:none">
-      <div class="alert info" style="font-size:12.5px">验证码已发送到所选管理员 QQ，请在 5 分钟内输入。</div>
+      <div class="alert info" style="font-size:12.5px">验证码已发送到所选账号的平台私聊，请在 5 分钟内输入。</div>
       <label>验证码（来自 Bot 私聊）</label>
       <input id="login-code" type="text" inputmode="numeric" maxlength="6" placeholder="6 位数字">
       <label style="margin-top:10px">设备名称（便于识别）</label>
@@ -206,14 +206,14 @@ async function sendCode() {
   const el = document.getElementById("login-qq");
   const qq = (el && el.value || "").trim();
   const msg = document.getElementById("login-msg");
-  if (!qq) { msg.textContent = "请选择管理员 QQ。"; return; }
+  if (!qq) { msg.textContent = "请选择管理员账号。"; return; }
   msg.textContent = "正在发送…";
   try {
     await api("/auth/login", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ qq }) });
     state.pendingQq = qq;
     document.getElementById("login-step1").style.display = "none";
     document.getElementById("login-step2").style.display = "block";
-    msg.textContent = "验证码已发送，请查收管理员 QQ 私聊。";
+    msg.textContent = qq.startsWith("telegram:") ? "验证码已发送，请查收 Telegram Bot 私聊。" : "验证码已发送，请查收管理员 QQ 私聊。";
   } catch (e) { msg.textContent = "发送失败：" + e.message; }
 }
 

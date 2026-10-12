@@ -8,7 +8,8 @@ from typing import Any
 from .memory_context import prepare_memory_context, render_history
 
 
-def build_surface_memory_provider(*, config: Any, store: Any, caller: Any, policy: Any = None, profiles: Any = None):
+def build_surface_memory_provider(*, config: Any, store: Any, caller: Any, policy: Any = None, profiles: Any = None,
+                                  account_links: Any = None, favorability_service: Any = None):
     async def prepare(*, messages: list[dict], scope: dict, surface: str) -> dict | str:
         if not all(str(scope.get(key) or "") for key in ("platform", "bot_id")):
             return ""
@@ -46,7 +47,9 @@ def build_surface_memory_provider(*, config: Any, store: Any, caller: Any, polic
         query = [dict(m) for m in messages if m.get("role") == "user"][-1:]
         from .context_budget import fit_history_to_budget, primary_route_budget
         history, _ = fit_history_to_budget(history, fixed_messages=messages, budget=primary_route_budget(config))
-        runtime = SimpleNamespace(plugin_config=config, memory_store=store, lite_tool_caller=caller, scoped_profile_service=profiles)
+        runtime = SimpleNamespace(plugin_config=config, memory_store=store, lite_tool_caller=caller,
+            scoped_profile_service=profiles, user_policy_gate=policy, qq_user_policy_gate=policy,
+            account_link_service=None if qzone else account_links, favorability_service=favorability_service)
         from .llm_context import set_llm_context, reset_llm_context
         token = set_llm_context(**{k: str(scope.get(k) or "") for k in ("platform", "bot_id", "user_id", "group_id")}, purpose=surface)
         try:

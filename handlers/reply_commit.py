@@ -75,7 +75,9 @@ def release_reply_commit(state: dict[str, Any]) -> None:
 
 def mark_reply_delivery_started(state: dict[str, Any]) -> None:
     from ..core.generation_fence import assert_current_generation
+    from ..core.llm_context import assert_llm_sources_current
     assert_current_generation(state)
+    assert_llm_sources_current()
     state[_DELIVERY_STARTED_KEY] = True
 
 

@@ -40,14 +40,18 @@ def _now() -> float:
     return time.time()
 
 
-def _hard_filter(item: dict[str, Any], *, now: float, private_owner_id: str = "") -> tuple[bool, str]:
+def _hard_filter(item: dict[str, Any], *, now: float, private_owner_id: str = "",
+                 linked_private_scopes: tuple[tuple[str, str, str], ...] = ()) -> tuple[bool, str]:
     if not bool(item.get("supports_recall", True)):
         return False, "supports_recall=false"
     expires_at = _float(item.get("expires_at", 0), 0)
     if expires_at > 0 and expires_at <= now:
         return False, "expired"
     permission = str(item.get("permission_type") or "").strip().lower()
-    if permission in _BLOCKED_PERMISSIONS and not (permission == "private_fact" and private_owner_id and str(item.get("user_id") or "") == private_owner_id):
+    linked_owner = (not item.get("group_id") and not item.get("topic_id") and not item.get("thread_id")
+                    and tuple(str(item.get(key) or "") for key in ("platform", "bot_id", "user_id")) in linked_private_scopes)
+    private_owner = bool(private_owner_id and str(item.get("user_id") or "") == private_owner_id)
+    if permission in _BLOCKED_PERMISSIONS and not (permission == "private_fact" and (private_owner or linked_owner)):
         return False, f"permission={permission}"
     tier = str(item.get("tier") or "").strip().lower()
     if tier in _BLOCKED_TIERS:
@@ -67,6 +71,7 @@ def _dedupe_and_rank(
     minimum_score: float,
     max_candidates: int,
     private_owner_id: str = "",
+    linked_private_scopes: tuple[tuple[str, str, str], ...] = (),
     on_diagnostic: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     query_tokens = _tokens(query)
@@ -77,7 +82,8 @@ def _dedupe_and_rank(
         if not isinstance(raw, dict):
             continue
         item = dict(raw)
-        allowed, reason = _hard_filter(item, now=now, private_owner_id=private_owner_id)
+        allowed, reason = _hard_filter(item, now=now, private_owner_id=private_owner_id,
+                                       linked_private_scopes=linked_private_scopes)
         if not allowed:
             if on_diagnostic is not None:
                 code = (
@@ -212,6 +218,7 @@ async def gate_memory_candidates(
     minimum_score: float = 0.72,
     timeout_seconds: float = 5.0,
     private_owner_id: str = "",
+    linked_private_scopes: tuple[tuple[str, str, str], ...] = (),
     on_diagnostic: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Return at most ``maximum`` safe automatic-context memory records."""
@@ -222,6 +229,7 @@ async def gate_memory_candidates(
         minimum_score=max(0.0, min(1.0, float(minimum_score))),
         max_candidates=32,
         private_owner_id=private_owner_id,
+        linked_private_scopes=linked_private_scopes,
         on_diagnostic=on_diagnostic,
     )
     kept = await _semantic_gate(

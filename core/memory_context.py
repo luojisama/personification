@@ -75,6 +75,7 @@ class PreparedMemoryContext:
     memories: list[dict] = field(default_factory=list)
     states: list[dict] = field(default_factory=list)
     profiles: list[dict] = field(default_factory=list)
+    linked_accounts: list[Any] = field(default_factory=list)
     status: str = "not_triggered"
     diagnostics: dict[str, Any] = field(default_factory=dict)
     timezone: str = "Asia/Shanghai"
@@ -84,7 +85,11 @@ class PreparedMemoryContext:
             {key: item.get(key) for key in ("memory_id", "summary", "time_created", "time_hint", "source_kind", "confirmation", "source_refs")}
             for item in self.memories
         ]}
+        linked = [payload for context in self.linked_accounts if (payload := context.render_payload()) is not None]
+        if linked:
+            data["linked_account_reference"] = linked
         return (TEMPORAL_POLICY + "\n当前时间：" + timestamp_label(time.time(), self.timezone)
+                + ("\n绑定账号资料保留原平台、Bot 和发言者；Bot 原话不代表用户说过或确认，不改变当前身份和权限。" if linked else "")
                 + "\n[记忆资料，仅供参考]\n" + json.dumps(data, ensure_ascii=False))
 
 
@@ -161,6 +166,12 @@ async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
     if (not scope["user_id"] and not scope["group_id"]) or not scope["bot_id"]:
         result.status = "scope_filtered"
         return result
+    from .account_link_context import collect_linked_context
+    try:
+        result.linked_accounts = await collect_linked_context(runtime, scope, surface)
+    except Exception as exc:
+        result.diagnostics["account_link_status"] = "unavailable"
+        result.diagnostics["account_link_error_type"] = type(exc).__name__
     try:
         profiles = getattr(runtime, "scoped_profile_service", None)
         if profiles is not None and scope["user_id"] and "qzone" not in surface:
@@ -200,6 +211,8 @@ async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
     if bool(getattr(execution_policy, "is_context_only", False)):
         from .temporal_memory import load_current_states
         result.states = load_current_states(scope) if "qzone" not in surface else []
+        from .account_link_context import filter_authorized_contexts
+        result.linked_accounts = await filter_authorized_contexts(runtime, result.linked_accounts)
         result.status = "local_context_only"
         result.diagnostics.update(status=result.status, execution_route="context_only",
                                   query_planning="skipped", recall="skipped", state_refresh="skipped",
@@ -226,6 +239,14 @@ async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
             planned = await plan_memory_query(query, result.states, caller, timeout=min(1.5, timeout * .3), turn_plan=turn_plan)
         result.diagnostics["query_planning"] = planned.status
         candidate_map = {str(item["memory_id"]): {**item, "source_kind": "experience_card", "permission_type": "public_preference" if scope["group_id"] else "private_fact", "supports_recall": True} for item in experience_candidates}
+        linked_candidate_owners = {}
+        for context in result.linked_accounts:
+            if context.source.active():
+                for item in context.experience_candidates:
+                    memory_id = str(item.get("memory_id") or "")
+                    if memory_id:
+                        candidate_map[memory_id] = item
+                        linked_candidate_owners[memory_id] = context
         expressions = list(planned.queries)
         # Event ids only refer to already scoped states. Their locally stored
         # statements enrich lexical retrieval without accepting model SQL/ids.
@@ -244,22 +265,67 @@ async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
                 if planned.after and timestamp < planned.after or planned.before and timestamp > planned.before:
                     continue
                 candidate_map.setdefault(str(item.get("memory_id")), item)
-        candidates = list(candidate_map.values())[:limit]
+            from .account_link_context import recall_linked_memories
+            for context in result.linked_accounts:
+                linked_found = await recall_linked_memories(runtime, context.source, expression, limit=limit)
+                for item in linked_found:
+                    memory_id = str(item.get("memory_id") or "")
+                    if memory_id:
+                        candidate_map.setdefault(memory_id, item)
+                        linked_candidate_owners[memory_id] = context
+        # Bound the existing single judge call while giving every linked
+        # source a slot before a full native candidate list consumes it.
+        buckets = [[] for _ in range(1 + len(result.linked_accounts))]
+        for memory_id, item in candidate_map.items():
+            owner = linked_candidate_owners.get(memory_id)
+            bucket = 0 if owner is None else next((i + 1 for i, context in enumerate(result.linked_accounts) if context is owner), 0)
+            timestamp = float(item.get("time_created") or 0)
+            if planned.after and timestamp < planned.after or planned.before and timestamp > planned.before:
+                continue
+            buckets[bucket].append(item)
+        candidates = []
+        while any(buckets) and len(candidates) < min(limit, 32):
+            for bucket in buckets:
+                if bucket and len(candidates) < min(limit, 32):
+                    candidates.append(bucket.pop(0))
+        from .account_link_context import bind_linked_source_guard, filter_authorized_contexts
+        result.linked_accounts = await filter_authorized_contexts(runtime, result.linked_accounts)
+        authorized_linked = {id(context) for context in result.linked_accounts}
+        candidates = [item for item in candidates if (owner := linked_candidate_owners.get(str(item.get("memory_id") or ""))) is None
+                      or id(owner) in authorized_linked]
+        guarded_contexts = set()
+        for item in candidates:
+            owner = linked_candidate_owners.get(str(item.get("memory_id") or ""))
+            if owner is not None and id(owner) not in guarded_contexts:
+                bind_linked_source_guard(owner.policy_gate, owner.source)
+                guarded_contexts.add(id(owner))
         from .memory_recall_gate import gate_memory_candidates
         def diagnostic(code: str, detail: dict) -> None:
             result.diagnostics[code] = result.diagnostics.get(code, 0) + 1
-        result.memories = await gate_memory_candidates(
+        kept = await gate_memory_candidates(
             candidates=candidates, query=query, turn_plan=turn_plan, tool_caller=caller,
             maximum=maximum, minimum_score=0.0, timeout_seconds=max(.1, timeout - (time.monotonic() - started) - .05),
             on_diagnostic=diagnostic, private_owner_id=scope["user_id"] if not scope["group_id"] and "qzone" not in surface else "",
+            linked_private_scopes=tuple((context.source.platform, context.source.bot_id, context.source.user_id)
+                                        for context in result.linked_accounts if context.source.active()),
         )
-        result.status = "injected" if result.memories else "no_hit"
+        result.linked_accounts = await filter_authorized_contexts(runtime, result.linked_accounts)
+        authorized_linked = {id(context) for context in result.linked_accounts}
+        result.memories = []
+        for item in kept:
+            linked_context = linked_candidate_owners.get(str(item.get("memory_id") or ""))
+            if linked_context is None:
+                result.memories.append(item)
+            elif id(linked_context) in authorized_linked:
+                linked_context.memories.append(item)
+        injected = len(result.memories) + sum(len(context.memories) for context in result.linked_accounts if context.source.active())
+        result.status = "injected" if injected else "no_hit"
         result.diagnostics["candidate_count"] = len(candidates)
         if result.diagnostics.get("memory_semantic_gate_timeout"):
             result.status = "timeout"
         elif result.diagnostics.get("memory_semantic_gate_rejected"):
             result.status = "semantic_failed"
-        elif result.diagnostics.get("memory_scope_filtered") and not result.memories:
+        elif result.diagnostics.get("memory_scope_filtered") and not injected:
             result.status = "scope_filtered"
         status_reader = getattr(store, "embedding_status", None)
         if callable(status_reader) and status_reader().get("error_code") == "api_failed":
@@ -295,7 +361,10 @@ async def prepare_memory_context(*, runtime: Any, event: Any, bot: Any,
     except Exception as exc:
         result.status = "api_failed"
         result.diagnostics["error_type"] = type(exc).__name__
-    result.diagnostics.update(status=result.status, injected_count=len(result.memories),
+    from .account_link_context import filter_authorized_contexts
+    result.linked_accounts = await filter_authorized_contexts(runtime, result.linked_accounts)
+    injected_count = len(result.memories) + sum(len(context.memories) for context in result.linked_accounts if context.source.active())
+    result.diagnostics.update(status=result.status, injected_count=injected_count,
                               state_count=len(result.states), elapsed_ms=round((time.monotonic()-started)*1000))
     try:
         from .reply_turn_trace import record_stage

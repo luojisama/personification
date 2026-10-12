@@ -211,6 +211,8 @@ def build_plugin_runtime(
     md_to_pic: Any,
 ) -> PluginRuntimeBundle:
     data_store = init_data_store(plugin_config, logger=logger)
+    from .account_links import AccountLinkService
+    account_link_service = AccountLinkService(data_store)
     logger = wrap_plugin_logger(logger, config=plugin_config)
     maybe_prune_plugin_logs(config=plugin_config, force=True)
     init_schedule_config(plugin_config)
@@ -497,24 +499,8 @@ def build_plugin_runtime(
         cooldown=max(0, int(getattr(plugin_config, "personification_profile_scope_cooldown_seconds", 600))),
     )
     persona_store.bind_profile_refreshers(scoped_profile_service, private_profile_refresh)
-    tool_registry, inner_state_updater, agent_tool_caller, lite_tool_caller = build_agent_runtime_deps(
-        plugin_config=plugin_config,
-        logger=logger,
-        get_now=get_current_local_time,
-        persona_store=persona_store,
-        vision_caller=vision_caller,
-        scheduler=scheduler,
-        data_dir=data_dir,
-        get_bots=get_bots,
-        knowledge_store=knowledge_store,
-        memory_store=memory_store,
-        profile_service=profile_service,
-        memory_curator=memory_curator,
-        background_intelligence=background_intelligence,
-        qq_outbound_ledger=qq_outbound_ledger,
-    )
     policy_classifier = PolicyClassifier(
-        lite_tool_caller or agent_tool_caller,
+        None,
         logger=logger,
     )
     user_policy_service = UserPolicyService(
@@ -537,11 +523,32 @@ def build_plugin_runtime(
         logger=logger,
         legacy_block_checker=_legacy_policy_blocked,
     )
+    tool_registry, inner_state_updater, agent_tool_caller, lite_tool_caller = build_agent_runtime_deps(
+        plugin_config=plugin_config,
+        logger=logger,
+        get_now=get_current_local_time,
+        persona_store=persona_store,
+        vision_caller=vision_caller,
+        scheduler=scheduler,
+        data_dir=data_dir,
+        get_bots=get_bots,
+        knowledge_store=knowledge_store,
+        memory_store=memory_store,
+        profile_service=profile_service,
+        memory_curator=memory_curator,
+        background_intelligence=background_intelligence,
+        qq_outbound_ledger=qq_outbound_ledger,
+        account_link_service=account_link_service,
+        user_policy_gate=qq_user_policy_gate,
+        qq_user_policy_gate=qq_user_policy_gate,
+    )
+    policy_classifier.caller = lite_tool_caller or agent_tool_caller
     qzone_social_service.user_policy_authorizer = qq_user_policy_gate.current_authorization
     if tool_registry is not None:
         tool_registry.memory_context_provider = build_surface_memory_provider(config=plugin_config,
             store=memory_store, caller=lite_tool_caller or agent_tool_caller,
-            policy=qq_user_policy_gate, profiles=scoped_profile_service)
+            policy=qq_user_policy_gate, profiles=scoped_profile_service,
+            account_links=account_link_service, favorability_service=favorability_service)
     tts_service = TtsService(
         plugin_config=plugin_config,
         logger=logger,
@@ -744,6 +751,8 @@ def build_plugin_runtime(
             memory_store=memory_store,
             profile_service=profile_service,
             scoped_profile_service=scoped_profile_service,
+            account_link_service=account_link_service,
+            favorability_service=favorability_service,
             memory_curator=memory_curator,
             background_intelligence=background_intelligence,
             user_policy_gate=qq_user_policy_gate,
@@ -829,12 +838,16 @@ def build_plugin_runtime(
                 memory_curator=memory_curator,
                 background_intelligence=background_intelligence,
                 qq_outbound_ledger=qq_outbound_ledger,
+                account_link_service=account_link_service,
+                user_policy_gate=qq_user_policy_gate,
+                qq_user_policy_gate=qq_user_policy_gate,
             )
             for tool in extension_tools:
                 if candidate_registry.get(tool.name) is None:
                     candidate_registry.register(tool)
             candidate_registry.memory_context_provider = build_surface_memory_provider(config=plugin_config,
-                store=memory_store, caller=new_agent_tool_caller, policy=qq_user_policy_gate, profiles=scoped_profile_service)
+                store=memory_store, caller=new_agent_tool_caller, policy=qq_user_policy_gate, profiles=scoped_profile_service,
+                account_links=account_link_service, favorability_service=favorability_service)
         yaml_response_processor = build_yaml_response_processor(
             get_current_time=get_current_local_time,
             format_time_context=format_time_context,
@@ -960,6 +973,7 @@ def build_plugin_runtime(
         memory_store=memory_store,
         profile_service=profile_service,
         scoped_profile_service=scoped_profile_service,
+        account_link_service=account_link_service,
         private_profile_refresh=private_profile_refresh,
         memory_curator=memory_curator,
         memory_decay_scheduler=memory_decay_scheduler,

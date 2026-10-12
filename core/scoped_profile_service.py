@@ -76,6 +76,18 @@ def _normalize_scope_id(value: Any, *, kind: str) -> str:
     return text
 
 
+def _normalize_v3_user_id(value: Any, *, platform: str, bot_id: str) -> str:
+    """Accept Telegram's existing scoped transport identity without aliasing it."""
+    text = str(value or "").strip()
+    if platform == "telegram":
+        from .account_links import telegram_user_scope
+        match = re.fullmatch(r"p8:telegramb([0-9]+):([1-9][0-9]*):u([0-9]+):([1-9][0-9]*)", text)
+        if match and (bot_id, text) == telegram_user_scope(match[2], match[4]):
+            return text
+        raise ValueError("invalid user_id")
+    return _normalize_scope_id(text, kind="user")
+
+
 def _extract_json_object(raw: Any) -> dict[str, Any] | None:
     text = str(raw or "").strip()
     if not text or text.startswith("```"):
@@ -209,9 +221,10 @@ class ScopedProfileService:
     ) -> dict[str, Any] | None:
         """Read a per-Bot document.  Empty/unknown identity never falls back to legacy."""
         identity = (str(platform or "").strip(), str(bot_id or "").strip())
-        gid, uid = str(group_id or "").strip(), _normalize_scope_id(user_id, kind="user")
+        gid = str(group_id or "").strip()
         if not all(identity) or "unknown" in identity:
             return None
+        uid = _normalize_v3_user_id(user_id, platform=identity[0], bot_id=identity[1])
         with connect_sync(self.db_path) as conn:
             self._ensure_v3_table(conn)
             row = conn.execute(
@@ -236,7 +249,7 @@ class ScopedProfileService:
         # v3 uses an empty group id for source-restricted private documents;
         # it is never a legacy/global fallback key.
         gid = "" if str(group_id or "").strip() == "" else _normalize_scope_id(group_id, kind="group")
-        uid = _normalize_scope_id(user_id, kind="user")
+        uid = _normalize_v3_user_id(user_id, platform=platform_s, bot_id=bot_s)
         if not platform_s or not bot_s or "unknown" in {platform_s, bot_s}:
             raise ValueError("platform and bot_id are required for v3 scoped profile")
         now = float(self._clock())

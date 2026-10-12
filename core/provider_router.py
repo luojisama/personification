@@ -915,7 +915,9 @@ async def _call_provider_once(
     use_builtin_search: bool = False,
 ) -> ToolCallerResponse:
     from .generation_fence import assert_current_generation
+    from .llm_context import assert_llm_sources_current
     assert_current_generation()
+    assert_llm_sources_current()
     caller = _build_provider_caller(provider, plugin_config)
     start_ts = time.monotonic()
     success = False
@@ -935,6 +937,7 @@ async def _call_provider_once(
             use_builtin_search=_should_use_builtin_search(provider, use_builtin_search),
         )
         assert_current_generation()
+        assert_llm_sources_current()
         # vision_unavailable 算业务失败（影响 success_rate），让后续真正能识图的
         # provider 自然排前面；error_kind 标 vision_unavailable 便于诊断
         safety_issue = detect_route_safety_issue(response)

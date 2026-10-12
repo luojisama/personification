@@ -394,6 +394,11 @@ async def _init_personification_runtime() -> None:
         private_message_event_cls=PrivateMessageEvent, poke_event_cls=PokeNotifyEvent,
         logger=logger, plugin_config=plugin_config, run_buffer_timer=_telegram_buffer_timer,
     ))
+    from .handlers.account_link_commands import register_account_link_commands
+    matcher_handles.update(register_account_link_commands(
+        plugin_config=plugin_config, get_bots=get_bots,
+        service=runtime_bundle.account_link_service,
+    ))
     globals().update(matcher_handles)
 
     if runtime_bundle.persona_store is not None:

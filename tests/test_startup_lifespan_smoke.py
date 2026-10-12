@@ -246,7 +246,7 @@ runtime = SimpleNamespace(agent_tool_caller=None, lite_tool_caller=None, vision_
 bundle = SimpleNamespace(
     personification_rule=noop, poke_rule=noop, poke_notice_rule=noop, msg_buffer={},
     persona_store=None, private_profile_refresh=None, scoped_profile_service=None,
-    tool_registry=None, memory_store=None, profile_service=None, memory_curator=None,
+    tool_registry=None, memory_store=None, profile_service=None, memory_curator=None, account_link_service=object(),
     background_intelligence=None, qq_outbound_ledger=None, peer_bot_coordinator=None,
     peer_bot_observer=None, favorability_service=None, reply_processor_deps=SimpleNamespace(runtime=runtime),
     _get_whitelisted_groups=lambda: [], load_prompt=noop,
@@ -306,7 +306,7 @@ async def main():
     assert Path(config_info["path"]).resolve() == (data_dir / "env.json").resolve()
     assert set(config_info["imported_fields"]) <= {"personification_data_dir", "personification_favorability_attitudes"}
     assert len(events) >= 40 and {item.kind for item in events} == {"message", "notice", "command"}
-    assert {"reply_matcher", "record_msg_matcher", "approve_login"} <= plugin.matcher_handles.keys()
+    assert {"reply_matcher", "record_msg_matcher", "approve_login", "account_link_commands", "account_link_edited_guard"} <= plugin.matcher_handles.keys()
 
     # Exercise the real restored-task callback, including both outbound modes.
     # A typed native Telegram Bot must never receive QQ friend/send APIs.

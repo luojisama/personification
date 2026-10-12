@@ -63,11 +63,26 @@ async def recall_memory(
         **recall_kwargs,
         mode=str(mode or "auto"),
     )
+    from plugin.personification.core.services.agent_runtime import (
+        active_linked_tool_evidence, collect_linked_tool_evidence,
+    )
+
+    own_scope = {key: value for key, value in recall_kwargs.items() if key != "context_type"}
+    memories = [{**item, "source": "current_user_memory", "source_scope": own_scope} for item in memories]
+    shared = await collect_linked_tool_evidence(
+        runtime, request_scope, query=str(query or ""), scope=str(scope or "auto"),
+        mode=str(mode or "auto"), limit=32,
+    )
     background_intelligence = getattr(runtime, "background_intelligence", None)
     if background_intelligence is not None:
+        # Reinforcement stays with the current actor's existing memory lane.
         background_intelligence.schedule_recall_reinforcement(
             [str(item.get("memory_id", "") or "") for item in memories]
         )
+    # Recheck after every asynchronous source read and local scheduling callback.
+    memories.extend(await active_linked_tool_evidence(runtime, shared))
+    memories.sort(key=lambda item: -float(item.get("score", 0) or 0))
+    memories = memories[:32]
     payload = {
         "query": str(query or ""),
         "scope": str(scope or "auto"),
@@ -99,6 +114,7 @@ def build_memory_recall_tool(runtime: Any) -> AgentTool:
         description=(
             "回忆近期聊过的情节、人物印象、群聊上下文和长期主题。"
             "适合“上次聊到哪了”“你还记得吗”“这个人在这个群里平时怎么聊”这类场景。"
+            "私聊也查询已验证绑定账号的私有记忆和经历，逐条标明原平台来源；群聊不共享绑定侧内容。"
         ),
         parameters={
             "type": "object",

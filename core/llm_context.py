@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import contextvars
-from typing import Any
+import asyncio
+from typing import Any, Callable
 
 
 _LLM_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
@@ -56,6 +57,30 @@ def current_llm_context() -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+class LLMSourceAuthorizationRevoked(asyncio.CancelledError):
+    """Discard a draft whose previously authorized private source was revoked."""
+
+
+def register_llm_source_guard(key: str, check: Callable[[], bool]) -> None:
+    """Bind trusted local source checks to this turn, including copied tasks."""
+    state = current_llm_context().get("turn_state")
+    if isinstance(state, dict):
+        state.setdefault("source_guards", {})[key] = check
+
+
+def assert_llm_sources_current() -> None:
+    """Check immediately before external use; cancellation must not retry."""
+    state = current_llm_context().get("turn_state")
+    guards = state.get("source_guards", {}) if isinstance(state, dict) else {}
+    for check in tuple(guards.values()):
+        try:
+            allowed = check() is True
+        except Exception:
+            allowed = False
+        if not allowed:
+            raise LLMSourceAuthorizationRevoked("linked account source authorization revoked")
+
+
 def set_llm_output_limit(max_output_tokens: int) -> contextvars.Token:
     """Bind a route's output ceiling to this request, without mutating callers."""
     value = dict(current_llm_context())
@@ -98,6 +123,7 @@ def wire_budget_remaining() -> int | None:
 
 def reserve_wire_attempt() -> None:
     """Reserve one actual provider generation request before dispatch."""
+    assert_llm_sources_current()
     budget = current_llm_context().get(_WIRE_BUDGET)
     if not isinstance(budget, dict):
         return
@@ -171,6 +197,9 @@ __all__ = [
     "set_llm_context",
     "reset_llm_context",
     "current_llm_context",
+    "register_llm_source_guard",
+    "assert_llm_sources_current",
+    "LLMSourceAuthorizationRevoked",
     "use_single_attempt_retry_policy",
     "set_wire_retry_disabled",
     "set_wire_budget",

@@ -1467,7 +1467,9 @@ class RoutedToolCaller:
     ) -> ToolCallerResponse:
         started_at = time.monotonic()
         from .generation_fence import assert_current_generation
+        from .llm_context import assert_llm_sources_current
         assert_current_generation()
+        assert_llm_sources_current()
         response: ToolCallerResponse | None = None
         error: BaseException | None = None
         cancelled = False
@@ -1507,12 +1509,14 @@ class RoutedToolCaller:
                 else max(1, int(descriptor.get("max_output_tokens") or 32_768))
             )
             assert_current_generation()
+            assert_llm_sources_current()
             response = await caller.chat_with_tools(
                 self._strip_route_markers(bounded_messages),
                 wire_tools,
                 use_builtin_search,
             )
             assert_current_generation()
+            assert_llm_sources_current()
             return response
         except asyncio.CancelledError:
             cancelled = True
@@ -1566,10 +1570,13 @@ class RoutedToolCaller:
             ((), {"messages": messages, "tools": tools}),
             ((messages, tools), {}),
         ])
+        from .llm_context import assert_llm_sources_current
+        assert_llm_sources_current()
         try:
             value = counter(*args, **kwargs)
             if inspect.isawaitable(value):
                 value = await value
+            assert_llm_sources_current()
         except Exception as exc:
             if not _is_provider_failure(exc):
                 raise

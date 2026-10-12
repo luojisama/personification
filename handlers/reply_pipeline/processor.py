@@ -475,6 +475,8 @@ class RuntimeDeps:
     memory_store: Any = None
     profile_service: Any = None
     scoped_profile_service: Any = None
+    account_link_service: Any = None
+    favorability_service: Any = None
     memory_curator: Any = None
     background_intelligence: Any = None
     user_policy_gate: Any = None
@@ -723,8 +725,16 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
                     hint="仅记录结构化、低基数决策；不记录用户原文或隐藏推理。",
                 )
         await _process_response_logic_impl(bot, event, state, deps)
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
         cancelled = True
+        from ...core.llm_context import LLMSourceAuthorizationRevoked
+        if isinstance(exc, LLMSourceAuthorizationRevoked) and trace_mod is not None and trace_id:
+            try:
+                trace_mod.finish_trace(trace_id=trace_id, outcome="cancelled",
+                    diagnosis_code="account_link_authorization_revoked",
+                    detail={"reason": "绑定已解除或来源权限已撤销，停止使用本轮共享资料"})
+            except Exception as diagnostic_error:
+                _LOGGER.warning("reply_exception_diagnostic_failed operation=source_revocation error_type=%s", type(diagnostic_error).__name__)
         raise
     except FinishedException:
         if trace_mod is not None and trace_id and not cancelled:

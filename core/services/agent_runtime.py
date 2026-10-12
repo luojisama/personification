@@ -63,8 +63,16 @@ def build_agent_tool_registry(
     memory_curator: Any = None,
     background_intelligence: Any = None,
     qq_outbound_ledger: Any = None,
+    account_link_service: Any = None,
+    user_policy_gate: Any = None,
+    qq_user_policy_gate: Any = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
+    memory_runtime = SimpleNamespace(
+        plugin_config=plugin_config, memory_store=memory_store, logger=logger,
+        account_link_service=account_link_service, user_policy_gate=user_policy_gate,
+        qq_user_policy_gate=qq_user_policy_gate,
+    )
     if memory_store is not None:
         from ..surface_memory import build_surface_memory_provider
         registry.memory_context_provider = build_surface_memory_provider(config=plugin_config, store=memory_store, caller=tool_caller)
@@ -91,6 +99,9 @@ def build_agent_tool_registry(
             memory_curator=memory_curator,
             background_intelligence=background_intelligence,
         )
+        runtime.account_link_service = account_link_service
+        runtime.user_policy_gate = user_policy_gate
+        runtime.qq_user_policy_gate = qq_user_policy_gate
         try:
             load_builtin_skillpacks_sync(runtime=runtime, registry=registry)
         except Exception as e:
@@ -133,6 +144,9 @@ def build_agent_tool_registry(
             memory_curator=memory_curator,
             background_intelligence=background_intelligence,
         )
+        legacy_runtime.account_link_service = account_link_service
+        legacy_runtime.user_policy_gate = user_policy_gate
+        legacy_runtime.qq_user_policy_gate = qq_user_policy_gate
 
         registry.register(
             build_web_search_tool(
@@ -217,13 +231,13 @@ def build_agent_tool_registry(
 
     if memory_store is not None and bool(getattr(plugin_config, "personification_memory_enabled", True)):
         registry.register(
-            _build_recall_user_memory_tool(memory_store, plugin_config, logger)
+            _build_recall_user_memory_tool(memory_store, plugin_config, logger, runtime=memory_runtime)
         )
         registry.register(
             _build_recall_group_memory_tool(memory_store, plugin_config, logger)
         )
         registry.register(
-            _build_search_conversation_history_tool(memory_store, plugin_config, logger)
+            _build_search_conversation_history_tool(memory_store, plugin_config, logger, runtime=memory_runtime)
         )
         if bool(getattr(plugin_config, "personification_agent_memory_write_enabled", True)):
             registry.register(
@@ -381,6 +395,9 @@ def build_agent_tool_registry(
         memory_curator=memory_curator,
         background_intelligence=background_intelligence,
     )
+    generated_runtime.account_link_service = account_link_service
+    generated_runtime.user_policy_gate = user_policy_gate
+    generated_runtime.qq_user_policy_gate = qq_user_policy_gate
     register_generated_skills(registry=registry, runtime=generated_runtime)
     apply_tool_metadata_defaults(registry)
     return registry
@@ -493,6 +510,9 @@ def _format_memory_tool_items(items: list[dict[str, Any]], *, limit: int) -> lis
                 "tier": str(item.get("tier", "") or ""),
                 "score": _memory_float(item.get("score", 0), default=0.0, minimum=-100.0, maximum=100.0),
                 "why_relevant": str(item.get("why_relevant", "") or ""),
+                **({"source": str(item["source"])} if item.get("source") else {}),
+                **({"source_scope": dict(item["source_scope"])} if isinstance(item.get("source_scope"), dict) else {}),
+                **({"trust": "untrusted_data_only", "usage": "reference_only"} if item.get("source") == "linked_private_memory" else {}),
             }
         )
     return formatted
@@ -502,7 +522,78 @@ def _memory_tools_enabled(memory_store: Any, plugin_config: Any) -> bool:
     return memory_tools_enabled(plugin_config=plugin_config, memory_store=memory_store)
 
 
-def _build_recall_user_memory_tool(memory_store: Any, plugin_config: Any, logger: Any) -> AgentTool:
+async def collect_linked_tool_evidence(
+    runtime: Any, request_scope: MemoryRequestScope, *, query: str, limit: int,
+    mode: str = "auto", scope: str = "auto", history: bool = False, days: int = 30,
+) -> list[tuple[Any, list[dict[str, Any]]]]:
+    """Reuse link capabilities; model arguments select content, never identity."""
+    from ..account_link_context import (
+        read_linked_experiences, read_linked_history, recall_linked_memories, resolve_linked_sources,
+    )
+
+    if runtime is None or not request_scope.can_recall or request_scope.group_id:
+        return []
+    purpose = str(current_llm_context().get("purpose") or "")
+    surface = "chat" if purpose in {"reply", "chat"} else purpose or "unknown"
+    sources = resolve_linked_sources(runtime, request_scope.actor_recall_kwargs(), surface=surface)
+    batches: list[tuple[Any, list[dict[str, Any]]]] = []
+    for source in sources:
+        if history:
+            from ..embedding_index import normalize_text
+            from ..text_memory_index import tokens as tokenize
+
+            terms = tuple(sorted(set(tokenize(normalize_text(query)))))[:8]
+            rows = await read_linked_history(runtime, source, limit=min(48, limit), days=days, query_terms=terms)
+        else:
+            rows = await recall_linked_memories(runtime, source, query=query, limit=limit, mode=mode, scope=scope)
+            from ..embedding_index import normalize_text
+            from ..search_ranker import rank_memory_payload
+            from ..text_memory_index import tokens as tokenize
+
+            terms = set(tokenize(normalize_text(query)))
+            for item in await read_linked_experiences(runtime, source, limit=32):
+                # Explicit queries reuse the palace lexical projection and ranker.
+                # Empty or unrelated queries cannot dump all source-backed cards.
+                overlap = terms & set(tokenize(normalize_text(item.get("summary", ""))))
+                card = {**item, "palace_zone": "recent_episode"}
+                if not overlap or not runtime.memory_store._scope_matches(card, scope):
+                    continue
+                card["score"] = rank_memory_payload(
+                    card, query=query, base_score=len(overlap) / max(1, len(terms)),
+                    requested_group_id="", requested_user_id=source.user_id,
+                )
+                card["why_relevant"] = "查询词匹配的绑定账号经历卡"
+                rows.append(card)
+        if rows:
+            batches.append((source, rows))
+    return batches
+
+
+async def active_linked_tool_evidence(runtime: Any, batches: list[tuple[Any, list[dict[str, Any]]]], *, history: bool = False) -> list[dict[str, Any]]:
+    """Revalidate after all asynchronous reads, then label exact source data."""
+    from ..account_link_context import bind_linked_source_guard, source_authorized, source_authorized_now
+
+    if runtime is None or not memory_tools_enabled(
+        plugin_config=getattr(runtime, "plugin_config", None), memory_store=getattr(runtime, "memory_store", None),
+    ):
+        return []
+    authorized = []
+    gate = getattr(runtime, "user_policy_gate", None) or getattr(runtime, "qq_user_policy_gate", None)
+    for source, rows in batches:
+        if await source_authorized(runtime, source):
+            authorized.append((source, rows))
+    result = []
+    for source, rows in authorized:
+        if not source_authorized_now(gate, source):
+            continue
+        bind_linked_source_guard(gate, source)
+        result.extend({**row, "source_scope": source.metadata(),
+                       "source": "linked_archived_session_evidence" if history else "linked_private_memory"}
+                      for row in rows)
+    return result
+
+
+def _build_recall_user_memory_tool(memory_store: Any, plugin_config: Any, logger: Any, *, runtime: Any = None) -> AgentTool:
     import json as _json
 
     async def _handler(query: str, days: int = 30, limit: int = 12) -> str:
@@ -526,6 +617,13 @@ def _build_recall_user_memory_tool(memory_store: Any, plugin_config: Any, logger
             logger.debug(f"[recall_user_memory] recall failed: {exc}")
             memories = []
         memories = _filter_memories_by_days(memories, days=resolved_days)
+        memories = [{**item, "source": "current_user_memory", "source_scope": {
+            key: value for key, value in request_scope.actor_recall_kwargs().items() if key != "context_type"
+        }} for item in memories]
+        shared = await collect_linked_tool_evidence(runtime, request_scope, query=query, limit=resolved_limit)
+        shared_items = await active_linked_tool_evidence(runtime, shared)
+        memories.extend(_filter_memories_by_days(shared_items, days=resolved_days))
+        memories.sort(key=lambda item: -_memory_float(item.get("score", 0), default=0.0, minimum=-100.0, maximum=100.0))
         items = _format_memory_tool_items(memories, limit=resolved_limit)
         return _json.dumps({"query": query, "days": resolved_days, "memories": items}, ensure_ascii=False)
 
@@ -534,6 +632,7 @@ def _build_recall_user_memory_tool(memory_store: Any, plugin_config: Any, logger
         description=(
             "召回当前用户的长期记忆、画像事实、跨会话偏好和过往经历。"
             "适合需要把当前对话和这个用户以前说过/确认过的内容接起来时调用；"
+            "私聊中同时查询已验证绑定账号的私有记忆，逐条标明原平台来源；群聊不共享绑定侧记忆。"
             "返回结构化条目，供你判断是否采用。"
         ),
         parameters={
@@ -599,12 +698,15 @@ def _build_recall_group_memory_tool(memory_store: Any, plugin_config: Any, logge
     )
 
 
-def _build_search_conversation_history_tool(memory_store: Any, plugin_config: Any, logger: Any) -> AgentTool:
+def _build_search_conversation_history_tool(memory_store: Any, plugin_config: Any, logger: Any, *, runtime: Any = None) -> AgentTool:
     """Search raw, archived session evidence within the current trusted scope."""
     import json as _json
 
     async def _handler(query: str, days: int = 30, limit: int = 12) -> str:
         scope = MemoryRequestScope.from_runtime(plugin_config=plugin_config, memory_store=memory_store)
+        resolved_limit = _memory_tool_limit(limit, default=12)
+        resolved_days = _memory_days(days, default=30)
+        searched_limit = min(resolved_limit * 12, 384)
         # Raw archive is especially sensitive: refuse legacy/unknown Bot
         # identity rather than treating a group-only session key as portable.
         if not scope.can_recall or not scope.platform or not scope.bot_id:
@@ -618,8 +720,8 @@ def _build_search_conversation_history_tool(memory_store: Any, plugin_config: An
             rows = await asyncio.to_thread(
                 session_store.get_recent_session_candidates,
                 session_id,
-                limit=max(1, min(int(limit or 12) * 12, 384)),
-                days=max(0, min(int(days), 3650)),
+                limit=searched_limit,
+                days=resolved_days,
                 platform=scope.platform,
                 bot_id=scope.bot_id,
                 query_terms=tuple(sorted(set(tokenize(normalize_text(query)))))[:8],
@@ -630,6 +732,12 @@ def _build_search_conversation_history_tool(memory_store: Any, plugin_config: An
         from ..embedding_index import normalize_text
         from ..text_memory_index import tokens as tokenize
         tokens = set(tokenize(normalize_text(query)))
+        own_scope = {key: value for key, value in scope.actor_recall_kwargs().items() if key != "context_type"}
+        rows = [{**row, "source_scope": own_scope, "source": "archived_session_evidence"} for row in rows if isinstance(row, dict)]
+        own_count = len(rows)
+        shared = await collect_linked_tool_evidence(runtime, scope, query=str(query or ""), limit=searched_limit, history=True, days=resolved_days)
+        shared_rows = await active_linked_tool_evidence(runtime, shared, history=True)
+        rows.extend(shared_rows)
         scored: list[tuple[int, dict[str, Any]]] = []
         for row in rows:
             if not isinstance(row, dict) or bool(row.get("is_summary")):
@@ -641,12 +749,12 @@ def _build_search_conversation_history_tool(memory_store: Any, plugin_config: An
                 continue
             scored.append((overlap, row))
         scored.sort(key=lambda pair: (-pair[0], float(pair[1].get("timestamp", 0) or 0), int(pair[1].get("id", 0) or 0)))
-        items = [{"id": int(row.get("id", 0) or 0), "time": float(row.get("timestamp", 0) or 0), "role": str(row.get("role", "") or ""), "speaker": str(row.get("speaker", "") or ""), "content": str(row.get("content", "") or "")[:600], "source": "archived_session_evidence"} for _, row in scored[:max(1, min(int(limit or 12), 32))]]
-        return _json.dumps({"query": str(query or ""), "days": int(days), "messages": items, "searched_limit": max(1, min(int(limit or 12) * 12, 384)), "truncated": len(rows) >= max(1, min(int(limit or 12) * 12, 384))}, ensure_ascii=False)
+        items = [{"id": int(row.get("id", 0) or 0), "time": float(row.get("timestamp", 0) or 0), "role": str(row.get("role", "") or ""), "speaker": str(row.get("speaker", "") or ""), "content": str(row.get("content", "") or "")[:600], "source": str(row["source"]), "source_scope": row["source_scope"], **({"trust": "untrusted_data_only", "usage": "reference_only"} if row["source"] == "linked_archived_session_evidence" else {})} for _, row in scored[:resolved_limit]]
+        return _json.dumps({"query": str(query or ""), "days": resolved_days, "messages": items, "searched_limit": searched_limit, "truncated": own_count >= searched_limit or any(len(batch) >= min(48, searched_limit) for _, batch in shared)}, ensure_ascii=False)
 
     return AgentTool(
         name="search_conversation_history",
-        description="按关键词查找当前私聊或当前群的原始、已压缩归档对话证据。默认近30天；days=0 扩展当前会话的有界归档窗口。不能查询其他用户、群或身份不明的Bot会话。",
+        description="按关键词查找当前私聊或当前群的原始、已压缩归档对话证据。私聊中包含已验证绑定账号的私聊历史，标明原平台和发言者。默认近30天；days=0 扩展有界归档窗口。群聊不共享绑定侧历史，不能查询未绑定用户或身份不明的Bot会话。",
         parameters={"type": "object", "properties": {"query": {"type": "string", "description": "要找的事实、原话或主题"}, "days": {"type": "integer", "description": "默认30，0表示当前会话全部归档"}, "limit": {"type": "integer", "description": "返回条数，最大32"}}, "required": ["query"]},
         handler=_handler, local=True, enabled=lambda: _memory_tools_enabled(memory_store, plugin_config),
     )
@@ -969,7 +1077,10 @@ def build_agent_runtime_deps(
     memory_curator: Any = None,
     background_intelligence: Any = None,
     qq_outbound_ledger: Any = None,
- ) -> tuple[Any, Any, Any, Any]:
+    account_link_service: Any = None,
+    user_policy_gate: Any = None,
+    qq_user_policy_gate: Any = None,
+) -> tuple[Any, Any, Any, Any]:
     compress_tool_caller = _build_compress_tool_caller(plugin_config, logger)
     init_session_store(plugin_config, compress_tool_caller)
     init_utils_config(plugin_config)
@@ -995,6 +1106,9 @@ def build_agent_runtime_deps(
         memory_curator=memory_curator,
         background_intelligence=background_intelligence,
         qq_outbound_ledger=qq_outbound_ledger,
+        account_link_service=account_link_service,
+        user_policy_gate=user_policy_gate,
+        qq_user_policy_gate=qq_user_policy_gate,
     )
     inner_state_updater = build_inner_state_updater(
         plugin_config=plugin_config,
