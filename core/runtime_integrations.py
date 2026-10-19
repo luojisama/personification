@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from .favorability import FavorabilityService, build_external_sign_in_adapter
+from .favorability import ExternalFavorabilityAdapter, FavorabilityService, build_external_sign_in_adapter, level_name_for_score
 
 
 class FavorabilityEnabledGate:
@@ -39,7 +39,18 @@ def build_sign_in_fallbacks(plugin_config: Any = None, logger: Any = None) -> tu
             app=app,
         )
         profile_backend.load_document()
-    external = build_external_sign_in_adapter()
+    # Importing sign_in registers its runtime jobs. Shared/official deployments
+    # must never import it, even when the adapter would later be ignored.
+    if profile_backend is not None or bool(getattr(plugin_config, 'personification_qq_official_enabled', False)):
+        external = ExternalFavorabilityAdapter(
+            available=False,
+            get_user_data=lambda _uid: {},
+            update_user_data=lambda *_a, **_k: None,
+            load_data=lambda: {},
+            get_level_name=level_name_for_score,
+        )
+    else:
+        external = build_external_sign_in_adapter()
     service = FavorabilityService(
         plugin_config=plugin_config,
         external=external,
