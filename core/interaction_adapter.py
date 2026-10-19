@@ -296,6 +296,9 @@ class SatoriInteractionAdapter:
 
 def adapter_for_event(event: Any) -> InteractionAdapter | None:
     module = type(event).__module__.lower()
+    if module.startswith('nonebot.adapters.qq.'):
+        from .qq_interaction import QQOfficialInteractionAdapter
+        return QQOfficialInteractionAdapter()
     if ".telegram" in module:
         from .telegram_interaction import TelegramInteractionAdapter
         return TelegramInteractionAdapter()

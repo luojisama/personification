@@ -9,7 +9,7 @@ from typing import Any, Awaitable, Callable, Dict, List
 
 from nonebot.exception import FinishedException
 from ...core.quality_variant import relaxed_style
-from ...core.telegram_tool_policy import is_telegram_context, filter_telegram_tools
+from ...core.telegram_tool_policy import is_restricted_transport_context, filter_platform_tools
 
 from ...agent.inner_state import get_personification_data_dir
 from ...agent.runtime.planner import (
@@ -1993,7 +1993,7 @@ async def process_yaml_response_logic(
             agent_tool_registry = ToolRegistry()
         else:
             agent_tool_registry = _clone_tool_registry(tool_registry)
-            if not is_telegram_context(event):
+            if not is_restricted_transport_context(event):
                 register_qq_recall_tool(
                     agent_tool_registry,
                     executor=executor,
@@ -2110,7 +2110,7 @@ async def process_yaml_response_logic(
                     )
             except Exception as exc:
                 logger.debug(f"拟人插件 (YAML)：注册本地表情包发送工具失败: {exc}")
-        filter_telegram_tools(agent_tool_registry, event)
+        filter_platform_tools(agent_tool_registry, event)
         image_ctx_token = set_current_image_context(
             tool_image_urls,
             input_text,

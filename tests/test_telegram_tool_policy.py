@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import pytest
 from types import SimpleNamespace
 
 from ._loader import load_personification_module
@@ -31,7 +32,8 @@ def test_filtered_clone_keeps_platform_neutral_tools_and_qq_base():
     assert policy.filter_telegram_tools(base, SimpleNamespace(platform="onebot")) is base
 
 
-def test_yaml_actual_agent_schemas_exclude_qq_tools(monkeypatch):
+@pytest.mark.parametrize('platform', ['telegram', 'qq_official'])
+def test_yaml_actual_agent_schemas_exclude_qq_tools(monkeypatch, platform):
     from . import test_yaml_dialogue_provenance_replay as replay
     captured = []
     async def agent(**kwargs):
@@ -44,7 +46,7 @@ def test_yaml_actual_agent_schemas_exclude_qq_tools(monkeypatch):
         monkeypatch.setattr(replay.yaml_processor, name, forbidden)
     monkeypatch.setattr(replay.yaml_processor, "build_send_image_tools", lambda *_a: [])
     event = replay._event(text="hello", message_id="tg")
-    event.platform = "telegram"
+    event.platform = platform
     async def review(*_a, **_k): return '{"action":"accept","persona_verdict":"consistent","flags":[]}'
     def configure(config):
         config.personification_agent_enabled = True
@@ -54,7 +56,8 @@ def test_yaml_actual_agent_schemas_exclude_qq_tools(monkeypatch):
     assert captured == [{"web_search", "memory_search", "send_image"}]
 
 
-def test_normal_actual_agent_schemas_exclude_qq_tools(monkeypatch, tmp_path):
+@pytest.mark.parametrize('platform', ['telegram', 'qq_official'])
+def test_normal_actual_agent_schemas_exclude_qq_tools(monkeypatch, tmp_path, platform):
     from scripts.quality_eval import pipeline_adapter
     from .test_quality_eval_pipeline import _LoopbackCaller, _case
     from pathlib import Path
@@ -63,7 +66,7 @@ def test_normal_actual_agent_schemas_exclude_qq_tools(monkeypatch, tmp_path):
     original_clone = normal.clone_tool_registry
     def event_from(*args):
         event = original_event(*args)
-        event.platform = "telegram"
+        event.platform = platform
         return event
     def clone(_base):
         return original_clone(registry())
@@ -81,3 +84,12 @@ def test_normal_actual_agent_schemas_exclude_qq_tools(monkeypatch, tmp_path):
     finally:
         asyncio.run(db.close_db())
     assert captured == [{"web_search", "memory_search", "send_image"}]
+
+
+def test_official_qq_excludes_future_push_tasks():
+    reg = registry()
+    async def handler(**kwargs):
+        return 'unused'
+    reg.register(tools.AgentTool('create_user_task', 'task', {}, handler))
+    policy.filter_platform_tools(reg, SimpleNamespace(platform='qq_official'))
+    assert 'create_user_task' not in names(reg)

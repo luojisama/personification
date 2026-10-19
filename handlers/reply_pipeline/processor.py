@@ -626,7 +626,7 @@ async def process_response_logic(bot: Any, event: Any, state: Dict[str, Any], de
         envelope_bot_id = ""
         if isinstance(interaction_envelope, InteractionEnvelope):
             envelope_platform = str(interaction_envelope.platform or "").strip()
-            envelope_bot_id = str((interaction_envelope.bot_namespace if interaction_envelope.platform == "telegram" else interaction_envelope.bot_id) or "").strip()
+            envelope_bot_id = str((interaction_envelope.bot_namespace if interaction_envelope.platform in {"telegram", "qq_official"} else interaction_envelope.bot_id) or "").strip()
         token = set_llm_context(
             group_id=str(getattr(event, "group_id", "") or ""),
             user_id=str(getattr(event, "user_id", "") or ""),

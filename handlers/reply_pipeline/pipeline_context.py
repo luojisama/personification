@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ...core.telegram_tool_policy import is_telegram_context, filter_telegram_tools
+from ...core.telegram_tool_policy import is_restricted_transport_context, filter_platform_tools
 
 import asyncio
 import json
@@ -872,7 +872,7 @@ async def run_agent_if_enabled(
         runtime_registry = ToolRegistry()
     else:
         runtime_registry = clone_tool_registry(runtime.tool_registry)
-        if not is_telegram_context(event):
+        if not is_restricted_transport_context(event):
             register_moderation_for_turn(runtime_registry, executor=executor, state=commit_state,
                                          ordered_context=ordered_context, semantic_frame=semantic_frame)
             register_qq_recall_tool(
@@ -980,7 +980,7 @@ async def run_agent_if_enabled(
                 )
         except Exception as exc:
             runtime.logger.debug(f"拟人插件：注册本地表情包发送工具失败: {exc}")
-        if not is_telegram_context(event):
+        if not is_restricted_transport_context(event):
             friend_ids = await get_cached_friend_ids(bot, runtime.logger)
             skill_runtime = SkillRuntime(
                 plugin_config=runtime.plugin_config,
@@ -1017,7 +1017,7 @@ async def run_agent_if_enabled(
                         runtime=skill_runtime,
                     )
                 )
-    filter_telegram_tools(runtime_registry, event)
+    filter_platform_tools(runtime_registry, event)
     ack_phrase = ""
     if is_direct_mention:
         group_id = str(getattr(event, "group_id", "") or "").strip() or None

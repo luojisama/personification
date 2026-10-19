@@ -395,6 +395,18 @@ async def _init_personification_runtime() -> None:
         logger=logger, plugin_config=plugin_config, run_buffer_timer=_telegram_buffer_timer,
     ))
     from .handlers.account_link_commands import register_account_link_commands
+    if plugin_config.personification_qq_official_enabled:
+        from .handlers.qq_reply_bridge import register_qq_reply_bridge
+        matcher_handles.update(register_qq_reply_bridge(
+            personification_rule=runtime_bundle.personification_rule,
+            process_response_logic=_telegram_processor,
+            reply_processor_deps=runtime_bundle.reply_processor_deps,
+            msg_buffer=runtime_bundle.msg_buffer,
+            message_cls=Message, message_segment_cls=MessageSegment,
+            message_event_cls=MessageEvent, group_message_event_cls=GroupMessageEvent,
+            private_message_event_cls=PrivateMessageEvent, poke_event_cls=PokeNotifyEvent,
+            logger=logger, plugin_config=plugin_config, run_buffer_timer=_telegram_buffer_timer,
+        ))
     matcher_handles.update(register_account_link_commands(
         plugin_config=plugin_config, get_bots=get_bots,
         service=runtime_bundle.account_link_service,

@@ -20,10 +20,16 @@ def is_telegram_context(event: Any) -> bool:
     return str(getattr(envelope, "platform", "") or getattr(event, "platform", "")) == "telegram"
 
 
-def filter_telegram_tools(registry: Any, event: Any) -> Any:
+def is_restricted_transport_context(event: Any) -> bool:
+    envelope = getattr(event, '_personification_interaction_envelope', None)
+    return str(getattr(envelope, 'platform', '') or getattr(event, 'platform', '')) in {'telegram', 'qq_official'}
+
+
+def filter_platform_tools(registry: Any, event: Any) -> Any:
     """Filter the turn-owned clone, never mutate the shared base registry."""
-    if not is_telegram_context(event):
+    if not is_restricted_transport_context(event):
         return registry
+    platform = 'telegram' if is_telegram_context(event) else 'qq_official'
     remove = set()
     for tool in registry.all():
         name = str(tool.name)
@@ -33,8 +39,12 @@ def filter_telegram_tools(registry: Any, event: Any) -> Any:
         if (
             name in _QQ_TOOLS or "qzone" in name or name.startswith(("qq_", "send_qq_", "peer_bot_"))
             or any(tag in {"peer_bot", "qq", "qzone", "plugin_action"} for tag in tags)
-            or (isinstance(platforms, (list, tuple, set)) and "telegram" not in platforms)
+            or (isinstance(platforms, (list, tuple, set)) and platform not in platforms)
+            or (platform == 'qq_official' and name in {'create_user_task', 'cancel_user_task'})
         ):
             remove.add(name)
     registry.remove_names(remove)
     return registry
+
+
+filter_telegram_tools = filter_platform_tools  # Existing integrations retain their import.

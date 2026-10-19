@@ -561,6 +561,7 @@ class Config(BaseModel):
     personification_system_path: Optional[str] = None
 
     personification_favorability_enabled: bool = True
+    personification_qq_official_enabled: bool = False
     # Enable only after the shared-account/profile offline migration completes.
     personification_favorability_shared_enabled: bool = False
     personification_favorability_shared_db: Optional[str] = None
