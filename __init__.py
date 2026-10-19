@@ -608,6 +608,7 @@ async def _install_personification_webui() -> None:
 
 @get_driver().on_startup
 async def _restore_user_tasks() -> None:
+    from .core.qq_interaction import native_qq
     from .core.tasks_service import restore_tasks_on_startup
     from .core.qq_outbound import build_outbound_context
     from .core.services.agent_runtime import guard_scheduled_user_task_message
@@ -637,7 +638,7 @@ async def _restore_user_tasks() -> None:
             return
 
         for bot in get_bots().values():
-            if native_telegram(bot):
+            if native_telegram(bot) or native_qq(bot):
                 continue
             try:
                 friend_ids = set()

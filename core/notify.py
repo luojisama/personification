@@ -4,6 +4,7 @@ from typing import Any, Callable, Iterable
 from contextvars import ContextVar
 
 from .telegram_connections import native_telegram
+from .qq_interaction import native_qq
 from .webui_admin_identity import is_qq_identity, telegram_identity_id
 
 
@@ -45,6 +46,8 @@ async def send_to_admin(get_bots: Callable[[], dict[str, Any]], qq: str, message
     except Exception:
         bots = {}
     for bot in list(bots.values()):
+        if native_qq(bot):
+            continue
         is_telegram = native_telegram(bot)
         if is_telegram != (telegram_id is not None):
             continue

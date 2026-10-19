@@ -11,6 +11,11 @@ from .interaction_adapter import AdapterCapabilities, InteractionEnvelope, SendR
 from .turn_media import TurnMediaRef
 
 
+def native_qq(bot: Any) -> bool:
+    """Recognize official QQ bots, including application subclasses."""
+    return any(cls.__module__.startswith("nonebot.adapters.qq.") for cls in type(bot).__mro__)
+
+
 def _required(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"missing QQ field: {field}")

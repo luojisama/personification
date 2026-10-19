@@ -4,6 +4,7 @@ import uuid
 from typing import Any, Callable, Dict, Iterable
 
 from ..core.data_store import get_data_store
+from ..core.qq_interaction import native_qq
 from ..core.qzone_publish import (
     build_qzone_quota,
     coordinated_qzone_publish,
@@ -61,6 +62,8 @@ async def run_daily_group_fav_report(
             try:
                 bots = get_bots()
                 for bot in bots.values():
+                    if native_qq(bot):
+                        continue
                     try:
                         group_info = await bot.get_group_info(group_id=int(group_id))
                         group_name = group_info.get("group_name", "未知群聊")
@@ -85,6 +88,8 @@ async def run_daily_group_fav_report(
 
         bots = get_bots()
         for bot in bots.values():
+            if native_qq(bot):
+                continue
             for su in superusers:
                 try:
                     await bot.send_private_msg(user_id=int(su), message=summary)

@@ -8,6 +8,13 @@ from ._loader import load_personification_module
 m=load_personification_module("plugin.personification.handlers.qq_reply_bridge")
 interaction=load_personification_module("plugin.personification.core.qq_interaction")
 
+def test_register_uses_nonebot_event_dependency():
+    pytest.importorskip('nonebot.adapters.qq.event')
+    handles = m.register_qq_reply_bridge()
+    matcher = handles['qq_reply_matcher']
+    assert matcher.rule.checkers
+    matcher.destroy()
+
 def source():
     return NS(id="m1",content="hello",timestamp=datetime.now(timezone.utc).isoformat(),group_openid="group-A",author=NS(member_openid="000member"),_reply_seq=0)
 def image():

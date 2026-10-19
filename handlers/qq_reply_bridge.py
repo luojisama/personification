@@ -121,7 +121,7 @@ def register_qq_reply_bridge(**kwargs: Any) -> dict[str, Any]:
         raise RuntimeError('official QQ adapter required for enabled bridge') from exc
     from nonebot import on_message
     from nonebot.rule import Rule
-    async def rule(event: Any) -> bool:
+    async def rule(event: Event) -> bool:
         return isinstance(event, (C2CMessageCreateEvent, GroupAtMessageCreateEvent))
     matcher = on_message(rule=Rule(rule), priority=100, block=True)
     @matcher.handle()
