@@ -107,17 +107,18 @@ async def dispatch_qq_reply(bot: Any, event: Any, state: Any, **kwargs: Any) -> 
     get_data_store().mutate_sync('qq_official_received', claim)
     if not accepted:
         return
-    # Both accepted event classes represent private or explicitly @-directed
-    # messages; do not infer direction from nickname text.
-    object.__setattr__(event, "to_me", True)
+    # Full-stream group messages are not directed at the bot. Preserve this
+    # distinction for the normal model-driven participation policy.
+    from nonebot.adapters.qq.event import C2CMessageCreateEvent, GroupAtMessageCreateEvent
+    object.__setattr__(event, "to_me", isinstance(event, (C2CMessageCreateEvent, GroupAtMessageCreateEvent)))
     original_rule = kwargs.pop("personification_rule", None)
     if original_rule is not None:
         async def admitted(projected: Any, projected_state: dict[str, Any]) -> bool:
-            from nonebot.adapters.qq.event import GroupAtMessageCreateEvent
-            # Only the official, explicitly directed event grants scope. Keep
-            # raw openids in the envelope and all existing policy checks.
+            from nonebot.adapters.qq.event import GroupMessageCreateEvent
+            # Platform delivery grants conversation scope, not direct-address
+            # status or administrative permission. Existing policy checks stay.
             projected_state["qq_official_scope_admitted"] = bool(
-                isinstance(event, GroupAtMessageCreateEvent)
+                isinstance(event, GroupMessageCreateEvent)
                 and getattr(kwargs.get("plugin_config"), "personification_qq_official_enabled", False)
             )
             return await original_rule(projected, projected_state)
@@ -128,13 +129,13 @@ async def dispatch_qq_reply(bot: Any, event: Any, state: Any, **kwargs: Any) -> 
 
 def register_qq_reply_bridge(**kwargs: Any) -> dict[str, Any]:
     try:
-        from nonebot.adapters.qq.event import C2CMessageCreateEvent, GroupAtMessageCreateEvent
+        from nonebot.adapters.qq.event import C2CMessageCreateEvent, GroupMessageCreateEvent
     except ImportError as exc:
         raise RuntimeError('official QQ adapter required for enabled bridge') from exc
     from nonebot import on_message
     from nonebot.rule import Rule
     async def rule(event: Event) -> bool:
-        return isinstance(event, (C2CMessageCreateEvent, GroupAtMessageCreateEvent))
+        return isinstance(event, (C2CMessageCreateEvent, GroupMessageCreateEvent)) and not bool(getattr(getattr(event, 'author', None), 'bot', False))
     matcher = on_message(rule=Rule(rule), priority=100, block=True)
     @matcher.handle()
     async def handler(bot: Bot, event: Event, state: T_State):

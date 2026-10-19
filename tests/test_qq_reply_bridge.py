@@ -61,7 +61,7 @@ def test_dispatch_passes_raw_envelope(monkeypatch):
     monkeypatch.setattr(m,'get_data_store',lambda:store)
     e=source();b=NS(self_id='app')
     asyncio.run(m.dispatch_qq_reply(b,e,{}))
-    assert e.to_me and calls[0][1]['source_envelope'].conversation_id=='group-A'
+    assert not e.to_me and calls[0][1]['source_envelope'].conversation_id=='group-A'
     assert calls[0][1]['proxy_factory'] is m.QQBotProxy
     asyncio.run(m.dispatch_qq_reply(b,e,{}))
     assert len(calls)==1
@@ -106,7 +106,10 @@ def test_scope_admission_requires_real_group_at_event_and_enabled_config(monkeyp
     group = events.GroupAtMessageCreateEvent.model_validate({**base, 'group_id': 'rawgroup', 'group_openid': 'group-openid',
         'author': {'id': 'raw', 'bot': False, 'member_openid': 'member-openid', 'member_role': 'admin'}})
     private = events.C2CMessageCreateEvent.model_validate({**base, 'author': {'id': 'raw', 'user_openid': 'user-openid'}})
-    for event, enabled in [(group, True), (group, False), (private, True), (source(), True)]:
+    full = events.GroupMessageCreateEvent.model_validate({**base, 'group_id': 'rawgroup', 'group_openid': 'group-openid',
+        'author': {'id': 'raw', 'bot': False, 'member_openid': 'member-openid', 'member_role': 'member'}})
+    for event, enabled in [(group, True), (group, False), (private, True), (source(), True), (full, True)]:
         asyncio.run(m.dispatch_qq_reply(NS(self_id='app'), event, {}, personification_rule=original,
             plugin_config=NS(personification_qq_official_enabled=enabled)))
-    assert [s['qq_official_scope_admitted'] for s in seen] == [True, False, False, False]
+    assert [s['qq_official_scope_admitted'] for s in seen] == [True, False, False, False, True]
+    assert group.to_me and private.to_me and not full.to_me
