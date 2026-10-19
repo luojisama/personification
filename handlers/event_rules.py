@@ -48,6 +48,23 @@ def _is_private_event(event: Any, private_event_cls: Any) -> bool:
     return isinstance(event, private_event_cls)
 
 
+def _platform_scope_admitted(event: Any, state: T_State) -> bool:
+    platform = getattr(event, "platform", "")
+    if platform == "telegram":
+        return bool(state.get("telegram_scope_admitted"))
+    if platform == "qq_official" and state.get("qq_official_scope_admitted"):
+        return True
+    return False
+
+
+def _official_group_disabled(event: Any, state: T_State) -> bool:
+    if getattr(event, "platform", "") != "qq_official" or not state.get("qq_official_scope_admitted"):
+        return False
+    from ..utils import get_group_config
+    config = get_group_config(str(event.group_id))
+    return "enabled" in config and not bool(config["enabled"])
+
+
 def _detect_solo_speaker_follow(
     recent_msgs: list[dict[str, Any]],
     *,
@@ -139,7 +156,9 @@ async def personification_rule(
                 return False
             if _is_group_event(event, group_event_cls):
                 group_id = str(event.group_id)
-                if not (state.get("telegram_scope_admitted") and getattr(event, "platform", "") == "telegram") and not is_group_whitelisted(group_id, plugin_whitelist):
+                if _official_group_disabled(event, state):
+                    return False
+                if not _platform_scope_admitted(event, state) and not is_group_whitelisted(group_id, plugin_whitelist):
                     return False
                 if is_group_muted(group_id):
                     return False
@@ -161,7 +180,9 @@ async def personification_rule(
 
     if _is_group_event(event, group_event_cls):
         group_id = str(event.group_id)
-        if not (state.get("telegram_scope_admitted") and getattr(event, "platform", "") == "telegram") and not is_group_whitelisted(group_id, plugin_whitelist):
+        if _official_group_disabled(event, state):
+            return False
+        if not _platform_scope_admitted(event, state) and not is_group_whitelisted(group_id, plugin_whitelist):
             return False
         if is_group_muted(group_id):
             logger.debug(f"拟人插件：群 {group_id} 处于 bot 禁言期，本轮不进入回复流程。")
@@ -228,7 +249,7 @@ async def personification_rule(
         )
         adapter_direct_without_reply = bool(event.to_me) and (
             not extract_reply_message_id(event)
-            or (getattr(event, "platform", "") == "telegram" and state.get("telegram_scope_admitted"))
+            or _platform_scope_admitted(event, state)
         )
         if explicitly_at_bot or adapter_direct_without_reply or is_name_mentioned:
             state["is_random_chat"] = False

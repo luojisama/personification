@@ -110,6 +110,18 @@ async def dispatch_qq_reply(bot: Any, event: Any, state: Any, **kwargs: Any) -> 
     # Both accepted event classes represent private or explicitly @-directed
     # messages; do not infer direction from nickname text.
     object.__setattr__(event, "to_me", True)
+    original_rule = kwargs.pop("personification_rule", None)
+    if original_rule is not None:
+        async def admitted(projected: Any, projected_state: dict[str, Any]) -> bool:
+            from nonebot.adapters.qq.event import GroupAtMessageCreateEvent
+            # Only the official, explicitly directed event grants scope. Keep
+            # raw openids in the envelope and all existing policy checks.
+            projected_state["qq_official_scope_admitted"] = bool(
+                isinstance(event, GroupAtMessageCreateEvent)
+                and getattr(kwargs.get("plugin_config"), "personification_qq_official_enabled", False)
+            )
+            return await original_rule(projected, projected_state)
+        kwargs["personification_rule"] = admitted
     await dispatch_satori_reply(bot, event, state, interaction_adapter=adapter,
         source_envelope=envelope, proxy_factory=QQBotProxy, **kwargs)
 

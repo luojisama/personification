@@ -83,3 +83,30 @@ def test_real_adapter_173_group_and_c2c(monkeypatch):
         'author':{'id':'raw','bot':False,'member_openid':'000member','member_role':'member'}})
     assert adapter.normalize(private,bot_id='app').conversation_kind=='private'
     assert adapter.normalize(group,bot_id='app').sender_id=='000member'
+
+
+def test_scope_admission_requires_real_group_at_event_and_enabled_config(monkeypatch):
+    import nonebot.adapters
+    root = Path(r"D:/test_artifacts/qq-official-implementation/adapter_deps/nonebot/adapters")
+    if root.is_dir():
+        monkeypatch.setattr(nonebot.adapters, '__path__', list(nonebot.adapters.__path__) + [str(root)])
+    events = pytest.importorskip('nonebot.adapters.qq.event')
+    class Store:
+        def mutate_sync(self, name, fn):
+            fn({})
+    monkeypatch.setattr(m, 'get_data_store', lambda: Store())
+    seen = []
+    async def original(projected, state):
+        seen.append(dict(state))
+        return True
+    async def dispatch(bot, event, state, **kwargs):
+        await kwargs['personification_rule'](NS(platform='qq_official'), state)
+    monkeypatch.setattr(m, 'dispatch_satori_reply', dispatch)
+    base = dict(id='m', content='hello', timestamp=datetime.now(timezone.utc).isoformat())
+    group = events.GroupAtMessageCreateEvent.model_validate({**base, 'group_id': 'rawgroup', 'group_openid': 'group-openid',
+        'author': {'id': 'raw', 'bot': False, 'member_openid': 'member-openid', 'member_role': 'admin'}})
+    private = events.C2CMessageCreateEvent.model_validate({**base, 'author': {'id': 'raw', 'user_openid': 'user-openid'}})
+    for event, enabled in [(group, True), (group, False), (private, True), (source(), True)]:
+        asyncio.run(m.dispatch_qq_reply(NS(self_id='app'), event, {}, personification_rule=original,
+            plugin_config=NS(personification_qq_official_enabled=enabled)))
+    assert [s['qq_official_scope_admitted'] for s in seen] == [True, False, False, False]

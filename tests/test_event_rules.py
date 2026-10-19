@@ -10,6 +10,37 @@ event_rules = load_personification_module("plugin.personification.handlers.event
 target_inference = load_personification_module("plugin.personification.core.target_inference")
 
 
+def test_official_direct_group_scope_keeps_user_and_group_guards(monkeypatch):
+    utils = load_personification_module("plugin.personification.utils")
+    config = {}
+    monkeypatch.setattr(utils, "get_group_config", lambda group_id: config)
+    monkeypatch.setattr(event_rules, "is_group_muted", lambda group_id: False)
+    event = _GroupEvent("hello")
+    event.platform = "qq_official"
+    event.to_me = True
+    event.reply = SimpleNamespace(message_id="previous")
+    state = {"qq_official_scope_admitted": True}
+    kwargs = _base_kwargs(is_group_whitelisted=lambda *a: False)
+    assert asyncio.run(event_rules.personification_rule(event, state, **kwargs))
+    assert state["message_target"] == target_inference.TARGET_BOT
+    assert not asyncio.run(event_rules.personification_rule(event, {}, **kwargs))
+    event.platform = "onebot"
+    assert not asyncio.run(event_rules.personification_rule(event, dict(state), **kwargs))
+    event.platform = "qq_official"
+    config["enabled"] = False
+    assert not asyncio.run(event_rules.personification_rule(event, dict(state), **kwargs))
+    config.clear()
+    monkeypatch.setattr(event_rules, "is_group_muted", lambda group_id: True)
+    assert not asyncio.run(event_rules.personification_rule(event, dict(state), **kwargs))
+    monkeypatch.setattr(event_rules, "is_group_muted", lambda group_id: False)
+    blocked = _base_kwargs(is_group_whitelisted=lambda *a: False, user_blacklist={event.user_id: time.time() + 60})
+    assert not asyncio.run(event_rules.personification_rule(event, dict(state), **blocked))
+    policy = _PolicyGate(_PolicyDecision(disposition="blocked", allowed=False))
+    blocked = _base_kwargs(is_group_whitelisted=lambda *a: False, user_policy_gate=policy)
+    assert not asyncio.run(event_rules.personification_rule(event, dict(state), **blocked))
+    assert policy.evaluate_calls == 1
+
+
 class _FakeLogger:
     def info(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
         pass
