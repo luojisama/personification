@@ -323,7 +323,14 @@ class ProtocolAdapter:
     def self_id(self) -> str:
         return str(getattr(self.bot, "self_id", "") or "")
 
+    def _official_qq(self) -> bool:
+        adapter = getattr(self.bot, 'adapter', None)
+        get_name = getattr(adapter, 'get_name', None)
+        return callable(get_name) and get_name() == 'QQ'
+
     async def _call_api(self, action: str, **params: Any) -> Any:
+        if self._official_qq():
+            raise NotImplementedError('OneBot API unavailable on official QQ')
         method = getattr(self.bot, action, None)
         if callable(method):
             return await method(**params)
@@ -337,7 +344,12 @@ class ProtocolAdapter:
         now = time.time()
         if not refresh and self._identity is not None and now < self._identity_expires_at:
             return self._identity
-        if mode == "none":
+        if self._official_qq():
+            identity = ProtocolIdentity(
+                self_id=self.self_id, implementation='qq_official',
+                app_name='QQ', checked_at=now,
+            )
+        elif mode == "none":
             identity = ProtocolIdentity(
                 self_id=self.self_id,
                 implementation="unknown",
@@ -387,6 +399,14 @@ class ProtocolAdapter:
 
     async def matrix(self, *, refresh: bool = False) -> CapabilityMatrix:
         identity = await self.identity(refresh=refresh)
+        if identity.implementation == 'qq_official':
+            names = set(_STANDARD_CAPABILITIES) | set(self._extension_capabilities(identity))
+            return CapabilityMatrix(identity, {
+                name: CapabilityRecord(name, CapabilityState.UNAVAILABLE,
+                                       'official_qq_onebot_api_unavailable',
+                                       checked_at=identity.checked_at)
+                for name in names
+            })
         now = time.time()
         records: dict[str, CapabilityRecord] = {
             name: CapabilityRecord(

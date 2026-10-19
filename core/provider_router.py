@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -450,6 +451,8 @@ def _has_usable_legacy_primary_config(plugin_config: Any) -> bool:
 
 
 def load_api_pool_config(plugin_config: Any, logger: Any, *, purpose: str = "main") -> List[Dict[str, Any]]:
+    if logger is None:
+        logger = logging.getLogger(__name__)
     raw_config = getattr(plugin_config, "personification_api_pools", None)
     bindings = getattr(plugin_config, "personification_model_purpose_bindings", {})
     explicit_binding = normalize_purpose_bindings(bindings).get(str(purpose or "main").strip().lower())

@@ -561,6 +561,11 @@ class Config(BaseModel):
     personification_system_path: Optional[str] = None
 
     personification_favorability_enabled: bool = True
+    # Enable only after the shared-account/profile offline migration completes.
+    personification_favorability_shared_enabled: bool = False
+    personification_favorability_shared_db: Optional[str] = None
+    personification_favorability_shared_platform: str = "onebot"
+    personification_favorability_shared_app: Optional[str] = None
     personification_favorability_default_score: float = 0.0
     personification_favorability_group_default_score: float = 35.0
     personification_favorability_levels: Dict[str, float] = DEFAULT_FAVORABILITY_LEVELS.copy()

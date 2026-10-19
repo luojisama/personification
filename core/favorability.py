@@ -596,10 +596,12 @@ _UNSET = object()
 
 
 class FavorabilityService:
-    """Plugin-owned favorability store with one-time compatibility migration.
+    """Relationship policy with local or explicitly shared transactional storage.
 
     The old sign-in plugin remains a best-effort import source, but the
-    personification plugin writes and reads its own profile document.
+    personification plugin writes and reads its own profile document by default.
+    A shared backend replaces the full document transaction and disables legacy
+    import/mirroring so account changes cannot be overwritten by stale snapshots.
     """
 
     def __init__(
@@ -608,6 +610,7 @@ class FavorabilityService:
         plugin_config: Any = None,
         external: ExternalFavorabilityAdapter | None = None,
         logger: Any = None,
+        profile_backend: Any = None,
     ) -> None:
         self.plugin_config = plugin_config
         self.external = external or ExternalFavorabilityAdapter(
@@ -618,6 +621,10 @@ class FavorabilityService:
             get_level_name=lambda value: level_name_for_score(value),
         )
         self.logger = logger
+        # An explicitly enabled backend owns the complete read/modify/write
+        # transaction, including the shared account score. Never mirror its
+        # result through the legacy absolute-value writeback path.
+        self.profile_backend = profile_backend
         self._mirror_lock = RLock()
         self.observer: Any = None
 
@@ -657,8 +664,14 @@ class FavorabilityService:
         return default_favorability_for_id(user_id, self.plugin_config)
 
     def _load_document(self) -> dict[str, Any]:
-        raw = get_data_store().load_sync(_STORE_NAME)
+        raw = (self.profile_backend.load_document() if self.profile_backend is not None
+               else get_data_store().load_sync(_STORE_NAME))
         return dict(raw) if isinstance(raw, dict) else {}
+
+    def _mutate_document(self, mutator: Callable) -> Any:
+        if self.profile_backend is not None:
+            return self.profile_backend.mutate_document(mutator)
+        return get_data_store().mutate_sync(_STORE_NAME, mutator)
 
     @staticmethod
     def _store_meta(document: dict[str, Any]) -> dict[str, Any]:
@@ -674,7 +687,7 @@ class FavorabilityService:
             pass
 
     def _external_user_data(self, user_id: str) -> tuple[bool, dict[str, Any]]:
-        if not self.external.available:
+        if self.profile_backend is not None or not self.external.available:
             return False, {}
         try:
             raw = self.external.load_data() or {}
@@ -687,7 +700,7 @@ class FavorabilityService:
         return True, dict(data) if isinstance(data, dict) else {}
 
     def _external_all_data(self) -> tuple[bool, dict[str, dict[str, Any]]]:
-        if not self.external.available:
+        if self.profile_backend is not None or not self.external.available:
             return False, {}
         try:
             raw = self.external.load_data() or {}
@@ -710,7 +723,7 @@ class FavorabilityService:
         *,
         now_ts: int,
     ) -> tuple[bool, dict[str, Any], int]:
-        if not self.external.available:
+        if self.profile_backend is not None or not self.external.available:
             return False, {}, 0
         raw_profile = document.get(user_id)
         if isinstance(raw_profile, dict) and _safe_int(
@@ -942,7 +955,7 @@ class FavorabilityService:
             result = copy.deepcopy(profile)
             return data
 
-        get_data_store().mutate_sync(_STORE_NAME, _mutate)
+        self._mutate_document(_mutate)
         if changed:
             self._mirror_latest(key)
         return result
@@ -1346,7 +1359,7 @@ class FavorabilityService:
                 changed = True
             return data
 
-        get_data_store().mutate_sync(_STORE_NAME, _mutate)
+        self._mutate_document(_mutate)
         if changed:
             self._mirror_latest(user_id)
         return result
@@ -1429,7 +1442,7 @@ class FavorabilityService:
             data[_STORE_META_KEY] = meta
             return data
 
-        get_data_store().mutate_sync(_STORE_NAME, _mutate)
+        self._mutate_document(_mutate)
         self._mirror_latest(key)
 
     def load_data(self) -> dict[str, dict[str, Any]]:
@@ -1520,11 +1533,11 @@ class FavorabilityService:
             result = copy.deepcopy(normalized)
             return next_document
 
-        get_data_store().mutate_sync(_STORE_NAME, _mutate)
+        self._mutate_document(_mutate)
         return result
 
     def _mirror_latest(self, user_id: str) -> None:
-        if not self.external.available:
+        if self.profile_backend is not None or not self.external.available:
             return
         with self._mirror_lock:
             try:
@@ -1757,7 +1770,7 @@ class FavorabilityService:
             }
             return data
 
-        get_data_store().mutate_sync(_STORE_NAME, _mutate)
+        self._mutate_document(_mutate)
         if changed:
             self._mirror_latest(key)
         return result
@@ -2135,7 +2148,7 @@ class FavorabilityService:
                     data[key] = self._commit_profile(profile, latest, now_ts=now_ts)
             return data
 
-        get_data_store().mutate_sync(_STORE_NAME, _mutate)
+        self._mutate_document(_mutate)
         for key in decayed_keys:
             self._mirror_latest(key)
         return {"enabled": True, "checked": checked, "decayed": decayed, "events": events}

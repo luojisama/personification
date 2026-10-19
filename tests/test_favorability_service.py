@@ -25,6 +25,7 @@ class _FakeStore:
         with self._lock:
             return copy.deepcopy(self.payload)
 
+
     def save_sync(self, name: str, data):  # noqa: ANN001
         assert name == "favorability_profiles"
         with self._lock:
@@ -39,6 +40,36 @@ class _FakeStore:
             self.payload = copy.deepcopy(current if updated is None else updated)
             self.write_count += 1
             return copy.deepcopy(self.payload)
+
+
+class _ProfileBackend:
+    def __init__(self):
+        self.store = _FakeStore()
+
+    def load_document(self):
+        return self.store.load_sync('favorability_profiles')
+
+    def mutate_document(self, callback):
+        return self.store.mutate_sync('favorability_profiles', callback)
+
+
+def test_shared_backend_owns_reads_mutations_and_disables_mirroring(monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError('legacy storage must not be accessed')
+    monkeypatch.setattr(favorability, 'get_data_store', forbidden)
+    external = favorability.ExternalFavorabilityAdapter(
+        available=True, get_user_data=forbidden, update_user_data=forbidden,
+        load_data=forbidden, get_level_name=lambda value: str(value))
+    backend = _ProfileBackend()
+    service = favorability.FavorabilityService(
+        plugin_config=_config(), external=external, profile_backend=backend)
+    service.update_user_data('10001', favorability=20)
+    service.apply_event('10001', 'custom', delta=1, event_id='first')
+    backend.store.payload['10001']['favorability'] += 2  # concurrent sign-in result
+    service.apply_event('10001', 'custom', delta=1, event_id='second')
+    service.apply_event('10001', 'custom', delta=1, event_id='second')
+    assert service.get_user_data('10001')['favorability'] == 24
+    assert service.load_data()['10001']['favorability'] == 24
 
 
 def _config(**overrides):  # noqa: ANN001

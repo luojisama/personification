@@ -12,7 +12,13 @@ from ._loader import load_personification_module
 lab_mod = load_personification_module("plugin.personification.core.quality_lab")
 
 
-def test_worker_freezes_route_budgets_requests_and_only_captures_outbound(tmp_path):
+def test_worker_freezes_route_budgets_requests_and_only_captures_outbound(tmp_path, monkeypatch):
+    # The subprocess inherits environment; loopback fixtures must bypass any
+    # developer proxy without inspecting its address or credentials.
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     requests = []
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -45,7 +51,7 @@ def test_worker_freezes_route_budgets_requests_and_only_captures_outbound(tmp_pa
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
-    assert result["status"] == "completed", result
+    assert result["status"] == "completed", {k:v for k,v in result.items() if k in {"status","error","error_code","reason","reason_code","failure_code","delivery","usage"}}
     assert result["delivery"] == "capture_confirmed"
     assert result["confirmed_history"] > 0
     assert result["usage"]["wire_calls"] == len(requests)

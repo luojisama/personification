@@ -62,6 +62,14 @@ def test_env_fallback_when_runtime_empty(tmp_path, monkeypatch) -> None:
     assert len(providers) == 3
 
 
+def test_env_fallback_accepts_optional_logger(tmp_path, monkeypatch) -> None:
+    env_file = tmp_path / '.env'
+    env_file.write_text('personification_api_pools=' + json.dumps(_pools(1)), encoding='utf-8')
+    monkeypatch.setattr(runtime_config, '_iter_env_file_candidates', lambda: [env_file])
+    providers = provider_router.load_api_pool_config(_Cfg(None, str(tmp_path)), None)
+    assert len(providers) == 1
+
+
 def test_env_fallback_ignored_when_legacy_primary_is_complete(tmp_path, monkeypatch) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(

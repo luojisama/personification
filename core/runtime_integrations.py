@@ -17,15 +17,34 @@ def build_sign_in_fallbacks(plugin_config: Any = None, logger: Any = None) -> tu
     """Build the favorability adapter used by legacy runtime fields.
 
     The public runtime still calls these values sign_in_* for compatibility,
-    but the implementation is now plugin-owned. The old sign-in plugin is only
-    used as a migration/mirroring source when it exists.
+    but relationship policy is plugin-owned. An explicitly configured shared
+    backend owns storage; otherwise the old sign-in plugin remains a legacy
+    migration/mirroring source.
     """
 
+    profile_backend = None
+    if getattr(plugin_config, 'personification_favorability_shared_enabled', False) is True:
+        db = getattr(plugin_config, 'personification_favorability_shared_db', None)
+        app = getattr(plugin_config, 'personification_favorability_shared_app', None)
+        if not db or not app:
+            raise ValueError('共享好感度必须配置数据库与应用标识')
+        # Deployment-owned bridge is optional for ordinary installations. When
+        # explicitly enabled, a missing bridge/marker must fail, never fall back
+        # to an independent local balance.
+        from shared_accounts import SharedAccounts
+        from shared_favorability_profiles import SharedFavorabilityProfiles
+        profile_backend = SharedFavorabilityProfiles(
+            SharedAccounts(db),
+            platform=getattr(plugin_config, 'personification_favorability_shared_platform', 'onebot'),
+            app=app,
+        )
+        profile_backend.load_document()
     external = build_external_sign_in_adapter()
     service = FavorabilityService(
         plugin_config=plugin_config,
         external=external,
         logger=logger,
+        profile_backend=profile_backend,
     )
     return (
         FavorabilityEnabledGate(service),

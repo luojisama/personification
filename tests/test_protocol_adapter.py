@@ -43,6 +43,22 @@ def setup_function(_fn) -> None:  # noqa: ANN001
     adapter_module.reset_protocol_adapters()
 
 
+def test_official_qq_never_probes_or_claims_onebot_capabilities():
+    import pytest
+    bot = _Bot('irrelevant')
+    bot.adapter = SimpleNamespace(get_name=lambda: 'QQ')
+    adapter = adapter_module.ProtocolAdapter(bot, _config('napcat'))
+    matrix = asyncio.run(adapter.matrix())
+    assert matrix.identity.implementation == 'qq_official'
+    assert matrix.capabilities
+    assert all(record.state == adapter_module.CapabilityState.UNAVAILABLE
+               for record in matrix.capabilities.values())
+    assert bot.calls == []
+    with pytest.raises(NotImplementedError):
+        asyncio.run(adapter._call_api('set_group_ban', group_id='opaque'))
+    assert bot.calls == []
+
+
 def _config(mode: str = "auto") -> SimpleNamespace:
     return SimpleNamespace(personification_protocol_extensions=mode)
 

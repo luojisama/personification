@@ -54,6 +54,10 @@ def bot():
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
+    router = load_personification_module("plugin.personification.core.provider_router")
+    # This bridge fixture must never consult developer .env provider routes.
+    monkeypatch.setattr(router, "_read_env_api_pool_raw", lambda: "")
+    monkeypatch.setattr(router, "_load_env_api_pool_config", lambda *_a, **_k: [])
     db = load_personification_module("plugin.personification.core.db")
     paths = load_personification_module("plugin.personification.core.paths")
     store = load_personification_module("plugin.personification.core.data_store")
