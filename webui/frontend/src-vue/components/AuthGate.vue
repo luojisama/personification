@@ -9,6 +9,7 @@
 
       <form v-else-if="auth.phase === 'anonymous'" class="auth-form" @submit.prevent="requestCode">
         <SelectField v-model="selectedIdentity" label="管理员账号" :options="adminOptions" placeholder="请选择接收验证码的管理员" :disabled="busy" required />
+        <SelectField v-model="delivery" label="验证码接收方式" :options="[{value:'direct',label:'原平台私聊（QQ / Telegram）'},{value:'official',label:'官方 QQ 私聊领取（需已绑定）'}]" :disabled="busy" />
         <p v-if="!auth.admins.length" class="auth-note">暂未读取到可登录管理员。请确认 Bot 配置后刷新。</p>
         <p v-if="selectedIdentity" class="auth-note">{{ deliveryNote }}</p>
         <button type="submit" :disabled="busy || !selectedIdentity">发送私聊验证码</button>
@@ -54,6 +55,7 @@ import { useAuthStore } from "@vue-app/stores/auth";
 
 const auth = useAuthStore();
 const selectedIdentity = ref("");
+const delivery = ref('direct');
 const code = ref("");
 const deviceLabel = ref("");
 const trustAvailable = window.location.protocol === "https:" || ["localhost", "127.0.0.1", "::1", "[::1]"].includes(window.location.hostname);
@@ -66,6 +68,7 @@ const selectedAdmin = computed(() => auth.admins.find(admin => admin.qq === sele
 const selectedAccountLabel = computed(() => selectedAdmin.value?.label || adminAccountLabel(selectedIdentity.value, selectedAdmin.value?.platform));
 const selectedPlatform = computed(() => adminPlatform(selectedIdentity.value, selectedAdmin.value?.platform));
 const deliveryNote = computed(() => {
+  if (delivery.value === 'official') return '请发送页面提供的 /登录 命令到官方 Bot 私聊；只向已绑定的管理员发放验证码。';
   if (auth.phase === "verifying") return `请在 ${selectedPlatform.value === "telegram" ? "Telegram" : "QQ"} 与 Bot 的私聊中查看验证码。`;
   return selectedPlatform.value === "telegram"
     ? "验证码通过 Telegram 私聊发送；首次使用请先在 Telegram 私聊 Bot 发送 /start。"
@@ -85,7 +88,7 @@ function explain(error: unknown): string {
   }
   return "操作未完成，请稍后重试。";
 }
-async function requestCode(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.sendCode(selectedIdentity.value); } catch (error) { errorMessage.value = explain(error); } finally { busy.value = false; } }
+async function requestCode(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.sendCode(selectedIdentity.value, delivery.value); } catch (error) { errorMessage.value = explain(error); } finally { busy.value = false; } }
 async function confirmCode(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.verify(selectedIdentity.value, code.value, deviceLabel.value, trustDevice.value); } catch (error) { errorMessage.value = explain(error); } finally { busy.value = false; } }
 async function retry(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.bootstrap(); } finally { busy.value = false; } }
 async function refreshAdmins(): Promise<void> { busy.value = true; errorMessage.value = ""; try { await auth.loadAdmins(); } catch (error) { errorMessage.value = explain(error); } finally { busy.value = false; } }

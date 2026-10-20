@@ -158,11 +158,13 @@ function renderLogin() {
     <div id="login-step1">
       <label>管理员账号（QQ / Telegram）</label>
       ${picker}
+      <label style="margin-top:10px">验证码接收方式</label>
+      <select id="login-delivery"><option value="direct">原平台私聊（QQ / Telegram）</option><option value="official">官方 QQ 私聊领取（需已绑定）</option></select>
       <div style="margin-top:14px"><button class="btn primary" onclick="sendCode()" ${eligible.length ? "" : "disabled"}>发送验证码</button></div>
       ${hint}
     </div>
     <div id="login-step2" style="display:none">
-      <div class="alert info" style="font-size:12.5px">验证码已发送到所选账号的平台私聊，请在 5 分钟内输入。</div>
+      <div class="alert info" style="font-size:12.5px">请按下方提示领取验证码，在 5 分钟内输入。</div>
       <label>验证码（来自 Bot 私聊）</label>
       <input id="login-code" type="text" inputmode="numeric" maxlength="6" placeholder="6 位数字">
       <label style="margin-top:10px">设备名称（便于识别）</label>
@@ -209,11 +211,12 @@ async function sendCode() {
   if (!qq) { msg.textContent = "请选择管理员账号。"; return; }
   msg.textContent = "正在发送…";
   try {
-    await api("/auth/login", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ qq }) });
+    const delivery = document.getElementById("login-delivery").value;
+    const result = await api("/auth/login", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ qq, delivery }) });
     state.pendingQq = qq;
     document.getElementById("login-step1").style.display = "none";
     document.getElementById("login-step2").style.display = "block";
-    msg.textContent = qq.startsWith("telegram:") ? "验证码已发送，请查收 Telegram Bot 私聊。" : "验证码已发送，请查收管理员 QQ 私聊。";
+    msg.textContent = result.message;
   } catch (e) { msg.textContent = "发送失败：" + e.message; }
 }
 

@@ -396,6 +396,8 @@ async def _init_personification_runtime() -> None:
     ))
     from .handlers.account_link_commands import register_account_link_commands
     if plugin_config.personification_qq_official_enabled:
+        from .handlers.official_login import register_official_login
+        matcher_handles.update(register_official_login())
         from .handlers.qq_reply_bridge import register_qq_reply_bridge
         matcher_handles.update(register_qq_reply_bridge(
             personification_rule=runtime_bundle.personification_rule,

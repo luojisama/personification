@@ -263,6 +263,19 @@ def build_auth_router(*, runtime) -> APIRouter:
 
         # 验证码绑定当前浏览器 challenge，其他匿名请求不能消费或覆盖。
         challenge_token = request.cookies.get(_LOGIN_CHALLENGE_COOKIE_NAME, "") or secrets.token_urlsafe(32)
+        if payload.delivery == 'official':
+            from ...core.official_webui_login import configured_service
+            webui_auth_store.record_login_attempt(send_rate_key)
+            try:
+                ticket = configured_service().create(qq, challenge_token)
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            response.set_cookie(_LOGIN_CHALLENGE_COOKIE_NAME, challenge_token, max_age=300,
+                                httponly=True, secure=_request_uses_https(request),
+                                samesite='lax', path='/personification')
+            webui_audit_log.record(action='login_code_sent', qq=qq, ip_hash=ip_hash,
+                                   outcome='awaiting_official_private_claim')
+            return LoginResponse(sent=False, message=f'请在 5 分钟内私聊官方 Bot 发送：/登录 {ticket}，再将收到的验证码填入此页面。')
         try:
             code = webui_auth_store.create_verify_code(qq, challenge_token)
         except webui_auth_store.VerifyCodeCooldownError as exc:
@@ -335,7 +348,16 @@ def build_auth_router(*, runtime) -> APIRouter:
             webui_audit_log.record(action="login_verify", qq=qq, ip_hash=ip_hash, outcome="admin_revoked")
             raise HTTPException(status_code=403, detail="管理员权限已撤销")
         challenge_token = request.cookies.get(_LOGIN_CHALLENGE_COOKIE_NAME, "")
-        if not webui_auth_store.consume_verify_code(qq, payload.code, challenge_token):
+        verified = webui_auth_store.consume_verify_code(qq, payload.code, challenge_token)
+        if not verified:
+            from ...core.official_webui_login import configured_service
+            try:
+                official_service = configured_service()
+            except ValueError:
+                official_service = None
+            if official_service is not None:
+                verified = official_service.consume(qq, payload.code, challenge_token)
+        if not verified:
             webui_auth_store.record_login_attempt(verify_rate_key)
             webui_audit_log.record(action="login_verify", qq=qq, ip_hash=ip_hash, outcome="bad_code")
             raise HTTPException(status_code=403, detail="验证码错误或已过期")

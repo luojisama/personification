@@ -97,10 +97,10 @@ export const useAuthStore = defineStore("auth", () => {
     }
   }
 
-  async function sendCode(adminIdentity: string): Promise<void> {
+  async function sendCode(adminIdentity: string, delivery: string = 'direct'): Promise<void> {
     const current = ++generation;
     message.value = "";
-    const response = await authRequest<{ message?: string }>("/login", { method: "POST", body: { qq: adminIdentity } });
+    const response = await authRequest<{ message?: string }>("/login", { method: "POST", body: { qq: adminIdentity, ...(delivery === 'official' ? { delivery } : {}) } });
     if (current !== generation) return;
     phase.value = "verifying";
     message.value = response.message ?? `验证码已发送，请查看 ${adminPlatform(adminIdentity) === "telegram" ? "Telegram" : "QQ"} 私聊。`;

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 
 class LoginRequest(BaseModel):
     qq: str = Field(..., min_length=4, max_length=32, description="管理员 QQ 号或 telegram:数字用户ID")
+    delivery: Literal['direct', 'official'] = 'direct'
 
 
 class LoginResponse(BaseModel):

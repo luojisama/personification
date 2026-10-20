@@ -10,6 +10,21 @@ function json(body: unknown, status = 200): Response {
 }
 
 describe("认证入口", () => {
+  it("官方 QQ 领取显示请求命令而不声称已经发送", async () => {
+    setActivePinia(createPinia());
+    const auth = useAuthStore();
+    auth.phase = 'anonymous';
+    auth.admins = [{qq:'10001',source:'SUPERUSERS'}];
+    const fetcher = vi.spyOn(globalThis,'fetch').mockResolvedValueOnce(json({sent:false,message:'私聊发送：/登录 isolated-ticket'}));
+    const wrapper = mount(AuthGate);
+    await wrapper.findAll('select')[0]!.setValue('10001');
+    await wrapper.findAll('select')[1]!.setValue('official');
+    await wrapper.get('form').trigger('submit');
+    await vi.waitFor(() => expect(wrapper.text()).toContain('/登录 isolated-ticket'));
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({qq:'10001',delivery:'official'});
+    expect(wrapper.text()).not.toContain('验证码已发送');
+    wrapper.unmount();
+  });
   beforeEach(() => {
     setActivePinia(createPinia());
     vi.restoreAllMocks();
