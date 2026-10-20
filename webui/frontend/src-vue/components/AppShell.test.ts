@@ -100,6 +100,9 @@ describe("AppShell", () => {
     await wrapper.get(".rail-collapse").trigger("click");
     expect(wrapper.get(".app-frame").classes()).toContain("rail-collapsed");
     expect(window.localStorage.getItem("personification.nav.collapsed")).toBe("1");
+    const overviewLink = wrapper.get('.section-page-nav a');
+    expect(overviewLink.attributes('aria-label')).toBe('总览');
+    expect(overviewLink.attributes('title')).toBe('总览');
     wrapper.unmount();
     queryClient.clear();
   });

@@ -37,6 +37,7 @@
           :class="{ active: currentContext?.section.id === section.id }"
           :aria-pressed="currentContext?.section.id === section.id"
           :title="railCollapsed ? section.label : undefined"
+          :aria-label="section.label"
           @click="visitSection(section.id)"
         >
           <Icon :name="section.icon" />
@@ -58,6 +59,8 @@
           v-for="item in currentSection.children.filter(platformPageAllowed)"
           :key="item.id"
           :to="item.path || '/runtime/overview/summary'"
+          :aria-label="item.label"
+          :title="railCollapsed ? item.label : undefined"
           :class="{ active: currentContext?.page.id === item.id }"
           :aria-current="currentContext?.page.id === item.id ? 'page' : undefined"
         >

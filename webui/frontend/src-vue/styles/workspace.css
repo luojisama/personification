@@ -535,3 +535,28 @@ tbody tr:hover {
 .config-main {
   gap:20px;
 }
+
+/* Compact navigation must retain a usable target inside the narrow rail. */
+@media (min-width: 761px) {
+  .rail-collapsed .section-page-nav { margin-inline: 6px; padding-inline: 0; }
+  .rail-collapsed .rail-foot { padding-inline: 8px; }
+  .rail-collapsed .section-page-nav a,
+  .rail-collapsed .visual-section-nav button,
+  .rail-collapsed .rail-collapse { min-height: 40px; }
+}
+.section-page-nav a > svg,
+.visual-section-nav button > svg { flex-shrink: 0; }
+.workspace-navigation { top: 64px; }
+.panel-heading { flex-wrap: wrap; }
+.panel-heading-copy { flex: 1 1 12rem; }
+.panel-actions { max-width: 100%; }
+.panel-title,
+.panel-body p,
+.panel-body dd,
+.panel-body li,
+.metric-rack article > strong,
+.metric-rack article > small { overflow-wrap: anywhere; }
+.panel-body > *,
+.panel-actions > *,
+.metric-rack article > * { min-width: 0; max-width: 100%; }
+.sticker-title { white-space: normal; overflow-wrap: anywhere; }
