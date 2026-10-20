@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { COLOR_MODE_STORAGE_KEY, THEME_STORAGE_KEY, useThemeStore } from "./theme";
+import { ACCENT_STORAGE_KEY, COLOR_MODE_STORAGE_KEY, THEME_STORAGE_KEY, useThemeStore } from "./theme";
 
 type ChangeCallback = (event: MediaQueryListEvent) => void;
 
@@ -117,4 +117,20 @@ describe("theme store", () => {
     expect(getListenerCount()).toBe(0);
     expect(mql.removeEventListener).toHaveBeenCalled();
   });
+  it("配色跨风格切换保留且可恢复，损坏存储回退海蓝", () => {
+    const store = useThemeStore();
+    store.setAccent("jade");
+    store.setTheme("schale");
+    store.setTheme("prts");
+    store.setTheme("minimal");
+    expect(store.accent).toBe("jade");
+    expect(document.documentElement.dataset.accent).toBe("jade");
+    expect(localStorage.getItem(ACCENT_STORAGE_KEY)).toBe("jade");
+    setActivePinia(createPinia());
+    expect(useThemeStore().accent).toBe("jade");
+    localStorage.setItem(ACCENT_STORAGE_KEY, "invalid");
+    setActivePinia(createPinia());
+    expect(useThemeStore().accent).toBe("ocean");
+  });
+
 });

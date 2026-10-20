@@ -2,6 +2,15 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 
 export type ThemeName = "minimal" | "schale" | "prts";
+export type AccentName = "ocean" | "jade" | "iris" | "amber" | "rose";
+export const ACCENT_STORAGE_KEY = "personification.console.accent";
+export const ACCENTS = [
+  { id: "ocean", name: "海蓝", color: "#2563eb" },
+  { id: "jade", name: "青绿", color: "#087f73" },
+  { id: "iris", name: "鸢尾", color: "#7452c8" },
+  { id: "amber", name: "琥珀", color: "#a65b0a" },
+  { id: "rose", name: "玫瑰", color: "#be4265" },
+] as const;
 export type ColorMode = "system" | "light" | "dark";
 export type EffectiveScheme = "light" | "dark";
 
@@ -12,9 +21,9 @@ const VALID_THEMES: readonly ThemeName[] = ["minimal", "schale", "prts"];
 const VALID_COLOR_MODES: readonly ColorMode[] = ["system", "light", "dark"];
 
 const THEME_HEADER_COLORS: Record<ThemeName, { light: string; dark: string }> = {
-  minimal: { light: "#eceae3", dark: "#171717" },
+  minimal: { light: "#f5f6f8", dark: "#171717" },
   schale: { light: "#f4f9fd", dark: "#f4f9fd" },
-  prts: { light: "#0b0f14", dark: "#0b0f14" },
+  prts: { light: "#121516", dark: "#121516" },
 };
 
 function readStorage<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
@@ -50,6 +59,7 @@ function readSystemDark(): boolean {
 
 export const useThemeStore = defineStore("theme", () => {
   const theme = ref<ThemeName>(readStorage(THEME_STORAGE_KEY, VALID_THEMES, "minimal"));
+  const accent = ref<AccentName>(readStorage(ACCENT_STORAGE_KEY, ACCENTS.map(item => item.id), "ocean"));
   const colorMode = ref<ColorMode>(readStorage(COLOR_MODE_STORAGE_KEY, VALID_COLOR_MODES, "system"));
   const systemIsDark = ref<boolean>(readSystemDark());
 
@@ -73,6 +83,7 @@ export const useThemeStore = defineStore("theme", () => {
     const currentScheme = effectiveScheme.value;
 
     root.dataset.theme = currentTheme;
+    root.dataset.accent = accent.value;
     root.dataset.colorMode = currentMode;
     root.dataset.effectiveScheme = currentScheme;
     root.style.colorScheme = currentScheme;
@@ -87,6 +98,13 @@ export const useThemeStore = defineStore("theme", () => {
     if (!VALID_THEMES.includes(nextTheme)) return;
     theme.value = nextTheme;
     writeStorage(THEME_STORAGE_KEY, nextTheme);
+    applyDomState();
+  }
+
+  function setAccent(value: AccentName): void {
+    if (!ACCENTS.some(item => item.id === value)) return;
+    accent.value = value;
+    writeStorage(ACCENT_STORAGE_KEY, value);
     applyDomState();
   }
 
@@ -147,6 +165,8 @@ export const useThemeStore = defineStore("theme", () => {
 
   return {
     theme,
+    accent,
+    setAccent,
     colorMode,
     systemIsDark,
     effectiveScheme,

@@ -2,8 +2,8 @@
   <div class="page-stack">
     <PageHeader
       index="01"
-      title="事件总览"
-      description="从回复回合、路由证据和恢复队列中提取当前风险；实时流只做增量提示，数据库仍是权威记录。"
+      title="运行总览"
+      description="了解机器人的当前状态，查看最近对话与需要关注的任务。"
     >
       <template #actions>
         <StateBadge :tone="realtime.state.value === 'open' ? 'ok' : 'running'">
@@ -14,6 +14,10 @@
 
     <QueryBoundary :pending="isPending" :error="error">
       <template v-if="data">
+        <section class="overview-welcome">
+          <div><span class="welcome-label">WORKSPACE / 运行概况</span><h2>对话在继续，一切尽在眼前。</h2><p>查看运行指标，追踪回复过程，及时处理待恢复的任务。</p></div>
+          <div class="welcome-links"><RouterLink to="/runtime/routes/capabilities">路由能力 ↗</RouterLink><RouterLink to="/runtime/recovery/pending">恢复队列 ↗</RouterLink></div>
+        </section>
         <section class="metric-rack overview-metric-rack" aria-label="运行指标">
           <article>
             <span>运行状态</span>

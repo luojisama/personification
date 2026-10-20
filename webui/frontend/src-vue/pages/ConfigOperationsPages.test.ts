@@ -291,9 +291,9 @@ describe("ConfigOperationsPages.vue", () => {
   it("设置页使用 Vue 三主题与简约明暗模式", async () => {
     const wrapper = mountComponent("settings");
     await flushPromises();
-    expect(wrapper.text()).toContain("简约");
-    expect(wrapper.text()).toContain("夏莱");
-    expect(wrapper.text()).toContain("PRTS");
+    expect(wrapper.text()).toContain("默认");
+    expect(wrapper.text()).toContain("BA");
+    expect(wrapper.text()).toContain("终末地");
     expect(wrapper.text()).toContain("跟随系统");
   });
 });

@@ -27,6 +27,9 @@
       </button>
     </div>
 
+    <div v-if="themeStore.theme === 'minimal'" class="accent-picker" role="group" aria-label="默认主题色">
+      <button v-for="accent in ACCENTS" :key="accent.id" type="button" :aria-label="accent.name" :title="accent.name" :aria-pressed="themeStore.accent === accent.id" :style="{'--swatch': accent.color}" @click="themeStore.setAccent(accent.id)"><span /></button>
+    </div>
     <div class="theme-mode-panel">
       <div v-if="themeStore.theme === 'minimal'" class="color-mode-segmented" role="radiogroup" aria-label="色彩模式">
         <button
@@ -49,22 +52,22 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
-import { useThemeStore, type ColorMode, type ThemeName } from "@vue-app/stores/theme";
+import { useThemeStore, ACCENTS, type ColorMode, type ThemeName } from "@vue-app/stores/theme";
 
 withDefaults(defineProps<{ compact?: boolean }>(), { compact: false });
 
 const themeStore = useThemeStore();
 const themes: readonly { id: ThemeName; name: string; description: string }[] = [
-  { id: "minimal", name: "简约", description: "中性高密度，支持明暗与系统跟随" },
-  { id: "schale", name: "夏莱", description: "明亮清透的蔚蓝学院终端" },
-  { id: "prts", name: "PRTS", description: "高对比工业战术终端" },
+  { id: "minimal", name: "默认", description: "中性高密度，支持明暗与系统跟随" },
+  { id: "schale", name: "BA", description: "明亮清透的蔚蓝学院终端" },
+  { id: "prts", name: "终末地", description: "高对比工业战术终端" },
 ];
 const colorModes: readonly { id: ColorMode; label: string }[] = [
   { id: "system", label: "跟随系统" },
   { id: "light", label: "浅色" },
   { id: "dark", label: "深色" },
 ];
-const currentThemeName = computed(() => themes.find((item) => item.id === themeStore.theme)?.name ?? "简约");
+const currentThemeName = computed(() => themes.find((item) => item.id === themeStore.theme)?.name ?? "默认");
 
 function cycleTheme(): void {
   const order: readonly ThemeName[] = ["minimal", "schale", "prts"];

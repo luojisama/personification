@@ -17,13 +17,18 @@ describe("ThemeSwitcher", () => {
     const store = useThemeStore();
     store.init();
     expect(wrapper.findAll(".theme-option-btn")).toHaveLength(3);
-    expect(wrapper.text()).toContain("简约");
-    expect(wrapper.text()).toContain("夏莱");
-    expect(wrapper.text()).toContain("PRTS");
+    expect(wrapper.text()).toContain("默认");
+    expect(wrapper.text()).toContain("BA");
+    expect(wrapper.text()).toContain("终末地");
     expect(wrapper.findAll(".mode-option-btn")).toHaveLength(3);
+    expect(wrapper.findAll(".accent-picker button")).toHaveLength(5);
+    await wrapper.get('button[aria-label="玫瑰"]').trigger("click");
+    expect(store.accent).toBe("rose");
+    expect(wrapper.get('button[aria-label="玫瑰"]').attributes("aria-pressed")).toBe("true");
 
     await wrapper.findAll(".theme-option-btn")[1]!.trigger("click");
     expect(store.theme).toBe("schale");
+    expect(wrapper.find(".accent-picker").exists()).toBe(false);
     expect(store.effectiveScheme).toBe("light");
     expect(wrapper.text()).toContain("固定浅色模式");
     expect(wrapper.find(".color-mode-segmented").exists()).toBe(false);
