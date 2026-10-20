@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 from .routes.audit_routes import build_audit_router
+from .routes.binding_routes import build_binding_router
 from .routes.auth_routes import build_auth_router
 from .routes.proactive_routes import build_proactive_router
 from .routes.config_routes import build_config_router
@@ -103,6 +104,7 @@ def get_runtime_context() -> _RuntimeContext:
 def build_router() -> APIRouter:
     runtime = get_runtime_context()
     router = APIRouter(prefix="/personification")
+    router.include_router(build_binding_router())
     router.include_router(build_moderation_router(runtime=runtime))
     router.include_router(build_auth_router(runtime=runtime))
     router.include_router(build_config_router(runtime=runtime))
