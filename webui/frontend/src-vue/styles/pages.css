@@ -60,22 +60,46 @@ dd {
 
 .evidence-bars {
   display: grid;
-  gap: var(--space-3);
+  grid-template-columns: 3.5rem minmax(2rem, max-content) minmax(0, 1fr);
+  gap: var(--space-3) var(--space-2);
   margin-bottom: var(--space-4);
 }
 
 .evidence-bars div {
   display: grid;
-  grid-template-columns: 5rem 3rem 1fr;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
   align-items: center;
-  gap: var(--space-2);
 }
 
 .evidence-bars i {
   display: block;
-  height: 0.45rem;
-  background: linear-gradient(90deg, var(--color-signal) 0 min(calc(var(--bar, 0) * 4%), 100%), var(--color-surface-sunken) 0);
-  border-radius: var(--radius-xs);
+  height: 0.5rem;
+  background: var(--color-surface-sunken);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.evidence-bars i > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-success);
+}
+
+.evidence-bars [data-status="unknown"] i > span { background: var(--color-warning); }
+.evidence-bars [data-status="unsupported"] i > span { background: var(--color-danger); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .evidence-bars i > span {
+    transform-origin: left;
+    animation: evidence-bar-fill 320ms ease-out both;
+    transition: width 220ms ease-out;
+  }
+}
+
+@keyframes evidence-bar-fill {
+  from { transform: scaleX(0); }
 }
 
 .alert-ledger {

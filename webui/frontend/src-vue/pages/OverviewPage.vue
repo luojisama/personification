@@ -15,12 +15,27 @@
     <QueryBoundary :pending="isPending" :error="error">
       <template v-if="data">
         <section class="overview-welcome">
-          <div><span class="welcome-label">WORKSPACE / 运行概况</span><h2>对话在继续，一切尽在眼前。</h2><p>查看运行指标，追踪回复过程，及时处理待恢复的任务。</p></div>
-          <div class="welcome-links"><RouterLink to="/runtime/routes/capabilities">路由能力 ↗</RouterLink><RouterLink to="/runtime/recovery/pending">恢复队列 ↗</RouterLink></div>
+          <div>
+            <span class="welcome-label">运行概况</span>
+            <h2>查看运行指标与待处理事项</h2>
+            <p>核对路由能力、跟进恢复任务，或查看最近的回复记录。</p>
+          </div>
+          <nav class="welcome-links" aria-label="总览快捷入口">
+            <RouterLink to="/runtime/routes/capabilities">
+              <Icon name="route" />
+              <span><b>路由能力</b><small>{{ formatInteger(data.route_counts.unknown) }} 项待核对</small></span>
+              <Icon class="welcome-link-arrow" name="chevron" />
+            </RouterLink>
+            <RouterLink to="/runtime/recovery/pending">
+              <Icon name="recovery" />
+              <span><b>恢复队列</b><small>{{ formatInteger(data.recovery_counts.pending) }} 项待恢复</small></span>
+              <Icon class="welcome-link-arrow" name="chevron" />
+            </RouterLink>
+          </nav>
         </section>
         <section class="metric-rack overview-metric-rack" aria-label="运行指标">
           <article>
-            <span>运行状态</span>
+            <span><Icon name="system" />运行状态</span>
             <strong>
               <StateBadge :tone="runtimeTone">
                 {{ data.runtime_status === 'healthy' ? '健康' : data.runtime_status === 'offline' ? '离线' : '降级' }}
@@ -29,17 +44,17 @@
             <small>快照 {{ formatDateTime(data.generated_at) }}</small>
           </article>
           <article>
-            <span>活跃回合</span>
+            <span><Icon name="trace" />活跃回合</span>
             <strong>{{ formatInteger(data.active_turns) }}</strong>
             <small>当前进入调度链路</small>
           </article>
           <article>
-            <span>一小时事件</span>
+            <span><Icon name="signal" />一小时事件</span>
             <strong>{{ formatInteger(data.events_last_hour) }}</strong>
             <small>仅脱敏运行事件</small>
           </article>
           <article>
-            <span>回合 p95</span>
+            <span><Icon name="clock" />回合 p95</span>
             <strong>{{ formatDuration(data.p95_turn_ms) }}</strong>
             <small>不含管理异步任务</small>
           </article>
@@ -48,20 +63,10 @@
         <div class="overview-grid">
           <Panel eyebrow="EVIDENCE / ROUTES" title="路由能力">
             <div class="evidence-bars">
-              <div>
-                <span>支持</span>
-                <b>{{ formatInteger(data.route_counts.supported) }}</b>
-                <i :style="{ '--bar': `${data.route_counts.supported}` }" />
-              </div>
-              <div>
-                <span>未知</span>
-                <b>{{ formatInteger(data.route_counts.unknown) }}</b>
-                <i :style="{ '--bar': `${data.route_counts.unknown}` }" />
-              </div>
-              <div>
-                <span>不支持</span>
-                <b>{{ formatInteger(data.route_counts.unsupported) }}</b>
-                <i :style="{ '--bar': `${data.route_counts.unsupported}` }" />
+              <div v-for="route in routeBreakdown" :key="route.key" :data-status="route.key">
+                <span>{{ route.label }}</span>
+                <b>{{ formatInteger(route.count) }}</b>
+                <i aria-hidden="true"><span :style="{ width: route.share }" /></i>
               </div>
             </div>
             <RouterLink class="text-link" to="/runtime/routes/capabilities">
@@ -142,6 +147,7 @@ import { resources } from "@/api/resources";
 import { formatDateTime, formatDuration, formatInteger, shortId } from "@/lib/format";
 import { traceOutcomeLabel } from "@/lib/labels";
 import EmptyState from "@vue-app/components/EmptyState.vue";
+import Icon from "@vue-app/components/Icon.vue";
 import PageHeader from "@vue-app/components/PageHeader.vue";
 import Panel from "@vue-app/components/Panel.vue";
 import QueryBoundary from "@vue-app/components/QueryBoundary.vue";
@@ -157,5 +163,19 @@ const { data, isPending, error } = useQuery({
 const runtimeTone = computed(() => {
   if (!data.value) return "unknown";
   return data.value.runtime_status === "healthy" ? "ok" : data.value.runtime_status === "offline" ? "error" : "warn";
+});
+
+const routeBreakdown = computed(() => {
+  const counts = data.value?.route_counts;
+  if (!counts) return [];
+  const total = counts.supported + counts.unknown + counts.unsupported;
+  return ([
+    { key: "supported", label: "支持" },
+    { key: "unknown", label: "未知" },
+    { key: "unsupported", label: "不支持" },
+  ] as const).map(({ key, label }) => {
+    const count = counts[key];
+    return { key, label, count, share: `${total > 0 ? count / total * 100 : 0}%` };
+  });
 });
 </script>
