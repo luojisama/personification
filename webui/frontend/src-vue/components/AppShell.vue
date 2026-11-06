@@ -12,9 +12,10 @@
           <strong>{{ selectedBot?.nickname || "拟人插件" }}</strong>
           <small>{{ selectedBot?.bot_id ? `${selectedBot.platform === 'telegram' ? 'Telegram' : 'QQ'} ${selectedBot.raw_bot_id || selectedBot.bot_id}` : "管理台" }}</small>
         </div>
-        <div v-if="bots.length > 1 && !railCollapsed" class="bot-selector">
-          <SearchableSelect v-model="selectedBotId" label="选择 Bot" :options="botOptions" hide-label />
-        </div>
+      </div>
+
+      <div v-if="bots.length > 1" class="bot-selector">
+        <SelectField v-model="selectedBotId" label="切换 Bot" :options="botOptions" />
       </div>
 
       <div class="global-page-search rail-expandable">
@@ -132,7 +133,6 @@ import { adminAccountLabel } from "@/lib/labels";
 import { NAVIGATION_GROUPS, NAVIGATION_ITEMS, NAVIGATION_LEAVES, NAVIGATION_SECTIONS, navigationContext, navigationSectionForPage, type NavigationNode } from "@/app/navigation";
 import Icon from "@vue-app/components/Icon.vue";
 import IdentityAvatar from "@vue-app/components/IdentityAvatar.vue";
-import SearchableSelect from "@vue-app/components/forms/SearchableSelect.vue";
 import SelectField from "@vue-app/components/forms/SelectField.vue";
 import TextField from "@vue-app/components/forms/TextField.vue";
 import StateBadge from "@vue-app/components/StateBadge.vue";
@@ -175,8 +175,7 @@ const selectedBotId = computed({
 });
 const botOptions = computed(() => bots.value.map((bot) => ({
   value: bot.bot_id,
-  label: `${bot.platform === "telegram" ? "Telegram · " : ""}${bot.nickname} · ${bot.raw_bot_id || bot.bot_id}`,
-  description: bot.online ? "在线" : "未连接",
+  label: `${bot.platform === "telegram" ? "Telegram" : "QQ"} · ${bot.nickname} · ${bot.raw_bot_id || bot.bot_id}${bot.online ? "" : "（未连接）"}`,
 })));
 const currentContext = computed(() => navigationContext(route.path));
 const currentSection = computed(() => currentContext.value?.section ?? null);

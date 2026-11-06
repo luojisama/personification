@@ -131,17 +131,16 @@ describe("AppShell", () => {
 
   it("无真实网络即可选择 Bot、搜索页面和控制移动抽屉", async () => {
     installViewport(true);
+    window.localStorage.setItem("personification.nav.collapsed", "1");
     const { wrapper, queryClient } = await renderShell();
     await nextTick();
     await wrapper.get(".mobile-nav-trigger").trigger("click");
     await nextTick();
     const rail = document.querySelector<HTMLElement>("#admin-navigation")!;
     await vi.waitFor(() => expect(rail.querySelector(".bot-selector")).not.toBeNull());
-    const botInput = rail.querySelector<HTMLInputElement>(".bot-selector .searchable-select-input")!;
-    const botInputWrapper = new DOMWrapper(botInput);
-    await botInputWrapper.trigger("focus");
-    await botInputWrapper.trigger("keydown", { key: "ArrowDown" });
-    await botInputWrapper.trigger("keydown", { key: "Enter" });
+    const botSelect = new DOMWrapper(rail.querySelector<HTMLSelectElement>(".bot-selector select")!);
+    expect(botSelect.element.value).toBe("10001");
+    await botSelect.setValue("10002");
     expect(useBotStore().selectedBotId).toBe("10002");
 
     const search = new DOMWrapper(rail.querySelector<HTMLInputElement>(".global-page-search input")!);
