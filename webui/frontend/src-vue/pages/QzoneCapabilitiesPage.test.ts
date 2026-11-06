@@ -52,7 +52,7 @@ describe("QzoneCapabilitiesPage.vue", () => {
         plugins: [createPinia(), [VueQueryPlugin, { queryClient }]],
         stubs: {
           RouterLink: true,
-          DiagnosticPanel: { template: '<div class="diagnostic-panel-stub" />' },
+          DiagnosticPanel: { props: ["diagnostic"], template: '<div class="diagnostic-panel-stub">{{ diagnostic.title }} {{ diagnostic.message }}</div>' },
           EmptyState: { template: '<div class="empty-state-stub"><slot /></div>' },
           PageHeader: {
             props: ["index", "title", "description"],
@@ -212,10 +212,19 @@ describe("QzoneCapabilitiesPage.vue", () => {
     expect(wrapper.text()).toContain("qzone_read_only_identity_matched");
   });
 
-  it("asks once before publishing as the selected Bot", async () => {
+  it.each([
+    [{ diagnostic: { ok: true, title: "已发布" } }, "已发布"],
+    [{
+      ok: false,
+      code: "semantic_reviewer_model_missing",
+      phase: "semantic_review",
+      title: "语义审阅模型不可用",
+      message: "审阅模型接口返回 404，尚未发布。",
+    }, "语义审阅模型不可用 审阅模型接口返回 404，尚未发布。"],
+  ])("asks once and displays the publish result returned by the API", async (result, expected) => {
     currentRoute.params = { section: "operations" };
     useBotStore().setBotId("10004");
-    vi.mocked(resources.qzonePost).mockResolvedValue({ diagnostic: { ok: true, title: "已发布" } });
+    vi.mocked(resources.qzonePost).mockResolvedValue(result);
     const wrapper = createWrapper();
     await flushPromises();
 
@@ -228,5 +237,6 @@ describe("QzoneCapabilitiesPage.vue", () => {
     expect(resources.qzonePost).toHaveBeenCalledWith("post-now", {
       bot_id: "10004", operation_id: expect.stringMatching(/^qzone-[a-f0-9]{32}$/),
     });
+    expect(wrapper.get(".diagnostic-panel-stub").text()).toBe(expected);
   });
 });

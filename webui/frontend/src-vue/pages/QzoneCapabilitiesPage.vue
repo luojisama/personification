@@ -744,7 +744,7 @@ const uncertainPublish = ref("");
 const publishMutation = useMutation({
   mutationFn: (request: { bot_id: string; operation_id: string }) => resources.qzonePost("post-now", request),
   onSuccess: (result, request) => {
-    const diagnostic = safeDiagnostic(asRecord(result.diagnostic));
+    const diagnostic = safeDiagnostic(asRecord(result.diagnostic ?? result));
     recordDiagnostic(diagnostic);
     if (diagnostic.outcome_unknown || ["reserved", "dispatching", "unknown"].includes(formatValue(result.status))) {
       uncertainPublish.value = diagnostic.operation_id || request.operation_id;
