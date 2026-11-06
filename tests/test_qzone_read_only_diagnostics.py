@@ -143,6 +143,38 @@ def test_read_only_diagnostics_probe_failure_keeps_old_stored_credential(tmp_pat
     assert store.get("10001") == "uin=o10001; p_skey=old-secret;"
 
 
+def test_read_only_diagnostics_can_use_saved_login_when_export_is_unavailable(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    config = SimpleNamespace(personification_data_dir=str(tmp_path))
+    store = qzone_service.QzoneCredentialStore(config)
+    store.replace(bot_id="10001", cookie="uin=o10001; p_skey=scan-secret;", source="qr_login")
+
+    async def export(**_kwargs):  # noqa: ANN003
+        return False, "onebot_cookie_export_failed", ""
+
+    async def login(_cookie, qq, p_skey):  # noqa: ANN001
+        assert (qq, p_skey) == ("10001", "scan-secret")
+        return True, "ok"
+
+    async def read(**kwargs):  # noqa: ANN003
+        assert kwargs["target_uin"] == "10001"
+        return True, "qzone_feed_read_ok", 1
+
+    async def unexpected_install(**_kwargs):  # noqa: ANN003
+        raise AssertionError("saved credentials must not be overwritten")
+
+    monkeypatch.setattr(qzone_service, "_export_qzone_cookie_from_bot", export)
+    monkeypatch.setattr(qzone_service, "_probe_qzone_cookie", login)
+    monkeypatch.setattr(qzone_service, "_read_qzone_feed_probe", read)
+    monkeypatch.setattr(qzone_service, "install_qzone_cookie", unexpected_install)
+
+    result = asyncio.run(qzone_service.run_qzone_read_only_diagnostics(bot=_Bot(), plugin_config=config, logger=_Logger()))
+
+    assert result["ok"] is True
+    assert result["stages"][1]["code"] == "qzone_read_only_saved_login_used"
+    assert result["stages"][-1]["status"] == "skipped"
+    assert "scan-secret" not in str(result)
+
+
 def _admin_client(runtime_context):  # noqa: ANN001, ANN202
     runtime_context.app_module.set_runtime_context(
         plugin_config=runtime_context.plugin_config,

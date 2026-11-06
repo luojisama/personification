@@ -3,7 +3,7 @@
     <PageHeader
       index="06"
       title="路由能力"
-      description="能力状态与验证状态分别呈现。超时、网络、5xx 和解析异常都保持“未知 / 结果不确定”，不会伪装成“不支持”。"
+      description="查看各模型支持的功能和最近的测试结果。遇到超时或连接失败时，能力会标为待确认。"
     >
       <template #actions>
         <TextField

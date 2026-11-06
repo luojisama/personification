@@ -3,7 +3,7 @@
     <PageHeader
       index="02"
       title="Agent 状态"
-      description="实时汇总 Bot 连接、回复回合、内心状态、进程资源和最近 Trace。只展示可审计状态，不展示隐藏思维链。"
+      description="查看 Bot 是否在线、正在处理的回复、资源占用和最近的处理记录。"
     >
       <template #actions>
         <button class="button button-secondary" type="button" @click="refetch()">

@@ -3,7 +3,7 @@
     <PageHeader
       index="08"
       title="Trace 取证"
-      description="只展示可审计决策摘要、状态机、阶段预算和脱敏工具证据；不请求、不存储也不渲染模型隐藏思维链。"
+      description="查看一条消息从接收到回复的处理过程，定位失败步骤和耗时。"
     >
       <template #actions>
         <TextField

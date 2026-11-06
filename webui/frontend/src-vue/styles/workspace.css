@@ -220,13 +220,16 @@ body {
   min-height:52px;
   gap:18px;
   border:0;
+  padding:0;
+  background:transparent;
 }
 .tertiary-navigation a {
   border:0;
   border-bottom:2px solid transparent;
   border-radius:0;
-  padding:16px 2px;
-  font-size:12px;
+  padding:14px 2px;
+  font-size:var(--text-sm);
+  flex:none;
   background:transparent;
 }
 .tertiary-navigation a.active {
@@ -250,6 +253,14 @@ body {
   padding:3px 0 10px;
   align-items:center;
 }
+.page-title-block {
+  min-width:0;
+  flex:1 1 22rem;
+}
+.page-actions {
+  min-width:0;
+  max-width:100%;
+}
 .page-title-block h1 {
   font-size:26px;
   font-weight:650;
@@ -257,7 +268,7 @@ body {
 }
 .page-title-block p {
   max-width:720px;
-  font-size:12px;
+  font-size:var(--text-sm);
   line-height:1.8;
   margin-top:6px;
 }
@@ -270,7 +281,7 @@ body {
   align-items:center;
 }
 .panel-title {
-  font-size:14px;
+  font-size:1rem;
   font-weight:650;
 }
 .panel-body {
@@ -560,9 +571,12 @@ tbody tr:hover {
     font-size:19px;
   }
   .tertiary-navigation {
-    gap:14px;
+    gap:var(--space-2);
+    min-height:44px;
     overflow-x:auto;
   }
+  .tertiary-navigation a { padding:10px 4px; font-size:var(--text-xs); }
+  .top-status-line { gap:var(--space-2); min-height:52px; }
   .workspace-breadcrumb {
     display:none;
   }
@@ -619,7 +633,6 @@ tbody tr:hover {
 }
 .section-page-nav a > svg,
 .visual-section-nav button > svg { flex-shrink: 0; }
-.workspace-navigation { top: 64px; }
 .panel-heading { flex-wrap: wrap; }
 .panel-heading-copy { flex: 1 1 12rem; }
 .panel-actions { max-width: 100%; }

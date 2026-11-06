@@ -839,10 +839,67 @@ dd {
   }
 }
 
-/* QQ 空间能力与对账面板 */
+/* QQ 空间 */
+.qzone-page .panel-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+}
+
+.qzone-page .panel-body > p,
+.qzone-page .panel-body > dl {
+  margin: 0;
+}
+
+.qzone-page .panel-body > .button {
+  justify-self: start;
+}
+
+.qzone-quick-links {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(14rem, 100%), 1fr));
+  gap: var(--space-3);
+}
+
+.qzone-quick-links a {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  color: var(--color-ink);
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+}
+
+.qzone-quick-links a:hover {
+  border-color: var(--color-signal);
+  text-decoration: none;
+}
+
+.qzone-quick-links a > svg {
+  color: var(--color-signal);
+}
+
+.qzone-quick-links small {
+  display: block;
+  color: var(--color-ink-muted);
+  margin-top: .2rem;
+}
+
+.qzone-notice {
+  margin: 0;
+  padding: var(--space-3);
+  color: var(--color-ink);
+  background: var(--color-signal-soft);
+  border-inline-start: 3px solid var(--color-signal);
+  border-radius: var(--radius-xs);
+}
+
 .qzone-capability-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(15rem, 100%), 1fr));
   gap: var(--space-3);
 }
 
@@ -853,6 +910,7 @@ dd {
   background: var(--color-surface-sunken);
   border: 1px solid var(--color-line);
   border-radius: var(--radius-xs);
+  align-content: start;
 }
 
 .qzone-capability-grid header {
@@ -860,12 +918,19 @@ dd {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.qzone-technical-details summary {
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+  cursor: pointer;
 }
 
 .qzone-capability-grid dl {
   display: grid;
   gap: var(--space-2);
-  margin: 0;
+  margin: var(--space-2) 0 0;
 }
 
 .qzone-capability-grid dl > div {
@@ -875,12 +940,14 @@ dd {
   font-size: var(--text-xs);
 }
 
+.qzone-capability-grid dl dt { flex: none; }
+.qzone-capability-grid dl dd { margin: 0; min-width: 0; text-align: end; }
+
 .qzone-login-session {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-4);
-  margin-top: var(--space-3);
 }
 
 .qzone-login-session img {
@@ -938,7 +1005,7 @@ dd {
 
 .form-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(14rem, 100%), 1fr));
   gap: var(--space-3);
   margin-bottom: var(--space-3);
 }

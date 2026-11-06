@@ -136,11 +136,11 @@ def build_qzone_social_scan_task(
     scan_qzone_social_feeds: Callable[..., Awaitable[dict[str, Any]]],
     logger: Any,
 ) -> Callable[..., Awaitable[dict[str, Any]]]:
-    async def _qzone_social_scan(target_user_id: str = "", force: bool = False) -> dict[str, Any]:
+    async def _qzone_social_scan(target_user_id: str = "", force: bool = False, *, bot: Any = None) -> dict[str, Any]:
         return await run_qzone_social_scan(
             qzone_publish_available=qzone_publish_available,
             qzone_social_enabled=qzone_social_enabled,
-            get_bots=get_bots,
+            get_bots=(lambda: {str(bot.self_id): bot}) if bot is not None else get_bots,
             update_qzone_cookie=update_qzone_cookie,
             scan_qzone_social_feeds=scan_qzone_social_feeds,
             logger=logger,
@@ -161,11 +161,11 @@ def build_qzone_inbound_poll_task(
     poll_qzone_inbound_messages: Callable[[Any], Awaitable[dict[str, Any]]],
     logger: Any,
 ) -> Callable[..., Awaitable[dict[str, Any]]]:
-    async def _qzone_inbound_poll(force: bool = False) -> dict[str, Any]:
+    async def _qzone_inbound_poll(force: bool = False, *, bot: Any = None) -> dict[str, Any]:
         return await run_qzone_inbound_poll(
             qzone_publish_available=qzone_publish_available,
             qzone_inbound_enabled=qzone_inbound_enabled,
-            get_bots=get_bots,
+            get_bots=(lambda: {str(bot.self_id): bot}) if bot is not None else get_bots,
             update_qzone_cookie=update_qzone_cookie,
             poll_qzone_inbound_messages=poll_qzone_inbound_messages,
             logger=logger,

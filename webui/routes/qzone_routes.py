@@ -337,7 +337,7 @@ def _build_status(runtime, *, bot_id: str = "") -> dict[str, Any]:
 
 _READ_ONLY_STAGE_LABELS = {
     "bot_online": "确认目标 Bot 在线",
-    "cookie_export": "服务端导出 Cookie",
+    "cookie_export": "获取 QQ 空间登录信息",
     "identity_match": "核验 Cookie 身份",
     "login_page_check": "检查登录页面",
     "self_feed_read": "读取本人动态",
@@ -472,7 +472,7 @@ async def _run_read_only_diagnostics_endpoint(
         phase="read_only_diagnostics",
         title="QZone 只读诊断完成" if ok else "QZone 只读诊断未通过",
         message=(
-            "已完成服务端 Cookie 导出、身份核验和只读动态检查；未调用点赞、评论、发布或转发。"
+            "已核对 Bot 的登录账号，并检查了动态读取。"
             if ok
             else "诊断在失败阶段停止；未调用点赞、评论、发布或转发。"
         ),
@@ -818,11 +818,6 @@ def build_qzone_router(*, runtime) -> APIRouter:
         admin: AdminIdentity = Depends(require_admin),
     ) -> dict:
         """管理员手动强制发一条说说（绕过额度/间隔/agent 决策，但仍计入月度额度）。"""
-        require_https_or_loopback(
-            request,
-            code="qzone_write_https_required",
-            message="远程 QZone 写操作必须使用 HTTPS；仅本机 loopback 允许开发例外。",
-        )
         from ...core.time_ctx import get_configured_now
         from ...core.qzone_publish import qzone_content_preview
         from ...core.qzone_service import get_qzone_auth_status, get_qzone_capability_status
@@ -1929,8 +1924,19 @@ def build_qzone_router(*, runtime) -> APIRouter:
                 retryable=True,
             )
             raise _http_diagnostic(503, report)
+        bot_id = str(body.get("bot_id") or "").strip()
+        bot = _get_bot(runtime, bot_id) if bot_id else None
+        if bot_id and bot is None:
+            raise _http_diagnostic(404, diagnostic(
+                ok=False,
+                code="qzone_scan_bot_unavailable",
+                phase="scan_preflight",
+                title="所选 Bot 未连接",
+                message="请在管理台选择在线的 QQ Bot 后再运行任务。",
+                retryable=True,
+            ))
         try:
-            raw_result = await runner(force=True)
+            raw_result = await runner(force=True, bot=bot) if bot is not None else await runner(force=True)
         except Exception as exc:
             report = _exception_report(
                 runtime,

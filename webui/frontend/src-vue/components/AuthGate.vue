@@ -3,11 +3,11 @@
     <div class="auth-topbar"><a href="/personification/frontend/" class="auth-wordmark"><span>P/F</span> PERSONIFICATION</a><details class="auth-appearance"><summary>外观设置</summary><ThemeSwitcher /></details></div>
     <div class="auth-layout">
     <aside class="auth-intro" aria-label="管理台介绍">
-      <span class="auth-tag">你的 Bot 工作空间</span>
-      <h2>让每一次对话，<br />都有迹可循。</h2>
-      <p>从人格与记忆，到模型与运行状态。<br />在一个安静、有序的空间里管理你的机器人。</p>
+      <span class="auth-tag">拟人插件</span>
+      <h2>Bot 管理台</h2>
+      <p>管理人设、记忆与模型配置，查看 Bot 的连接状态和回复记录。</p>
       <div class="auth-illustration" aria-hidden="true"><div class="orbit-line"></div><div class="orbit-line second"></div><span class="orbit-dot"></span><div class="orbit-center">P/F<small>PERSONIFICATION</small></div><span class="orbit-caption">对话 · 记忆 · 连接</span></div>
-      <div class="auth-intro-footer"><span>01 / 连接你的账号</span><span>02 / 进入工作空间</span></div>
+      <div class="auth-intro-footer"><span>选择管理员账号</span><span>输入私聊验证码</span></div>
     </aside>
     <section class="auth-card" aria-labelledby="auth-title">
       <p class="eyebrow">欢迎回来</p>
@@ -28,9 +28,10 @@
       <form v-else-if="auth.phase === 'verifying'" class="auth-form" @submit.prevent="confirmCode">
         <p v-if="selectedIdentity" class="auth-note">登录账号：{{ selectedAccountLabel }}。{{ deliveryNote }}</p>
         <TextField v-model="code" label="六位验证码" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required />
-        <TextField v-model="deviceLabel" label="设备名称" autocomplete="off" maxlength="64" placeholder="例如：我的电脑" />
-        <label class="trust-device-option"><input v-model="trustDevice" type="checkbox" :disabled="!trustAvailable" />信任此设备</label>
-        <p class="auth-note">{{ trustAvailable ? "个人设备可保持勾选，以后自动登录；共享设备请取消勾选。信任仅保存在当前浏览器。" : "信任设备需通过 HTTPS 或本机地址访问；当前仍可使用验证码登录。" }}</p>
+        <template v-if="trustAvailable">
+          <TextField v-model="deviceLabel" label="设备名称" autocomplete="off" maxlength="64" placeholder="例如：我的电脑" />
+          <label class="trust-device-option"><input v-model="trustDevice" type="checkbox" />信任此浏览器，下次自动登录</label>
+        </template>
         <button type="submit" :disabled="busy || !/^[0-9]{6}$/.test(code)">验证并登录</button>
         <button class="secondary" type="button" :disabled="busy" @click="back">重新选择管理员</button>
       </form>
@@ -42,17 +43,17 @@
       </div>
 
       <div v-else class="auth-form" role="alert">
-        <p>管理台服务当前不可用。网络故障不会被当作已登录状态。</p>
+        <p>暂时无法连接管理台，请检查服务是否正在运行。</p>
         <button type="button" :disabled="busy" @click="retry">重试连接</button>
       </div>
 
       <p v-if="auth.message" class="auth-message" role="status">{{ auth.message }}</p>
       <button v-if="auth.phase === 'anonymous' && auth.logoutUnconfirmed" class="logout-retry" type="button" :disabled="busy" @click="logout">重试注销</button>
       <p v-if="errorMessage" class="auth-error" role="alert">{{ errorMessage }}</p>
-      <p class="auth-footnote">验证码只会由 Bot 私聊发送；本页面不会要求或保存管理 Token。</p>
+      <p class="auth-footnote">请在与 Bot 的私聊中查看验证码。</p>
     </section>
     </div>
-    <footer class="auth-bottom">PERSONIFICATION <span>属于你的对话与记忆</span></footer>
+    <footer class="auth-bottom">PERSONIFICATION</footer>
   </main>
 </template>
 

@@ -13,7 +13,8 @@ const currentRoute = reactive<{ params: Record<string, string> }>({
   params: { section: "capabilities" },
 });
 
-vi.mock("vue-router", () => ({
+vi.mock("vue-router", async (importOriginal) => ({
+  ...await importOriginal<typeof import("vue-router")>(),
   useRoute: () => currentRoute,
 }));
 
@@ -25,7 +26,8 @@ vi.mock("@/api/resources", () => ({
   },
 }));
 
-vi.mock("@/api/client", () => ({
+vi.mock("@/api/client", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/api/client")>(),
   API_BASE: "/personification/api/v2",
   api: { post: vi.fn() },
 }));
@@ -49,6 +51,7 @@ describe("QzoneCapabilitiesPage.vue", () => {
       global: {
         plugins: [createPinia(), [VueQueryPlugin, { queryClient }]],
         stubs: {
+          RouterLink: true,
           DiagnosticPanel: { template: '<div class="diagnostic-panel-stub" />' },
           EmptyState: { template: '<div class="empty-state-stub"><slot /></div>' },
           PageHeader: {
@@ -106,8 +109,8 @@ describe("QzoneCapabilitiesPage.vue", () => {
     const text = wrapper.text();
     expect(text).toContain("发布");
     expect(text).toContain("顶级评论");
-    expect(text).toContain("available");
-    expect(text).toContain("unknown");
+    expect(text).toContain("可用");
+    expect(text).toContain("待确认");
   });
 
   it("renders status in auth section and displays read-only status and quota correctly", async () => {
@@ -154,15 +157,15 @@ describe("QzoneCapabilitiesPage.vue", () => {
 
     expect(resources.qzoneGet).toHaveBeenCalledWith("status", { bot_id: "10002" }, expect.anything());
     const text = wrapper.text();
-    expect(text).toContain("登录与运行态");
-    expect(text).toContain("额度与结果核对");
-    expect(text).toContain("已配置（不回传原值）");
-    expect(text).toContain("按 Bot 隔离的凭据与能力");
+    expect(text).toContain("当前登录状态");
+    expect(text).toContain("发布额度与状态");
+    expect(text).toContain("已配置");
+    expect(text).toContain("各 Bot 的登录与功能状态");
     expect(text).toContain("安装时已验证");
-    expect(text).toContain("onebot");
+    expect(text).toContain("QQ 协议端");
   });
 
-  it("requires explicit confirmation before invoking the exact v2 read-only diagnostic", async () => {
+  it("runs a read-only check for the selected Bot when requested", async () => {
     currentRoute.params = { section: "feeds" };
     const botStore = useBotStore();
     botStore.setBotId("10003");
@@ -193,10 +196,10 @@ describe("QzoneCapabilitiesPage.vue", () => {
 
     const wrapper = createWrapper();
     await flushPromises();
-    const runButton = wrapper.findAll("button").find((button) => button.text().includes("运行 7 阶段只读诊断"));
-    expect(runButton?.attributes("disabled")).toBeDefined();
+    expect(api.post).not.toHaveBeenCalled();
+    const runButton = wrapper.findAll("button").find((button) => button.text() === "开始读取检查");
+    expect(runButton?.attributes("disabled")).toBeUndefined();
 
-    await wrapper.find('input[type="checkbox"]').setValue(true);
     await runButton?.trigger("click");
     await flushPromises();
 
@@ -205,18 +208,25 @@ describe("QzoneCapabilitiesPage.vue", () => {
       target_user_id: "",
       confirm_external_read: true,
     });
-    expect(wrapper.text()).toContain("最近只读诊断阶段");
+    expect(wrapper.text()).toContain("读取检查结果");
     expect(wrapper.text()).toContain("qzone_read_only_identity_matched");
   });
 
-  it("keeps unsupported write operations disabled in operations section", async () => {
+  it("asks once before publishing as the selected Bot", async () => {
     currentRoute.params = { section: "operations" };
+    useBotStore().setBotId("10004");
+    vi.mocked(resources.qzonePost).mockResolvedValue({ diagnostic: { ok: true, title: "已发布" } });
     const wrapper = createWrapper();
     await flushPromises();
 
-    const buttons = wrapper.findAll("button[disabled]");
-    const disabledLabels = buttons.map((b) => b.text());
-    expect(disabledLabels).toContain("点赞");
-    expect(disabledLabels).toContain("转发");
+    await wrapper.findAll("button").find((button) => button.text() === "生成并发布")?.trigger("click");
+    expect(resources.qzonePost).not.toHaveBeenCalled();
+    expect(wrapper.get('[role="dialog"]').text()).toContain("10004");
+    await wrapper.get(".dialog-footer .button-danger").trigger("click");
+    await flushPromises();
+    expect(resources.qzonePost).toHaveBeenCalledOnce();
+    expect(resources.qzonePost).toHaveBeenCalledWith("post-now", {
+      bot_id: "10004", operation_id: expect.stringMatching(/^qzone-[a-f0-9]{32}$/),
+    });
   });
 });

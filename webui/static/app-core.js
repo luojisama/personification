@@ -1122,6 +1122,7 @@ function renderTopbar() {
           </div>
         </div>
         <div class="row">
+          <a class="btn small" href="/personification/frontend/${state.view === 'qzone' ? 'runtime/qzone/capabilities' : ''}">新版管理台</a>
           <button class="btn small icon-btn" onclick="toggleTheme()" title="${themeLabel}" aria-label="${themeLabel}">${themeIcon}</button>
           <span class="muted" title="登录 QQ">${escapeHtml(state.qq)}</span>
           <button class="btn small" onclick="doLogout()">退出</button>

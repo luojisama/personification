@@ -299,8 +299,13 @@ def test_qzone_post_requires_operation_id(_runtime_context) -> None:
     _assert_safe_report(report, code="qzone_operation_id_missing", phase="input_validation")
 
 
-def test_qzone_post_duplicate_success_does_not_mark_generated_content(_runtime_context, monkeypatch) -> None:  # noqa: ANN001
+@pytest.mark.parametrize("path", ["/personification/api/qzone/post-now", "/personification/api/v2/qzone-management/post-now"])
+def test_qzone_post_over_remote_http_preserves_admin_and_duplicate_checks(_runtime_context, monkeypatch, path) -> None:  # noqa: ANN001
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
     marked: list[str] = []
+    requests: list[str] = []
 
     async def generate(_bot):  # noqa: ANN001
         return "重复请求正文"
@@ -311,6 +316,7 @@ def test_qzone_post_duplicate_success_does_not_mark_generated_content(_runtime_c
         raise AssertionError("duplicate operation must not dispatch")
 
     async def coordinated(**_kwargs):  # noqa: ANN003
+        requests.append(_kwargs["operation_id"])
         return {
             "success": True,
             "status": "succeeded",
@@ -324,15 +330,21 @@ def test_qzone_post_duplicate_success_does_not_mark_generated_content(_runtime_c
         _runtime_context,
         bundle=SimpleNamespace(qzone_generate_post=generate, publish_qzone_shuo=publish),
     )
-    client = _admin_client(_runtime_context)
-
-    response = client.post(
-        "/personification/api/qzone/post-now",
-        json={"bot_id": "10000", "operation_id": "duplicate-success"},
-    )
+    app = FastAPI()
+    app.include_router(_runtime_context.app_module.build_router())
+    client = TestClient(app, base_url="http://198.51.100.8:8080", client=("198.51.100.9", 50001))
+    payload = {"bot_id": "10000", "operation_id": "duplicate-success"}
+    assert client.post(path, json=payload).status_code == 401
+    _login_as_admin(client, _runtime_context)
+    client.headers.pop("X-Personification-CSRF", None)
+    assert client.post(path, json=payload).status_code == 403
+    assert requests == []
+    client.headers["X-Personification-CSRF"] = client.cookies["personification_webui_csrf"]
+    response = client.post(path, json=payload)
 
     assert response.status_code == 200
     assert response.json()["duplicate"] is True
+    assert requests == ["duplicate-success"]
     assert marked == []
 
 
@@ -875,6 +887,43 @@ def test_qzone_scan_diagnostics_sanitize_failures_and_exceptions(_runtime_contex
     invalid = client.post("/personification/api/qzone/scan-now", json={"kind": "unsupported"})
     assert invalid.status_code == 400
     _assert_safe_report(invalid.json()["detail"], code="qzone_scan_kind_invalid", phase="scan_preflight")
+
+
+def test_qzone_scan_uses_selected_bot_and_rejects_an_unknown_bot(_runtime_context) -> None:
+    jobs = load_personification_module("plugin.personification.jobs.task_builders")
+    first_bot = _Bot(_runtime_context)
+    selected_bot = _Bot(_runtime_context)
+    selected_bot.self_id = "10002"
+    bots = {"10000": first_bot, "10002": selected_bot}
+    seen = []
+
+    async def scan(*, get_bots, force, **_kwargs):  # noqa: ANN001, ANN003
+        assert force is True
+        seen.extend(get_bots().values())
+        return {"ok": True}
+
+    task = jobs.build_qzone_social_scan_task(
+        run_qzone_social_scan=scan,
+        qzone_publish_available=True,
+        qzone_social_enabled=True,
+        get_bots=lambda: bots,
+        update_qzone_cookie=None,
+        scan_qzone_social_feeds=None,
+        logger=_logger(),
+    )
+    _runtime_context.app_module.set_runtime_context(
+        plugin_config=_runtime_context.plugin_config,
+        superusers={"10001"},
+        get_bots=lambda: bots,
+        logger=_logger(),
+        runtime_bundle=SimpleNamespace(qzone_social_scan=task),
+    )
+    client = _admin_client(_runtime_context)
+    path = "/personification/api/v2/qzone-management/scan-now"
+
+    assert client.post(path, json={"kind": "social", "bot_id": "10002"}).status_code == 200
+    assert client.post(path, json={"kind": "social", "bot_id": "99999"}).status_code == 404
+    assert seen == [selected_bot]
 
 
 def test_qzone_capability_auth_internal_type_error_is_not_retried(monkeypatch):

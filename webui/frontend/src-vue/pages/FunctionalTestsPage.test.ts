@@ -1,4 +1,4 @@
-import { mount } from "@vue/test-utils";
+import { mount, RouterLinkStub } from "@vue/test-utils";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
 import FunctionalTestsPage from "./FunctionalTestsPage.vue";
@@ -46,6 +46,7 @@ describe("FunctionalTestsPage.vue", () => {
     return mount(FunctionalTestsPage, {
       global: {
         plugins: [[VueQueryPlugin, { queryClient }]],
+        stubs: { RouterLink: RouterLinkStub },
       },
     });
   }
@@ -71,6 +72,10 @@ describe("FunctionalTestsPage.vue", () => {
     expect(wrapper.text()).toContain("后台任务与权限");
     expect(wrapper.text()).toContain("Provider 外部读取探针");
     expect(wrapper.text()).toContain("真实 QQ canary（专用入口）");
+    const links = wrapper.findAllComponents(RouterLinkStub);
+    expect(links.map((link) => [link.props("to"), link.text()])).toEqual([
+      ["/runtime/qzone/feeds", "检查动态读取"], ["/runtime/qzone/operations", "测试发布"],
+    ]);
   });
 
   it("external operations do not trigger API call if confirmation is cancelled", async () => {

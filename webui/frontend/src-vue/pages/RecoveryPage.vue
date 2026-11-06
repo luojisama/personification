@@ -3,7 +3,7 @@
     <PageHeader
       index="09"
       title="恢复队列"
-      description="队列保存失败的入站消息摘要，并使用当前上下文重新生成。发送结果未知或部分送达时只进入人工核对区，绝不自动重放。"
+      description="查看处理失败的消息和恢复进度。发送结果不确定时，请先核对是否已经送达。"
     >
       <template #actions>
         <SelectField

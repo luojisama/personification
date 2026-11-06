@@ -3,12 +3,12 @@
     <PageHeader
       index="04"
       title="功能体检"
-      description="区分本地只读检查、Provider 外部读取探针与真实 rules→buffer→model→review→ledger→send QQ canary。源码与自动测试绝不发送真实 QQ。"
+      description="检查插件运行状态、模型连通性和媒体能力，也可前往 QQ 空间单独测试。"
     />
 
-    <Panel eyebrow="SAFE FULL / ONE CONFIRMATION" title="一键安全全检">
+    <Panel eyebrow="SAFE FULL / ONE CONFIRMATION" title="批量检查">
       <p>
-        服务端先计算项目和费用摘要；确认后只执行本地读取与 Provider 外部读取。QQ、QZone 及所有外部写入始终排除，不会因一键全检被触发。
+        一次检查本地配置和模型接口。确认前会列出检查项目和可能产生的模型费用。
       </p>
       <div class="dossier-actions">
         <button class="button" type="button" :disabled="safeBatchMutation.isPending.value || batchBusy" @click="safeBatchMutation.mutate()">
@@ -63,9 +63,6 @@
     <QueryBoundary :pending="catalogQuery.isPending.value" :error="catalogQuery.error.value">
       <template v-if="catalogQuery.data.value">
         <Panel eyebrow="RISK-GRADED TESTS" title="体检项目">
-          <p class="test-category">
-            本页只运行受控体检。QQ 与 QZone 外部写入不会在此页面执行；真实单目标 canary 需在专用入口经管理员确认并留下可对账的 Trace。
-          </p>
           <section v-for="group in testGroups" :key="group.name" class="health-test-group">
             <header class="test-card-header">
               <div>
@@ -97,19 +94,24 @@
                 </header>
                 <p class="test-category">{{ timeoutBoundaryLabel(test) }}</p>
 
-                <div v-if="test.risk === 'external_write'" class="test-target-field">
+                <div v-if="test.risk === 'external_write' && test.execution_kind !== 'qzone_canary'" class="test-target-field">
                   <TextField
                     :id="'target-' + test.id"
                     v-model="targets[test.id]"
-                    label="目标复核摘要"
+                    label="测试目标"
                     type="text"
                     :placeholder="'Bot、目标 QQ/群或动态 ID'"
-                    description="本页不会发送 QQ 或写入 QZone；公网 HTTP 模式也会由服务端强制拒绝外部写操作。"
+                    description="实际发送需要在对应页面确认接收账号。"
                   />
                 </div>
 
                 <div class="test-card-actions">
+                  <template v-if="test.execution_kind === 'qzone_canary'">
+                    <RouterLink class="button button-secondary" to="/runtime/qzone/feeds">检查动态读取</RouterLink>
+                    <RouterLink class="button button-secondary" to="/runtime/qzone/operations">测试发布</RouterLink>
+                  </template>
                   <button
+                    v-else
                     type="button"
                     class="button button-secondary"
                     :disabled="isTestBusy(test.id)"
@@ -170,6 +172,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted } from "vue";
 import { useQuery, useMutation } from "@tanstack/vue-query";
+import { RouterLink } from "vue-router";
 
 import { diagnosticFromError } from "@/api/diagnostics";
 import { resources } from "@/api/resources";
@@ -193,7 +196,7 @@ const EXECUTION_LABELS = {
   local_readonly: "本地只读检查",
   provider_probe: "Provider 外部读取探针",
   qq_canary: "真实 QQ canary（专用入口）",
-  qzone_canary: "QZone canary（专用入口）",
+  qzone_canary: "QQ 空间测试",
 } as const;
 
 const RUN_STATE_LABELS = {
@@ -339,7 +342,8 @@ function timeoutBoundaryLabel(test: FunctionalTestDefinition): string {
   if (test.execution_kind === "provider_probe") {
     return "超时边界：Provider 探针受诊断安全时限控制；超时只会标记为结果未知。";
   }
-  if (test.execution_kind === "qq_canary" || test.execution_kind === "qzone_canary") {
+  if (test.execution_kind === "qzone_canary") return "可以先检查登录与读取，再按需发布一条说说。";
+  if (test.execution_kind === "qq_canary") {
     return "超时边界：本页不启动真实 canary；专用入口必须记录超时与 Trace。";
   }
   return "超时边界：本地只读检查仅记录实际耗时，不发送 QQ。";

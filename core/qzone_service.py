@@ -1373,14 +1373,17 @@ async def run_qzone_read_only_diagnostics(
         logger=logger,
     )
     if not exported:
-        record("cookie_export", status="error", code=export_code, started_at=export_started)
-        return {
-            "ok": False,
-            "code": "qzone_read_only_diagnostics_failed",
-            "failure_code": export_code,
-            "stages": stages,
-            "target": target_summary,
-        }
+        raw_cookie = _get_qzone_cookie(plugin_config, bot_id)
+        if not raw_cookie:
+            record("cookie_export", status="error", code=export_code, started_at=export_started)
+            return {
+                "ok": False,
+                "code": "qzone_read_only_diagnostics_failed",
+                "failure_code": export_code,
+                "stages": stages,
+                "target": target_summary,
+            }
+        export_code = "qzone_read_only_saved_login_used"
     record("cookie_export", status="ok", code=export_code, started_at=export_started)
 
     identity_started = time.monotonic()
@@ -1488,6 +1491,15 @@ async def run_qzone_read_only_diagnostics(
         record("target_feed_read", status="ok", code=target_code, started_at=target_started, count=target_count)
 
     commit_started = time.monotonic()
+    if not exported:
+        _set_qzone_capability(bot_id, "qzone.web_read", "available", "qzone_read_only_diagnostics_succeeded")
+        record("normalization_commit", status="skipped", code="qzone_read_only_saved_login_unchanged", started_at=commit_started)
+        return {
+            "ok": True,
+            "code": "qzone_read_only_diagnostics_succeeded",
+            "stages": stages,
+            "target": target_summary,
+        }
 
     async def _verified_self_feed_probe(_cookie: str, _qq: str, _p_skey: str) -> tuple[bool, str]:
         return True, "ok"

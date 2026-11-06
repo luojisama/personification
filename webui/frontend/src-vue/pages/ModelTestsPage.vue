@@ -3,7 +3,7 @@
     <PageHeader
       index="05"
       title="模型测试"
-      description="单路由、全路由、人设 Prompt 与音视频测试入口。媒体默认使用服务器内置确定性样例；自定义上传只证明传输/解码链，不冒充内容理解验证。"
+      description="测试聊天、人设和媒体处理。可用内置样例检查识别结果，也可上传文件检查上传和解码。"
     />
 
     <div v-if="topDiagnostic" class="diagnostic-panel diagnostic-panel-error" role="alert">

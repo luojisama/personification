@@ -10,7 +10,7 @@
         <IdentityAvatar :src="selectedBot?.avatar_url" :label="selectedBot?.nickname || 'P/F'" size="large" square />
         <div class="brand-copy rail-expandable">
           <strong>{{ selectedBot?.nickname || "拟人插件" }}</strong>
-          <small>{{ selectedBot?.bot_id ? `${selectedBot.platform === 'telegram' ? 'Telegram' : 'QQ'} ${selectedBot.raw_bot_id || selectedBot.bot_id}` : "事件取证台" }}</small>
+          <small>{{ selectedBot?.bot_id ? `${selectedBot.platform === 'telegram' ? 'Telegram' : 'QQ'} ${selectedBot.raw_bot_id || selectedBot.bot_id}` : "管理台" }}</small>
         </div>
         <div v-if="bots.length > 1 && !railCollapsed" class="bot-selector">
           <SearchableSelect v-model="selectedBotId" label="选择 Bot" :options="botOptions" hide-label />
@@ -83,32 +83,36 @@
     </Sidebar>
 
     <SidebarInset class="workbench">
-      <header class="top-status-line">
-        <SidebarTrigger class="mobile-nav-trigger" aria-controls="admin-navigation" label="打开导航">
-          <Icon name="data" /> 菜单
-        </SidebarTrigger>
-        <span>{{ selectedBot?.online ? "Bot 在线" : "Bot 未连接" }}{{ selectedBot?.bot_id ? ` · ${selectedBot.bot_id}` : "" }}</span>
-        <StateBadge :tone="realtimeTone" :raw="realtime.state.value">{{ realtimeLabel }}</StateBadge>
-        <details class="top-status-details">
-          <summary>诊断状态</summary>
-          <span><Icon name="signal" /> 实时事件 {{ realtime.events.value.length }}/500</span>
-          <span v-if="adminIdentity">当前身份 {{ identitySourceLabel(adminIdentity.identity_source) }} · {{ adminAccountLabel(adminIdentity.qq, adminIdentity.platform) }}</span>
-          <span v-if="realtime.resyncCount.value">REST 重同步 {{ realtime.resyncCount.value }} 次</span>
-          <code>{{ route.path }}</code>
-        </details>
-      </header>
+      <div class="workspace-chrome">
+        <header class="top-status-line">
+          <SidebarTrigger class="mobile-nav-trigger" aria-controls="admin-navigation" label="打开导航">
+            <Icon name="data" /> 菜单
+          </SidebarTrigger>
+          <span class="top-bot-status">{{ selectedBot?.online ? "Bot 在线" : "Bot 未连接" }}{{ selectedBot?.bot_id ? ` · ${selectedBot.raw_bot_id || selectedBot.bot_id}` : "" }}</span>
+          <StateBadge :tone="realtimeTone" :raw="realtime.state.value">{{ realtimeLabel }}</StateBadge>
+          <details class="top-status-details">
+            <summary>连接详情</summary>
+            <div class="top-status-content">
+              <span><Icon name="signal" /> 实时事件 {{ realtime.events.value.length }}/500</span>
+              <span v-if="adminIdentity">当前身份 {{ identitySourceLabel(adminIdentity.identity_source) }} · {{ adminAccountLabel(adminIdentity.qq, adminIdentity.platform) }}</span>
+              <span v-if="realtime.resyncCount.value">重新同步 {{ realtime.resyncCount.value }} 次</span>
+              <code>{{ route.path }}</code>
+            </div>
+          </details>
+        </header>
 
-      <div v-if="currentContext" class="workspace-navigation">
-        <nav v-if="currentContext.page.children.length" class="tertiary-navigation" :aria-label="`${currentContext.page.label}页面内导航`">
-          <span class="workspace-breadcrumb">{{ currentContext.section.label }} / {{ currentContext.page.label }}</span>
-          <RouterLink
-            v-for="item in currentContext.page.children.filter(platformPageAllowed)"
-            :key="item.id"
-            :to="item.path || '#'"
-            :class="{ active: currentContext.leaf.id === item.id }"
-            :aria-current="currentContext.leaf.id === item.id ? 'page' : undefined"
-          >{{ item.label }}</RouterLink>
-        </nav>
+        <div v-if="currentContext" class="workspace-navigation">
+          <nav v-if="currentContext.page.children.length" class="tertiary-navigation" :aria-label="`${currentContext.page.label}页面内导航`">
+            <span class="workspace-breadcrumb">{{ currentContext.section.label }} / {{ currentContext.page.label }}</span>
+            <RouterLink
+              v-for="item in currentContext.page.children.filter(platformPageAllowed)"
+              :key="item.id"
+              :to="item.path || '#'"
+              :class="{ active: currentContext.leaf.id === item.id }"
+              :aria-current="currentContext.leaf.id === item.id ? 'page' : undefined"
+            >{{ item.label }}</RouterLink>
+          </nav>
+        </div>
       </div>
 
       <main id="main-content" class="main-workspace" tabindex="-1"><slot v-if="!currentContext || platformPageAllowed(currentContext.leaf)" /><p v-else role="status">当前 Telegram Bot 不支持此 QQ 专有功能，请切换 QQ Bot 或选择其他页面。</p></main>
