@@ -134,9 +134,10 @@ dd {
 }
 
 .segmented-control button[aria-selected="true"] {
-  color: var(--color-signal-ink);
-  background: var(--color-signal-soft);
+  color: var(--color-selected-ink);
+  background: var(--color-selected-bg);
   border-color: var(--color-signal);
+  font-weight: 700;
 }
 
 .token-chart {
@@ -220,7 +221,7 @@ dd {
 .billing-notice {
   padding: var(--space-4);
   margin-top: 0;
-  color: var(--color-signal-ink);
+  color: var(--color-selected-ink);
   background: var(--color-signal-soft);
   border-radius: var(--radius-sm);
   font-family: var(--font-display);
@@ -1095,8 +1096,8 @@ dd {
 }
 
 .memory-nav .nav-tab[aria-selected="true"] {
-  color: var(--color-signal-ink);
-  background: var(--color-signal-soft);
+  color: var(--color-selected-ink);
+  background: var(--color-selected-bg);
   border-color: var(--color-signal);
   font-weight: bold;
 }
@@ -1154,7 +1155,7 @@ dd {
 .score-badge {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--color-signal-ink);
+  color: var(--color-selected-ink);
   background: var(--color-signal-soft);
   padding: 0.15rem 0.45rem;
   border-radius: var(--radius-xs);
@@ -1542,8 +1543,8 @@ dd {
 
 .config-category-rail button.active {
   border-color: var(--color-signal);
-  background: var(--color-signal-soft);
-  color: var(--color-signal-ink);
+  background: var(--color-selected-bg);
+  color: var(--color-selected-ink);
 }
 
 .config-category-rail small {
@@ -1572,9 +1573,9 @@ dd {
 }
 
 .filter-chips button.chip-active {
-  background: var(--color-signal-soft);
+  background: var(--color-selected-bg);
   border-color: var(--color-signal);
-  color: var(--color-signal-ink);
+  color: var(--color-selected-ink);
 }
 
 .config-entry-list {
