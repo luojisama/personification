@@ -25,6 +25,7 @@ import "@vue-app/styles/layout.css";
 import "@vue-app/styles/components.css";
 import "@vue-app/styles/pages.css";
 import "@vue-app/styles/workspace.css";
+import "@vue-app/styles/refine.css";
 
 const auth = useAuthStore();
 const realtime = useRuntimeEvents();

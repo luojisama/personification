@@ -111,7 +111,7 @@
                       </RouterLink>
                     </td>
                     <td>{{ trace.user_name || trace.user_id }}</td>
-                    <td>{{ traceOutcomeLabel(trace.outcome) }}</td>
+                    <td><span class="trace-outcome" :data-outcome="trace.outcome">{{ traceOutcomeLabel(trace.outcome) }}</span></td>
                     <td>{{ formatDuration(trace.elapsed_ms) }}</td>
                     <td><code>{{ trace.diagnosis_code }}</code></td>
                   </tr>

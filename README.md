@@ -1,101 +1,121 @@
-# Personification
+# Personification · 拟人化聊天运行时
 
-面向 NoneBot 2 与 OneBot V11 的拟人化聊天插件。它不只是给 LLM 套一层人设，而是把群聊参与决策、上下文、长期记忆、用户画像、工具调用、媒体理解、发送行为、主动社交、QQ 空间和运维控制台组合成一套完整运行时。
+[![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![NoneBot2](https://img.shields.io/badge/NoneBot2-2.4.4%2B-EA5252)](https://nonebot.dev/)
+[![Adapters](https://img.shields.io/badge/Adapters-OneBot%20V11%20%7C%20Telegram-0284C7)](#环境要求)
+[![WebUI](https://img.shields.io/badge/WebUI-Vue%203%20%C2%B7%20三主题控制台-0D9488)](#webui-管理与取证控制台)
 
-当前仓库是源码型插件，不是独立发布的 PyPI package。仓库默认放在 NoneBot 项目的 `plugin/personification`，由 `plugin_dirs = ["plugin"]` 自动加载。
+> 面向 **NoneBot 2**（OneBot V11 & 可选 Telegram）的群聊拟人化 Agent 插件。它不只是给大模型套一层系统提示词，而是把**参与决策、多消息批次与指代消解、长期记忆与关系演进、多步工具与多模态理解、拟人化分段发送、主动社交、QQ 空间一致性账本与三主题 WebUI 取证控制台**组合成一套完整的生产级运行时。
 
-新增 [Telegram 网页托管与 NoneBot 原生接入](docs/telegram-integration.md)、[聊天实验室](docs/quality-lab.md)、[共同经历与发言时效](docs/experience-and-timeliness.md)。Telegram 使用可选官方适配器；表达候选只在隔离实验室运行，经历和时效开关默认关闭。真实 TG 与自然度盲评仍需单独验收。
+**目录导航**：[双轨仓库](#双轨仓库说明) · [设计原则](#设计原则) · [核心能力](#主要能力) · [运行架构](#运行架构) · [安装与配置](#环境要求) · [模型与路由](#provider-与模型路由) · [命令速查](#qq-命令) · [WebUI 控制台](#webui-管理与取证控制台) · [QQ 空间一致性](#qq-空间一致性) · [Skill 与社交查梗 MCP](#skill-与-mcp) · [专题文档](#专题文档索引) · [开发与验证](#开发与验证)
 
-### 双轨仓库说明
+---
 
-- **本地开发版**：代码目录为 `plugin/personification`，命名空间为 `plugin.personification`，源码主页是 [`luojisama/personification`](https://github.com/luojisama/personification)。
-- **商店发布版**：发布仓库是 [`nonebot-plugin-personification`](https://github.com/luojisama/nonebot-plugin-personification)，PyPI 包名为 `nonebot-plugin-shiro-personification`，页面见 [`PyPI`](https://pypi.org/project/nonebot-plugin-shiro-personification/)。
+## 双轨仓库说明
 
-两者使用相同的用户可见插件名“拟人化聊天”，但目录、导入命名空间和发布渠道不同；本仓库的源码更新需要经过发布版适配后才能打包发布。
+当前仓库是源码型插件，默认放在宿主 NoneBot 项目的 `plugin/personification`，由 `plugin_dirs = ["plugin"]` 自动加载：
+
+| 轨道 | 仓库 / 包名 | 说明 |
+|---|---|---|
+| **本地开发版** | [`luojisama/personification`](https://github.com/luojisama/personification) | 代码目录 `plugin/personification`，导入命名空间 `plugin.personification` |
+| **商店发布版** | [`luojisama/nonebot-plugin-personification`](https://github.com/luojisama/nonebot-plugin-personification) | 独立插件发布仓库，经发布适配同步后打包 |
+| **PyPI 发布包** | [`nonebot-plugin-shiro-personification`](https://pypi.org/project/nonebot-plugin-shiro-personification/) | 面向商店与 `pip` 安装的正式发行包 |
+
+两者使用相同的用户可见插件名「拟人化聊天」，但目录、导入命名空间和发布渠道不同；本仓库的源码更新需经过发布版适配后打包发布。
+
+---
 
 ## 设计原则
 
-- 对话语义由 LLM 决定。代码负责事实、上下文、权限、预算、契约、持久化和安全兜底，不用关键词表代替“要不要回复、用户在说什么、该调用什么工具”等语义判断。
-- 普通聊天采用 TurnPlan、Agent tool loop 和可选 response review；模型可以回复、追问、查证、执行动作或保持沉默。
-- 有外部副作用的工具显式声明 `side_effect`、`final_behavior` 和 `retryable`，成功外发后可以静默收尾，避免重复发送。
-- 回复提交有 session lock、stale check 和抢占边界，降低慢回复插入错误话题、同一轮重复发送等并发问题。
-- QQ 空间发布使用持久化 Operation ledger。结果不确定时保持 `unknown`，禁止自动重发，优先远端精确对账。
-- 所有高风险自动行为都有主开关、额度、冷却或权限边界；默认关闭 QQ 空间、TTS、Social Intelligence、远程 Skill 和插件代调用等能力。
+- **LLM 全决策（No Keyword Routing）**：对话语义由模型决定。代码只负责事实、上下文、权限、预算、契约、持久化和安全兜底，不用关键词表或正则代替「要不要回复、用户在说什么、该调用什么工具、证据够不够」等语义判断。
+- **快慢双轨与分层预算**：日常无需外部工具与动作的对话自动走[无工具轻路径](docs/context-only-chat.md)降低延迟；复杂请求进入 `TurnPlan`、Agent tool loop 与可选 response review，模型可自由回复、追问、查证、执行动作或保持沉默。
+- **外部副作用显式契约**：具有外部副作用的工具必须声明 `side_effect`、`final_behavior` 和 `retryable`；成功外发后可静默收尾，杜绝重复发送。
+- **会话并发与防串话边界**：回复提交具备 session lock、generation-scoped 分段协作打断、stale check 和抢占边界，降低慢回复插入错误话题或同轮重复外发的风险。
+- **不确定状态绝不盲目重放**：QQ 空间发布与群内 Peer Bot 协作均使用持久化账本（Operation Ledger / Outbound Ledger）。结果不确定时保持 `unknown`，禁止自动重发，优先远端精确对账。
+- **高风险能力默认关闭**：QQ 空间、TTS、主动社交（Social Intelligence）、远程 Skill、插件代调用、共同经历与发言时效开关默认关闭，均受主开关、额度、冷却与权限边界约束。
+
+---
 
 ## 主要能力
 
 | 领域 | 当前能力 |
 |---|---|
-| 群聊与私聊 | 白名单群、私聊、被 @、引用、随机插话、戳一戳、多人并行话题、短期 thread state、回复缓冲和过期提交拦截 |
-| Agent | TurnPlan、`speech_act`、工具筛选、多步 tool call、证据综合、Provider fallback、预算 shadow/adaptive、Trace |
-| 人设与关系 | 全局/群人设、角色模板构建、群风格学习、用户画像、结构化画像更正、好感度、inner state |
-| 联网与工具 | Provider 原生搜索、免配置搜索引擎链（萌娘百科/必应国内秒级响应优先、一键网络测速与自动延迟排序）、Web Search（8s硬性熔断保护）、Web Fetch、Wiki（萌娘百科优先+并发抽取）、天气、新闻、游戏信息、ACG 实体解析、资源与图片检索、用户任务 |
-| 图片与媒体 | 图片输入、Bot 自身头像二创/同人自知交互、GIF 采样理解、可选视频理解、视觉 fallback、图片生成、表情包语义选择/发送/打标/整理 |
-| 拟人发送 | 按生成耗时补足打字延迟、大模型智能短消息分段（Message Splitter，支持独立模型路由与语义断句防硬切）、引用、@、消息 reaction、拍一拍、私聊输入状态和可选低概率错别字 |
-| 主动行为 | 主动私聊、早晚问候、新闻推送、话题跟进、节日祝福、群空闲话题和状态驱动的主动表达 |
-| QQ 空间 | QR 登录、自动/手动说说、好友动态点赞评论、评论回响、转发、月度额度、幂等发布、远端对账和历史漏记补记 |
-| 管理与观测 | 现代化 WebUI、配置热更新（支持搜索引擎一键并发测速与自动延迟最优重排、有序列表上下调序/一键预设）、Provider/模型测试、功能体检、Token/额度、Agent 状态、Trace、审计、日志、数据迁移和插件更新 |
+| **群聊、私聊与多平台** | 白名单群、私聊、被 @、引用、随机插话、戳一戳、多人并行话题、同用户跨消息指代承接、短期 thread state、回复缓冲与过期提交拦截；支持 [Telegram 网页托管与 NoneBot 原生双模接入](docs/telegram-integration.md)、Topic 隔离及跨平台账号绑定共享上下文 |
+| **Agent 决策与执行** | `TurnPlan`、`speech_act`、无工具轻路径、工具动态筛选、多步 tool call、证据综合、Provider 缓冲流式（Buffered Streaming）、[Peer Bot 双轨协作](docs/platform-acceptance-2026-09-06.md)、预算 `shadow`/`adaptive` 与全链路 Trace |
+| **人设、记忆与关系** | 全局/群人设、角色模板构建、群风格学习、[分层记忆与全局场景记忆](docs/global-scene-memory-update.md)、记忆宫殿（Memory Palace）、用户画像、结构化画像更正、支持负数的真实好感度曲线与 inner state、可选[共同经历与发言时效判断](docs/experience-and-timeliness.md) |
+| **联网与内置工具** | Provider 原生搜索、免配置搜索引擎链（萌娘百科/必应国内秒级响应优先、一键并发测速与自动延迟排序）、Web Search（8s 硬性熔断保护）、Web Fetch、Wiki（萌娘百科优先+并发抽取）、天气、新闻、游戏信息、ACG 实体解析、资源与图片检索、用户任务 |
+| **多模态与媒体理解** | 图片输入、Bot 自身头像二创/同人自知交互、GIF 采样理解、群视频与社交视频多模态理解（原生视频 / 72·120·168 帧双遍抽帧拼图 / 字幕与云端 ASR）、视觉强锚点验真与确定性兜底、图片生成、表情包语义选择/发送/打标/整理 |
+| **拟人化发送** | 按生成耗时补足打字延迟、大模型智能短消息分段（Message Splitter，支持独立模型路由与语义断句防硬切）、可变 `reply_shape`、引用、@、消息 reaction、拍一拍、私聊输入状态和可选低概率错别字 |
+| **主动社交行为** | 主动私聊、早晚问候、新闻推送、话题跟进、节日祝福、群空闲话题、[Telegram 主动表达](docs/telegram-proactive.md)与状态驱动的主动互动 |
+| **QQ 空间（QZone）** | 多 Bot 凭据隔离、QR 扫码登录、自动/手动说说、好友动态点赞评论、评论回响、转发、月度额度、幂等发布、远端精确对账、历史漏记补记与群友空间受控工具 |
+| **WebUI 管理与观测** | Vue 3 事件取证与管理控制台（**默认 / BA Schale / 终末地 PRTS** 三套主题）、配置热更新、Provider 池与用途模型绑定、功能体检与六类路由能力探针、[聊天实验室](docs/quality-lab.md)、Token 计费统计、Agent 状态、Trace 时间线、受控禁言、数据迁移和五源并发测速更新 |
+
+---
 
 ## 运行架构
 
 ```mermaid
 flowchart LR
-    A[OneBot V11 event] --> B[事件规则与 session buffer]
-    B --> C[上下文 / Persona / Memory / Topic state]
-    C --> D[Semantic frame / TurnPlan]
-    D --> E[Agent tool loop]
-    E --> F[证据综合与 response review]
-    F --> G[commit lock / stale check]
-    G --> H[拟人化发送]
+    A[OneBot V11 / Telegram 事件] --> B[策略门 · 事件规则 · 会话缓冲]
+    B --> C[上下文 · Persona · Memory · Topic State]
+    C --> D[Semantic Frame / TurnPlan]
+    D -->|context_only 轻路径| F[证据综合与 Response Review]
+    D -->|需要检索或动作| E[Agent Tool Loop]
+    E --> F
+    F --> G[Commit Lock · Stale Check · 分段打断边界]
+    G --> H[拟人化分段发送]
 
-    E <--> I[Skill / MCP / Web / Vision]
+    E <--> I[Skill / 原生社交 MCP / Web / Vision]
     C <--> J[(personification.db)]
-    K[APScheduler] --> L[主动消息 / Memory job / QZone]
-    M[WebUI] --> C
+    K[APScheduler] --> L[主动消息 · Memory 演化 · QZone]
+    M[Vue 3 WebUI 控制台] --> C
     M --> J
     M --> L
 ```
 
-主要目录：
+### 核心目录职责
 
 | 目录 | 职责 |
 |---|---|
-| `agent/` | Agent runtime、planner、tool loop、final synthesis、ToolRegistry、inner state |
-| `core/` | Provider/模型路由、配置、数据库、Memory、Persona、QZone、诊断、安全和运行时组装 |
-| `handlers/` | NoneBot matcher、消息采集、普通/YAML reply pipeline、命令和拟人发送 |
-| `flows/` | 主动消息、日记/说说、QQ 空间社交与其它跨步骤流程 |
-| `jobs/` | APScheduler 注册与后台任务构建 |
-| `skills/skillpacks/` | 内置 Skill 内容、工具实现和说明 |
-| `skill_runtime/` | 内置、本地、远程、隔离进程与 MCP Skill loader |
-| `webui/` | FastAPI routes 与无构建步骤的静态管理前端 |
-| `tests/` | 单元、契约、静态门禁和脱敏回放集 |
+| [`agent/`](agent/) | Agent runtime、planner、tool loop、reply quality 综合审阅、ToolRegistry、inner state |
+| [`core/`](core/) | Provider/模型路由、配置注册表、数据库、Memory、Persona、QZone、路由能力探针、诊断与安全边界 |
+| [`handlers/`](handlers/) | NoneBot matcher、消息采集、普通/YAML reply pipeline、命令体系与拟人化发送 |
+| [`flows/`](flows/) | 主动消息、日记/说说、QQ 空间社交及其它跨步骤业务流 |
+| [`jobs/`](jobs/) | APScheduler 定时任务注册与后台任务构建 |
+| [`skills/skillpacks/`](skills/skillpacks/) | 内置 Skill 声明、工具实现与使用说明 |
+| [`skill_runtime/`](skill_runtime/) | 内置、本地、远程、隔离进程与 MCP Skill loader |
+| [`native_mcp/`](native_mcp/) | 内置原生社交平台查梗 MCP（B站、抖音、贴吧、小黑盒只读查证） |
+| [`webui/`](webui/) | FastAPI v1/v2 路由、Vue 3 前端工程（`webui/frontend`）、生产构建产物（`webui/frontend_dist`）与兼容静态页 |
+| [`tests/`](tests/) | 单元、契约、路由、前端、静态门禁与脱敏回放测试集 |
 
-更细的目录示例见 [DIRECTORY_GUIDE.md](DIRECTORY_GUIDE.md)。
+更详细的目录与扩展规范见 [DIRECTORY_GUIDE.md](DIRECTORY_GUIDE.md)。
+
+---
 
 ## 环境要求
 
-- Python `>=3.9,<4.0`。
-- NoneBot 2 `>=2.4.4`，使用 FastAPI Driver。
-- OneBot V11 adapter `>=2.4.6`。
-- `nonebot-plugin-apscheduler` 是硬依赖，缺失时插件会拒绝加载。
-- NapCat、Lagrange.OneBot、LLOneBot 和 go-cqhttp 可承载标准 OneBot 能力；reaction、输入状态、部分拍一拍与 QQ 空间能力取决于具体实现端。
-- SQLite 用于主要持久化；安装 `aiosqlite` 时使用异步访问，否则保留运行时 fallback。
-- 若使用 HTML 渲染或相关图片能力，需要 Playwright Chromium。
+- **Python**：`>=3.9,<4.0`
+- **NoneBot 2**：`>=2.4.4`，使用 FastAPI Driver（`DRIVER=~fastapi`）
+- **协议适配器**：OneBot V11 `>=2.4.6`（NapCat、Lagrange.OneBot、LLOneBot、go-cqhttp 等）；Telegram 接入可选安装 `nonebot-adapter-telegram==0.1.0b20`
+- **硬依赖**：`nonebot-plugin-apscheduler`（缺失时插件拒绝加载）
+- **持久化与渲染**：SQLite（安装 `aiosqlite` 时使用异步访问，否则使用运行时 fallback）；HTML 渲染、图片卡片或原生社交平台 MCP 需安装 Playwright Chromium
 
-本项目宿主的完整依赖清单位于上级项目 `pyproject.toml`。在宿主项目根目录安装：
+在宿主项目根目录安装完整依赖：
 
 ```powershell
 python -m pip install -e .
 python -m playwright install chromium
 ```
 
-只把本仓库接入其它 NoneBot 项目时，至少安装以下运行依赖；按实际启用的媒体和 Skill 能力补充可选依赖：
+若单独将本仓库接入其它 NoneBot 项目，至少安装以下基础运行依赖（按实际启用的媒体、Telegram 和 Skill 能力补充可选依赖）：
 
 ```powershell
 python -m pip install "nonebot2[fastapi,httpx]>=2.4.4" "nonebot-adapter-onebot>=2.4.6" "nonebot-plugin-apscheduler>=0.5.0" "nonebot-plugin-htmlrender>=0.3.6" "nonebot-plugin-alconna>=0.62.0" "nonebot-plugin-uninfo>=0.11.0" "nonebot-plugin-localstore>=0.7.4" "aiohttp>=3.10.0" "aiosqlite>=0.20.0" "ruamel.yaml>=0.18.0" "python-dateutil>=2.9.0" "Pillow>=10.4.0" "qrcode>=8.0,<9.0" "python-multipart>=0.0.20" "pillow-avif-plugin>=1.5.2" "filelock>=3.13.1" "openai>=1.50.0" "google-generativeai>=0.8.0" "anthropic>=0.30.0" "playwright>=1.50.0" "watchdog>=4.0.0" aiofiles beautifulsoup4 emoji imageio-ffmpeg msgspec yt-dlp
 ```
 
-## 安装
+---
+
+## 安装与启动
 
 在 NoneBot 项目根目录执行：
 
@@ -121,11 +141,13 @@ nonebot-adapter-onebot = [
 nb run
 ```
 
-启动日志应出现拟人插件运行时初始化、Skill 加载和 WebUI 路由挂载信息。WebUI 只在 FastAPI Driver 下安装；其它 Driver 会跳过 WebUI，但不影响聊天 matcher。
+启动日志应出现拟人插件运行时初始化、Skill 加载和 WebUI 路由挂载信息。WebUI 仅在 FastAPI Driver 下挂载；其它 Driver 会跳过 WebUI，但不影响聊天 matcher。
+
+---
 
 ## 最小配置
 
-下面示例使用一个 OpenAI-compatible Provider。`personification_api_pools` 必须写成单行 JSON，避免 dotenv 对多行 JSON 截断。
+以下示例使用一个 OpenAI-compatible Provider。`personification_api_pools` 必须写成单行 JSON，避免 dotenv 对多行 JSON 截断：
 
 ```dotenv
 DRIVER=~fastapi
@@ -146,7 +168,9 @@ personification_api_key=replace-me
 personification_model=your-model
 ```
 
-API Key、OAuth credential 和 QQ 空间 Cookie 都是 secret，不要提交到 Git。推荐在首次启动后通过 WebUI 配置中心管理；运行时配置会持久化到插件数据目录，并在重启时恢复。
+> **安全提示**：API Key、OAuth credential 和 QQ 空间 Cookie 均属 secret，严禁提交到 Git。推荐首次启动后通过 WebUI「配置中心」管理；运行时配置会原子持久化到插件数据目录并在重启时恢复，脱敏接口不会向浏览器回传明文密钥。
+
+---
 
 ## Provider 与模型路由
 
@@ -154,22 +178,23 @@ API Key、OAuth credential 和 QQ 空间 Cookie 都是 secret，不要提交到 
 
 | `api_type` | 鉴权方式 | 备注 |
 |---|---|---|
-| `openai` | `api_url` + `api_key` | OpenAI-compatible Chat/Responses route |
-| `gemini` | `api_url` + `api_key` | Gemini official/compatible route |
-| `anthropic` | `api_url` + `api_key` | Anthropic Messages route |
+| `openai` | `api_url` + `api_key` | OpenAI-compatible Chat / Responses 路由 |
+| `gemini` | `api_url` + `api_key` | Gemini 官方或兼容路由 |
+| `anthropic` | `api_url` + `api_key` | Anthropic Messages 标准路由 |
 | `openai_codex` | Codex OAuth | 默认查找 `~/.codex/auth.json`，可指定 `personification_codex_auth_path` |
-| `gemini_cli` | Gemini CLI OAuth | 默认查找 Gemini credential，可指定 auth path/project |
-| `antigravity_cli` | Antigravity/Gemini OAuth | 支持独立 proxy、auth path 和 project |
+| `gemini_cli` | Gemini CLI OAuth | 默认查找 Gemini credential，可指定 auth path / project |
+| `antigravity_cli` | Antigravity / Gemini OAuth | 支持独立 proxy、auth path 与 project |
 
-历史 `claude_code`、`claude_cli` 与 `claudecode` Provider 已移除：检测到这些旧值时会以非调用 tombstone `provider_type_removed` 禁用并给出迁移提示，不会读取旧 OAuth CLI 凭据、不会自动迁移或转发请求。需要 Claude 模型时，请改用标准 `anthropic` API 并重新填写 API 地址、API Key 与模型。
+> **移除说明**：历史 `claude_code`、`claude_cli` 与 `claudecode` Provider 已移除。检测到旧值时会以非调用 tombstone `provider_type_removed` 禁用并给出迁移提示，不会读取旧 OAuth CLI 凭据或自动转发请求。需要 Claude 模型时，请改用标准 `anthropic` API。
 
-Provider pool 每项可设置 `name`、`api_type`、`api_url`、`api_key`、`model`、`auth_path`、`project`、`proxy`、`enabled`、`priority`、`timeout`、`max_retries` 和原生搜索能力。正常聊天支持按优先级 fallback、失败冷却和动态健康排序。
+- **多 Provider 池与模型目录**：Provider pool 每项支持配置多个模型目录（`models`）、默认模型（`default_model_id`）、优先级、超时、重试、代理、原生搜索与订阅额度检测，正常聊天按优先级 fallback、失败冷却并动态健康排序。
+- **按用途绑定模型**：可通过 `personification_model_purpose_bindings` 或 `personification_model_overrides` 为 `agent`、`intent`、`review`、`sticker`、`lite` 等不同阶段绑定最合适的 Provider 与模型（详见[模型目录与补充说明](docs/supplement-and-model-catalog.md)）。
 
-`personification_model_overrides` 可按角色覆盖模型，例如 `agent`、`intent`、`review`、`sticker`；也可以使用 `personification_lite_model` 承担轻量分类和 review。QQ 内使用 `拟人 模型 ...`，或在 WebUI 的配置中心与模型测试页调整。
+---
 
 ## 关键配置
 
-Config model 当前包含数百个字段。下面只列启动、风险和行为边界；完整字段、默认值、类型、scope、热更新状态和风险说明以 WebUI 配置中心或 `拟人 配置 列表` 为准。
+Config 模型当前包含数百个字段。下方仅列出启动、记忆与高风险边界；完整字段、默认值、类型、scope、热更新状态和风险说明以 WebUI「配置中心」或命令 `拟人 配置 列表` 为准。
 
 ### 基础聊天
 
@@ -178,7 +203,7 @@ Config model 当前包含数百个字段。下面只列启动、风险和行为�
 | `personification_whitelist` | `[]` | 允许插件参与的群号；私聊不受群白名单限制 |
 | `personification_global_enabled` | `true` | 全局聊天总开关 |
 | `personification_probability` | `0.30` | 非明确呼叫场景的参与概率基础值 |
-| `personification_meme_reply_probability` | `0.18` | 已经决定回复后，允许自然带入一个匹配语境的低风险 `verified/manual_locked` 梗的概率；不提高随机发言概率 |
+| `personification_meme_reply_probability` | `0.18` | 已决定回复后，自然带入匹配语境的低风险 `verified/manual_locked` 梗的概率（不提高随机发言率） |
 | `personification_agent_enabled` | `true` | 启用完整 Agent tool loop |
 | `personification_agent_max_steps` | `10` | 单轮 Agent 最大步骤 |
 | `personification_agent_budget_mode` | `shadow` | `shadow` 仅观测预算；`adaptive` 才接管实际步数和 deadline |
@@ -193,10 +218,10 @@ Config model 当前包含数百个字段。下面只列启动、风险和行为�
 | 配置 | 默认值 | 作用 |
 |---|---:|---|
 | `personification_memory_enabled` | `true` | 长期 Memory 总开关 |
-| `personification_memory_palace_enabled` | `true` | Memory Palace 与关系能力 |
+| `personification_memory_palace_enabled` | `true` | Memory Palace 与关系图谱能力 |
 | `personification_memory_rag_enabled` | `true` | 长期 Memory 检索注入 |
 | `personification_memory_decay_enabled` | `true` | Memory 衰减任务 |
-| `personification_memory_consolidation_enabled` | `true` | Memory 整合 |
+| `personification_memory_consolidation_enabled` | `true` | Memory 整合与结晶 |
 | `personification_persona_enabled` | `true` | 用户画像生成与注入 |
 | `personification_favorability_enabled` | `true` | 用户/群好感度 |
 | `personification_turn_trace_enabled` | `true` | 记录 Agent 阶段 Trace |
@@ -217,7 +242,9 @@ Config model 当前包含数百个字段。下面只列启动、风险和行为�
 | `personification_humanize_typo_probability` | `0.0` | 非零时闲聊可能故意产生并修正错别字 |
 | `personification_humanize_proactive_poke_enabled` | `false` | 会主动拍一拍 |
 
-注意：部分子功能默认值为 `true`，但仍受其上层 master switch 约束。例如 QZone proactive/social/inbound 的默认值不会绕过 `personification_qzone_enabled=false`。
+> 注意：部分子功能默认值为 `true`，但仍受其上层 master switch 约束。例如 QZone proactive/social/inbound 的默认值不会绕过 `personification_qzone_enabled=false`。
+
+---
 
 ## QQ 命令
 
@@ -246,7 +273,7 @@ Config model 当前包含数百个字段。下面只列启动、风险和行为�
 | `拟人 空间 状态/测试/消息` | 管理员 | QZone 状态、指定好友测试和留言轮询 |
 | `拟人 表情包 整理/清理/回滚` | 管理员 | 表情包维护 |
 | `拟人 人设构建 <作品名> <角色名>` | 管理员 | 从资料构建 Persona template |
-| `拟人 更新` | Superuser | 检查并拉取插件更新 |
+| `拟人 更新` | Superuser | 并发测速检查并拉取插件更新 |
 
 ### 常用兼容命令
 
@@ -274,45 +301,50 @@ Config model 当前包含数百个字段。下面只列启动、风险和行为�
 | `重建/删除/清空插件知识库` | Superuser | Plugin Knowledge 运维 |
 | `拟人额度` / `拟人统计` | Superuser | Provider quota 与运行统计 |
 
-旧命令保留用于兼容，新增管理能力优先放在统一入口和 WebUI。
+---
 
-## WebUI
+## WebUI 管理与取证控制台
 
-FastAPI Driver 启动后访问：
+FastAPI Driver 启动后，可通过以下入口访问：
 
-```text
-http://<host>:<port>/personification/
-```
+- **新版 Vue 3 控制台（推荐）**：`http://<host>:<port>/personification/frontend/`
+- **旧版兼容入口**：`http://<host>:<port>/personification/`
 
-默认 `HOST=127.0.0.1` 时仅本机可访问。若 `HOST=0.0.0.0`，日志会输出局域网访问提示；公网部署建议使用 HTTPS reverse proxy，不要直接暴露明文 HTTP。
+默认 `HOST=127.0.0.1` 时仅本机可访问。若 `HOST=0.0.0.0`，日志会输出局域网访问提示；公网部署强烈建议使用 HTTPS 反向代理，不要直接暴露明文 HTTP。
 
-WebUI 页面覆盖：
+### 三套内置视觉主题
 
-- Agent 状态、仪表盘、功能体检、Provider quota。
-- QQ 空间状态、QR 登录、发布、对账和历史补记。
-- 配置中心、Provider/模型探测和 hot reload。
-- 用户画像、群信息、群开关、群风格与群知识。
-- Agent Memory、Memory graph、recall test 和向量重建。
-- 表情包、Skill/MCP、Plugin Knowledge、插件更新和模型测试。
-- Persona 预览、角色模板构建、主动行为诊断和消息 Trace。
-- UserPolicy / Blacklist（从指定 Bot 好友选取或手工输入 QQ、临时/永久加入、完整解除和事件时间线）、近期 Bot 消息。
-- 数据导入导出、审计日志、插件日志、QQ 账号管理和设备管理。
+WebUI 内置三套完整主题，可在登录页右上角「外观设置」或侧栏底部随时无感切换：
 
-### 登录与安全
+1. **默认（Minimal）**：高密度现代运维工作台，支持**跟随系统 / 浅色 / 深色**模式与 **海蓝、青绿、鸢尾、琥珀、玫瑰** 5 套强调色。
+2. **BA（Schale）**：明亮清透的蔚蓝学院终端风格，毛玻璃浮层、斜切胶囊导航与蔚蓝/暖金点缀（固定浅色）。
+3. **终末地（PRTS）**：高对比工业战术终端风格，直角切角面板、警示斜纹、角标刻度与等宽遥测字体（固定深色）。
 
-- 只有 NoneBot `SUPERUSERS` 或插件管理员可以发起登录。
-- 登录页直接读取并列出 `SUPERUSERS` 与插件管理员，不接受自行输入管理员 QQ。
-- 验证码通过 Bot 私聊发送，5 分钟有效，并与发起登录的浏览器 challenge 绑定。
-- 验证码成功后设备立即可用，不再要求另一台已登录设备二次审批。
-- 有效 Session cookie 内不重复验证；退出、撤销或 7 天到期后必须重新接收管理员验证码，不再使用可伪造的 User-Agent 作为免验证凭据。
-- Session cookie 为 `HttpOnly`、`SameSite=Lax`，写请求还需要 CSRF token。
-- HTTPS 由 request scheme 或 `X-Forwarded-Proto: https` 识别，并据此设置 Secure cookie。
-- 登录发送按来源 IP 限速，同一浏览器 challenge 60 秒内不可重发；并行浏览器 challenge 互不覆盖。设备状态、危险写操作和管理员行为会记录审计日志。
-- 管理员权限被撤销后，已有 WebUI Session 会在下次请求时失效。
+### 七大导航分区
+
+| 分区 | 涵盖页面 |
+|---|---|
+| **运行概览** | 运行总览（健康度、活跃回合、p95 延迟、路由能力分布、恢复队列、最近 Trace、待核对诊断）、Agent 状态、Token 计费统计 |
+| **调试与恢复** | 功能体检、聊天实验室（A/B/C 候选盲评与数据集对比）、模型与视频测试、路由能力（六类在线探针与音视频样例探测）、主动行为诊断、消息 Trace 时间线、恢复队列 |
+| **画像与群聊** | 用户画像、群信息（群成员、好感度、Peer Bot 协作、群空间 Agent 授权）、群开关、受控禁言 |
+| **记忆与表达** | Agent 记忆、记忆宫殿（图谱、召回测试、向量重建）、共同经历卡、表情包管理、人设预览、角色模板构建 |
+| **能力与插件** | Skill 管理、MCP 管理（托管 Registry 安装与原生社交查梗 MCP）、创建工具、插件知识库、插件管理与多源测速更新 |
+| **QQ 与社交** | QQ 空间（功能状态、扫码登录、读取检查、发布与互动、Operation 对账与历史补记）、QQ 账号与好友管理 |
+| **系统与数据** | 配置中心（支持 `revision` 原子保存、Provider 池、用途模型绑定、Token 自定义价格）、Telegram 接入、用户策略与黑名单、近期 Bot 消息、数据迁移、审计日志、插件日志、设备管理、系统诊断、设置 |
+
+### 登录与安全边界
+
+- 只有 NoneBot `SUPERUSERS`、插件管理员或已配置的 Telegram 管理员可以发起登录；登录页直接列出可选管理员账号，不接受任意手输账号。
+- 支持**原平台私聊发送验证码（QQ / Telegram）**以及**官方 QQ 私聊发送 `/登录` 指令领取验证码（浏览器 challenge 绑定）**两种方式，验证码 5 分钟内有效。
+- 支持[信任当前设备](docs/webui-trusted-devices.md)：在 HTTPS 或本机 loopback 环境下验证通过后可勾选信任浏览器，普通会话过期时自动续期恢复，并可在「设备管理」中随时撤销。
+- Session cookie 为 `HttpOnly`、`SameSite=Lax`（HTTPS 下自动启用 `Secure`），所有写请求強制校验 CSRF token。
+- 登录发送按来源 IP 与浏览器 challenge 限速；管理员权限被撤销后，已有 WebUI Session 在下次请求时立即失效。
+
+---
 
 ## QQ 空间一致性
 
-QQ 空间基于非官方接口，必须把“请求返回”和“远端确实只执行一次”分开处理。插件为每次外发创建 Operation ID，并持久化以下状态：
+QQ 空间基于非官方接口，必须把「请求返回」和「远端确实只执行一次」分开处理。插件为每次外发创建 Operation ID，并持久化以下状态：
 
 | 状态 | 含义 | 自动处理 |
 |---|---|---|
@@ -326,156 +358,122 @@ QQ 空间基于非官方接口，必须把“请求返回”和“远端确实�
 
 - 月度额度区分 `confirmed`、`held` 和 `available`；`unknown`、`dispatching` 与有效 reservation 会占 held quota。
 - 同一成功 Operation、月度用量和最近发布状态在同一 SQLite transaction 中提交。
-- 自动对账只接受 Bot 身份、规范化正文 hash、时间窗口内的唯一精确匹配；转发还要求源动态 identity 一致。
-- 无匹配或多匹配不会模糊认领，继续保持 `unknown`。
-- 管理员确认远端确实不存在后，才可把 `unknown` 解除为 `definite_failure`。
-- 历史漏记只能从重新读取的 Bot 本人远端动态中选择并确认，服务端会二次读取验证。
-- 遇到“发布结果未知”时不要直接再次点击发布；先打开真实 QQ 空间核对，再使用 WebUI 对账。
+- 自动对账只接受 Bot 身份、规范化正文 hash、时间窗口内的唯一精确匹配；转发还要求源动态 identity 一致。无匹配或多匹配不会模糊认领，继续保持 `unknown`。
+- 管理员确认远端确实不存在后，才可把 `unknown` 解除为 `definite_failure`；遇到「发布结果未知」时切勿直接重复点击发布，应先打开真实 QQ 空间核对再使用 WebUI 对账。
 
-启用建议：
-
-1. 在 WebUI QQ 空间页完成 QR 登录，确认 Cookie 可刷新。
-2. 设置 `personification_qzone_monthly_limit`、quiet hours、最小间隔和扫描范围。
-3. 先关闭 proactive/social，仅做一次手动发布与读取测试。
-4. 核对 Operation ledger 和远端内容后，再逐项开启自动发表、互动、转发或评论回响。
+---
 
 ## Skill 与 MCP
 
 内置能力包括 Web Search、Web Fetch、Wiki、天气、日期时间、新闻、游戏信息、ACG 实体、并行研究、资源/图片检索、图片生成、视觉分析、表情包、Memory、用户任务、用户画像、群信息、好友请求和 Plugin Knowledge。
 
-自定义 Skill 可以来自：
+自定义 Skill 可来自 `personification_skills_path` 本地目录、本地 zip/目录、远程 zip URL、GitHub repository URL（可指定 ref 和 subdir）或 MCP stdio server。远程 source 默认按不可信输入处理：需要管理员 review，优先使用子进程 isolation 或 MCP；只有显式打开 `personification_skill_allow_unsafe_external` 才允许不可信 Skill 在宿主进程执行。
 
-- `personification_skills_path` 指定的本地目录。
-- 本地 zip 或目录 source。
-- 直接 zip URL。
-- GitHub repository URL，可指定 ref 和 subdir。
-- MCP stdio server。
-
-远程 source 默认按不可信输入处理：需要管理员 review，优先使用子进程 isolation 或 MCP；只有显式打开 `personification_skill_allow_unsafe_external` 才允许不可信 Skill 在宿主进程执行 `build_tools()` / `register()`。
-
-WebUI 的 Skill 页面还提供托管 MCP 安装：可搜索 Official MCP Registry 或配置的兼容 HTTPS Registry，并快捷预检 npm/npx、PyPI/uvx 的 stdio package。托管安装只接受精确版本和公共官方 package registry，不支持自定义 runtime argument、Secret command-line argument 或 Streamable HTTP。Registry metadata 和 tool annotation 均按不可信输入处理；安装后所有 tool 默认关闭，管理员查看名称、说明和 publisher 风险声明后逐项确认启用。
-
-MCP Secret 只允许通过环境变量传给子进程，独立保存在 `personification_mcp_secret_file` 或数据目录 `mcp/secrets.json`，不会写入数据库、WebUI response、审计详情或日志。快捷安装会以 Bot 系统用户权限执行第三方 package；Registry 命名空间验证不等于安全审计，安装前仍应检查源码和 package identity。
+WebUI「MCP 管理」支持搜索 Official MCP Registry 并预检安装 npm/npx、PyPI/uvx 的 stdio package（仅接受精确版本，默认关闭全部 tool，需管理员逐项启用；MCP Secret 独立保存在 `mcp/secrets.json` 并仅通过环境变量传入子进程）。
 
 ### 原生社交平台查梗 MCP
 
-项目内置不可删除的 `builtin_social_platform_research`，首版覆盖 B站、抖音、贴吧和小黑盒。它默认关闭，并同时受 MCP 服务开关、平台开关和 Agent 工具授权三层约束；登录成功只保存对应隔离 profile，不会自动开启平台或授权工具，只有目标平台已开启、登录态有效且能力健康时，工具调用才会执行。WebUI 的“MCP → 原生 MCP”页提供“获取 WebUI 二维码”和“在普通浏览器中登录”两条路径，可单独启停平台、调整来源质量阈值，并预览封面、标题、正文、文章图片、评论、回复和支持平台的弹幕。小黑盒搜索命中后会读取作者文章容器的图文内容；传给 Agent 的帖子图片有独立域名白名单、重定向复核、下载大小和像素上限，并重编码为最多 4 张不可信多模态证据。二维码管理会话为 15 分钟，官方二维码过期时会在原会话内自动刷新；B站使用官方二维码生成/轮询事务并在本机编码二维码，轮询与 persistent profile 共用登录态，不依赖可见登录窗口。小黑盒的官方页面在后台保持，canvas 通过黑白比例、对比度和边缘密度校验后才会转发，避免把“二维码加载中”占位图当成二维码。抖音仍从官方页面读取二维码；遇到机器人验证、滑块或风控只切换官方普通浏览器人工处理，不提供绕过。
+项目内置不可删除的 `builtin_social_platform_research`，覆盖 **B站、抖音、贴吧、小黑盒** 四个平台：
 
-向 Agent 公开的能力只有 `social_content_search`、`social_content_read` 和 `research_game_slang`。全部为只读工具，不包含任意登录态 HTTP、任意 JavaScript、Cookie 导出、点赞、投币、收藏、关注、评论、发布、删除或私信。平台访问使用互相隔离的 persistent profile；WebUI 二维码路径由 Playwright 观察官方页面，普通浏览器路径则直接启动不受 Playwright 控制的系统 Chrome/Edge。抖音等平台出现机器人验证时自动切到后一条路径，由管理员在官方窗口处理；登录完成并关闭该窗口后 MCP 才检测 Cookie，不实现验证绕过。
+- **三层门控与只读边界**：默认关闭，同时受 MCP 服务开关、平台开关和 Agent 工具授权三层约束。向 Agent 公开的工具仅有 `social_content_search`、`social_content_read` 和 `research_game_slang`，全部为只读工具，绝不包含点赞、评论、发布、私信、任意 HTTP 或 Cookie 导出。
+- **双路径登录与人工验证接管**：支持「WebUI 二维码」与「普通浏览器登录 / WebUI 人工验证接管」；遇到平台滑块或人机验证时，管理员可在受控官方页面完成验证，不提供任何自动化破解或绕过。
+- **多源独立证据聚类**：从单份内容提取黑话 claim，按独立内容簇与跨平台一致性推进 `understand_only` → `verified`（或冲突转 `disputed`），人工 `manual_locked` 不会被自动流水线覆盖。详见 [SOCIAL_RESEARCH_MCP.md](SOCIAL_RESEARCH_MCP.md)。
 
-宿主侧会从一份内容中提取最多 20 个独立黑话 claim，并按内容簇而不是评论条数计算独立来源。默认两个独立内容进入 `understand_only`；三个独立内容且至少两个平台一致时进入 `verified`。同一游戏/版本下有两份独立反向解释会转为 `disputed`；人工 `manual_locked` 不会被自动流水线覆盖。所有自动含义都携带游戏、版本和安全使用语境，不能把《三角洲行动》中的“刘涛”映射到真人、影视或其它游戏讨论。
-
-登录 profile 位于插件数据目录的 `mcp/social_platform/profiles/`，停止或重载 MCP 会保留，只有 WebUI 显式注销才删除对应平台 profile。二维码 session、Cookie、Token、验证码、设备标识、浏览器 profile 路径和请求签名不会返回 Agent、普通 API、日志、Trace、审计详情或 Data Transfer。详细配置、状态与验收步骤见 [SOCIAL_RESEARCH_MCP.md](SOCIAL_RESEARCH_MCP.md)。
-
-Skill 标准结构、metadata、isolation 与 MCP 示例见 [DIRECTORY_GUIDE.md](DIRECTORY_GUIDE.md)。
+---
 
 ## 数据与备份
 
-默认数据目录由 `nonebot-plugin-localstore` 提供；不可用时回退到 `data/personification`。可用 `personification_data_dir` 显式覆盖。
+默认数据目录由 `nonebot-plugin-localstore` 提供（不可用时回退到 `data/personification`），可用 `personification_data_dir` 显式覆盖：
 
-主要数据包括：
+- `personification.db`：会话/群消息、thread、Persona、Memory、用户任务、Token 账本、QZone Operation、额度与 KV 状态。
+- `webui_admin_index.db`：WebUI 管理端分页与检索投影索引。
+- `env.json` 与 runtime config：WebUI 与命令保存的运行时配置。
+- `plugin_knowledge/`、`skill_cache/`：已构建的插件知识与远程 Skill 缓存。
+- `mcp/secrets.json`、`mcp/runtime/`、`mcp/social_platform/profiles/`：MCP 密钥与四平台隔离登录 profile（属于秘密目录，绝不进入 Data Transfer、诊断包或日志）。
+- `persona_templates/`、`data_transfer/`：人设模板产物与导入导出任务文件。
+- 表情包目录默认为项目级 `data/stickers`（可用 `personification_sticker_path` 修改）。
 
-- `personification.db`：session/group message、thread、Persona、Memory、用户任务、Token ledger、QZone Operation、额度和其它 KV 状态。
-- `env.json` 与 runtime config：WebUI/命令保存的运行配置。
-- `plugin_knowledge/`：已构建的插件知识。
-- `skill_cache/`：远程 Skill cache。
-- `mcp/secrets.json`、`mcp/runtime/`：托管 MCP 的受限 Secret 文件与隔离工作目录。
-- `mcp/social_platform/profiles/`：四个平台互相隔离的浏览器登录 profile；属于秘密目录，不进入 Data Transfer、诊断包或知识库。
-- `mcp/social_platform/cache/`：最长默认 6 小时的标准化搜索/内容包缓存；不保存完整视频或原始整页 HTML。
-- `persona_templates/`、`persona_template_exports/`、`persona_avatar_candidates/`：Persona 构建产物。
-- `data_transfer/`：管理员显式创建的导入导出任务文件。
-- 表情包目录默认是项目级 `data/stickers`，可用 `personification_sticker_path` 修改。
+升级或迁移前请备份完整插件数据目录和表情包目录。WebUI「数据迁移」页提供单群安全迁移包、全量状态包与 AES-GCM 秘密包的导出、预检（dry-run）、应用与回滚流程。
 
-升级或迁移前至少备份整个插件数据目录和表情包目录。不要只备份 JSON；主要运行状态已经进入 SQLite。WebUI 的 Data Transfer v3 会迁移逻辑词典根、sense、短证据和学习事件，但会剔除脱敏作者指纹、URL query，并且绝不打包平台 profile、Cookie、登录 session 或短期原始社交缓存。数据迁移页提供导出、预检和应用流程，破坏性操作应先查看 Operation diagnostic 和审计日志。
+---
+
+## 专题文档索引
+
+| 文档 | 内容概览 |
+|---|---|
+| [DIRECTORY_GUIDE.md](DIRECTORY_GUIDE.md) | 仓库目录结构、模块分层与 Skill / MCP 编写指南 |
+| [SOCIAL_RESEARCH_MCP.md](SOCIAL_RESEARCH_MCP.md) | 原生社交平台查梗 MCP 配置、状态机与验收步骤 |
+| [docs/telegram-integration.md](docs/telegram-integration.md) | Telegram 网页托管与 NoneBot 原生双模接入、Topic 隔离与跨平台绑定 |
+| [docs/telegram-proactive.md](docs/telegram-proactive.md) | Telegram 主动表达与群参与策略边界 |
+| [docs/context-only-chat.md](docs/context-only-chat.md) | 日常对话无工具轻路径（`context_only`）与调用计数合同 |
+| [docs/quality-lab.md](docs/quality-lab.md) | 聊天实验室、候选表达隔离运行与盲评流程 |
+| [docs/experience-and-timeliness.md](docs/experience-and-timeliness.md) | 共同经历卡片沉淀与发言时效性判断 |
+| [docs/global-scene-memory-update.md](docs/global-scene-memory-update.md) | 全局场景记忆与跨群/私聊记忆投影更新 |
+| [docs/memory-context-update.md](docs/memory-context-update.md) | API 记忆、长上下文时间投影与检索索引 |
+| [docs/reply-quality-delivery.md](docs/reply-quality-delivery.md) | 回复质量审阅、媒体强锚点验真与送达状态合同 |
+| [docs/supplement-and-model-catalog.md](docs/supplement-and-model-catalog.md) | 多模型目录、用途模型绑定与补充查证机制 |
+| [docs/webui-trusted-devices.md](docs/webui-trusted-devices.md) | WebUI 信任设备、自动续期与撤销机制 |
+| [docs/tim-bridge-image-outbound.md](docs/tim-bridge-image-outbound.md) | TIM / OneBot 图片准备、外发与体积边界 |
+| [docs/exception-boundaries.md](docs/exception-boundaries.md) | 异常边界治理、Trace 诊断码与恢复队列规范 |
+| [docs/lightweight-plan-2026-10-10.md](docs/lightweight-plan-2026-10-10.md) | 轻量化离线验收计划与隔离模拟脚本 |
+
+---
 
 ## 运维与排错
 
 建议按以下顺序定位问题：
 
-1. WebUI“功能体检”确认 Bot、Provider、模型、Skill、QZone 和外部依赖状态。
-2. WebUI“Agent 状态”和“消息 Trace”确认 TurnPlan、tool call、budget、review 和发送阶段。
-3. WebUI“插件日志”按 level、query、Trace ID 筛选。
-4. 使用“模型测试”单独验证 Provider 和 vision route。
-5. QQ 空间异常先看 Operation ID 和状态，不要先重试外部写入。
-6. 社交平台查梗异常先看“原生 MCP”平台状态：`login_required` 重新登录；B站 `protocol_qr` 无需保持窗口，扫码后在官方 App 确认；其它平台的 `manual_verification_required` 按 `verification_kind` 在官方窗口处理机器人验证或设备确认；`qr_expired` 会在原管理会话内换新；`official_window_closed` 只适用于页面二维码链路；`risk_controlled` 停止该平台请求并等待风控解除。其它已登录平台仍可返回 partial 结果。
+1. **WebUI「功能体检」与「路由能力」**：确认 Bot、Provider、模型、视觉/工具探针、Skill、QZone 和外部依赖状态。
+2. **WebUI「Agent 状态」与「消息 Trace」**：确认 `TurnPlan`、tool call、budget、review 和发送阶段耗时与诊断码。
+3. **WebUI「插件日志」**：按 level、关键字或 Trace ID 过滤上下文日志。
+4. **WebUI「模型测试」**：单独验证文本、工具或视频/视觉路由。
+5. **QQ 空间异常**：先看「QQ 空间 → 操作记录」中的 Operation ID 与状态，切勿盲目重试外部写入。
+6. **社交平台查梗异常**：先看「MCP 管理 → 原生 MCP」平台状态（`login_required` 重新扫码；`manual_verification_required` 在官方窗口或 WebUI 人工验证面板完成验证；`risk_controlled` 暂停该平台请求）。
 
-常见边界：
-
-- FastAPI Driver 不可用时 WebUI 不挂载。
-- Bot 离线或管理员不是 Bot 好友时，WebUI 无法发送登录验证码。
-- reaction、输入状态、拍一拍和 QQ 管理的扩展 API 会按 OneBot 实现端探测降级。
-- QQ 空间是非官方能力，Cookie、接口字段和风控可能随 QQ 客户端变化。
-- Provider 原生 search 不可用时可回落外部 Web Search；海外站点访问仍受服务器网络和 proxy 配置影响。
-- Memory、主动行为、群风格和 Persona 的质量依赖真实运行数据；单元测试通过不等于生产聊天自然度已经稳定。
-- `personification_agent_budget_mode=shadow` 只记录建议预算，不会改善实际延迟；需要灰度验证后再切 `adaptive`。
-- 当前回放集是冷启动样本，仍需持续补充脱敏的真实坏例。
+---
 
 ## 开发与验证
 
-以下命令从宿主项目根目录执行。
-
-安装开发依赖：
+以下命令默认从宿主项目根目录执行（在插件目录内执行时可将 `plugin/personification/tests` 替换为 `tests`）。
 
 ```powershell
+# 1. 安装开发依赖
 python -m pip install -e ".[dev]"
-```
 
-完整测试：
-
-```powershell
+# 2. Python 单元与集成回归测试
 python -m pytest plugin/personification/tests
-```
 
-只验证当前插件目录时：
-
-```powershell
-python -m pytest tests
-```
-
-对话语义静态门禁用于阻止在核心对话模块中重新引入 keyword/regex semantic routing：
-
-```powershell
+# 3. 对话语义静态门禁（阻止核心对话模块引入 keyword/regex 语义路由）
 python -m tools.personification_semantic_scan
-```
 
-离线聊天场景模拟：
-
-```powershell
+# 4. 离线聊天场景模拟
 python -m tools.personification_chat_sim list --json
 python -m tools.personification_chat_sim run all --json
-```
 
-脱敏回放报告：
+# 5. 代码规范检查（从插件目录执行）
+ruff check .
 
-```powershell
-python plugin/personification/scripts/replay_corpus.py --input plugin/personification/tests/replay_corpus/*.jsonl --output replay_report.md
-```
+# 6. Vue 3 WebUI 单元测试、类型检查与生产构建（在 webui/frontend 目录执行）
+cd plugin/personification/webui/frontend
+npm test -- --run
+npm run build
 
-WebUI JavaScript 静态门禁：
-
-```powershell
+# 7. 旧版兼容静态脚本语法门禁
 node --check plugin/personification/webui/static/app-core.js
 node --check plugin/personification/webui/static/app-admin.js
 node plugin/personification/tests/test_qzone_webui_static.js
 ```
 
-提交前至少运行与改动相关的定向测试、完整 pytest、chat simulation、semantic scan、JavaScript syntax check 和 `git diff --check`。涉及真实 Provider、OneBot 扩展 API、QQ 空间或公网 WebUI 时，还需要在部署环境做独立 smoke test。
+### 维护约定
 
-## 维护约定
+- 异常处理遵循 [docs/exception-boundaries.md](docs/exception-boundaries.md)：存储容错由边界负责，内部编程错误可见，`CancelledError` 必须传播，控制流和真实送达状态优先。
+- 新的正常聊天语义判断继续由 LLM metadata / `TurnPlan` 承担，严禁新增关键词表、短语表或正则语义路由器。
+- 新的外发工具必须显式声明副作用、最终回复行为和重试安全性；同一业务流程只能有一个 retry owner。
+- 修改 `Config` 字段时同步更新 Config registry 和 coverage test；修改 prompt 时同步更新 `core/prompts/VERSIONS.md`。
+- 修改 WebUI 面向管理员的展示文案时，遵循简体中文展示约定（保留 `Token`、`API`、`Provider`、`Agent`、`Trace`、`MCP`、`WebUI`、`Skill`、`Tool` 等专名，后端稳定状态码映射为中文标签并保留原值作次要信息）。
+- 严禁提交 `.env`、API Key、OAuth credential、Cookie、数据库、运行日志、Skill cache 或任何真实用户数据。
 
-- 异常处理按[异常边界约定](docs/exception-boundaries.md)维护：存储容错由边界负责，内部编程错误可见，控制流和真实送达状态优先。
-- 日常对话默认使用[无工具轻路径](docs/context-only-chat.md)，仅在已确认语义无需检索或动作时启用；模型容量来源和 Trace 计数按该文档核对。
-- 无真实机器时使用[轻量化离线验收计划与脚本](docs/lightweight-plan-2026-10-10.md)，以隔离数据验证普通/YAML 入口、调用次数、取消和送达合同。
-- WebUI 支持[信任当前设备](docs/webui-trusted-devices.md)：验证码验证后可保存浏览器凭证，普通会话过期时自动恢复，并可随时撤销设备信任。
-- 已治理模块运行 `python -m pip install -r requirements-dev.txt` 后，从插件目录执行 `ruff check .`；开发工具版本与检查范围固定在 `requirements-dev.txt`、`ruff.toml`。新增或拆出的模块完成行为核验后应加入范围，不能通过整文件忽略掩盖问题。
-- 新的正常聊天语义判断继续由 LLM metadata / TurnPlan 承担，不新增关键词表、短语表或 regex semantic router。
-- 新的外发工具必须声明副作用、最终回复行为和重试安全性。
-- `CancelledError` 应传播；认证失败、模型不存在和缺少 caller 等确定性错误应快速失败。
-- 同一业务流程只能有一个 retry owner，避免 Agent、Provider 和 SDK 多层重试放大请求。
-- 修改 `Config` 字段时同步更新 Config registry 和 coverage test。
-- 修改 prompt 时同步更新 `core/prompts/VERSIONS.md`。
-- 修改 WebUI 写操作时返回稳定 Operation diagnostic，不向前端暴露 raw exception。
-- 不提交 `.env`、API Key、OAuth credential、Cookie、数据库、运行日志、Skill cache 或用户数据。
+---
 
 ## License
 
