@@ -187,12 +187,14 @@ def test_yaml_media_review_failures_remain_silent_with_stable_diagnosis(
     assert f"reason={diagnosis}" in str(decision.get("detail", ""))
 
 
-def test_normal_agent_video_evidence_reaches_final_review_then_dispatches_once(monkeypatch) -> None:  # noqa: ANN001
-    """The non-YAML handler uses the identical final-review evidence contract."""
+@pytest.mark.parametrize("approved", [True, False])
+def test_normal_agent_video_evidence_reaches_final_review_before_dispatch(monkeypatch, approved) -> None:  # noqa: ANN001
     reviews: list[list[dict[str, object]]] = []
 
     async def _review(messages, **_kwargs):  # noqa: ANN001
         reviews.append(messages)
+        if not approved:
+            return '{"action":"rewrite","text":"替换文本","persona_verdict":"rewrite"}'
         return _review_accept(messages)
 
     _images, state, _messages = _run_normal_selected_referent_replay(
@@ -202,14 +204,15 @@ def test_normal_agent_video_evidence_reaches_final_review_then_dispatches_once(m
         yaml_mode=False,
     )
 
-    assert reviews
+    assert len(reviews) == 1
     assert "蓝色赛车在雨夜赛道连续过弯" in "\n".join(
         str(item.get("content", "")) for item in reviews[0]
     )
-    assert state["_test_replay_sent"] == ["蓝色赛车在雨夜赛道连续过弯，车尾灯在湿滑路面拉出红色倒影"], state
+    expected = ["蓝色赛车在雨夜赛道连续过弯，车尾灯在湿滑路面拉出红色倒影"] if approved else []
+    assert state["_test_replay_sent"] == expected, state
 
 
-def test_yaml_rewrite_without_media_grounding_is_not_sent(monkeypatch) -> None:  # noqa: ANN001
+def test_yaml_final_review_rewrite_is_not_sent_even_with_media(monkeypatch) -> None:  # noqa: ANN001
     calls = 0
 
     async def _agent(**_kwargs):  # noqa: ANN003
@@ -236,10 +239,10 @@ def test_yaml_rewrite_without_media_grounding_is_not_sent(monkeypatch) -> None: 
         turn_media_context=[_VIDEO_MEDIA],
     )
 
-    assert calls >= 1
+    assert calls == 1
     assert bot.sent == []
     decision = next(stage for stage in stages if stage.get("key") == "final_review_decision")
-    assert "reason=review_media_grounding_failed" in str(decision.get("detail", ""))
+    assert "reason=review_verification_rejected" in str(decision.get("detail", ""))
 
 
 @pytest.mark.parametrize("send_behavior", ["unknown", "exception"])

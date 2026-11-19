@@ -360,7 +360,7 @@ def test_dialogue_field_prefers_explicit_false_over_nested_metadata_value() -> N
     assert snapshot.requires_attribution_review is True
 
 
-def test_final_dialogue_gate_rewrites_bot_as_user_confusion_once_and_rechecks() -> None:
+def test_review_response_text_rewrites_bot_as_user_confusion_once_and_rechecks() -> None:
     calls: list[list[dict]] = []
     snapshot = dialogue_context.build_dialogue_context_snapshot(
         [
@@ -398,7 +398,7 @@ def test_final_dialogue_gate_rewrites_bot_as_user_confusion_once_and_rechecks() 
         )
 
     decision = asyncio.run(
-        response_review.final_dialogue_gate(
+        response_review.review_response_text(
             _review,
             candidate_text="对，我刚才就是想让你带火把。",
             raw_message_text="那要带几组？",
@@ -411,7 +411,7 @@ def test_final_dialogue_gate_rewrites_bot_as_user_confusion_once_and_rechecks() 
     assert decision.text == "两组起步，洞里拐弯容易漏。"
 
 
-def test_final_dialogue_gate_rechecks_nested_example_provenance_without_extra_rewrite() -> None:
+def test_review_response_text_rechecks_nested_example_provenance_without_extra_rewrite() -> None:
     calls: list[list[dict]] = []
     snapshot = dialogue_context.build_dialogue_context_snapshot(
         [
@@ -452,7 +452,7 @@ def test_final_dialogue_gate_rechecks_nested_example_provenance_without_extra_re
         )
 
     decision = asyncio.run(
-        response_review.final_dialogue_gate(
+        response_review.review_response_text(
             _review,
             candidate_text="刚才不是在说你今天很疲惫、想轻松聊几句吗？",
             raw_message_text="你还记得刚才聊了什么吗？",
@@ -506,7 +506,7 @@ def test_final_dialogue_gate_allows_real_user_quote_of_persona_bot() -> None:
     assert decision.text == "两组起步，洞里拐弯容易漏。"
 
 
-def test_final_dialogue_gate_rechecks_plugin_and_peer_provenance_rewrite() -> None:
+def test_review_response_text_rechecks_plugin_and_peer_provenance_rewrite() -> None:
     calls = 0
     snapshot = dialogue_context.build_dialogue_context_snapshot(
         [
@@ -555,7 +555,7 @@ def test_final_dialogue_gate_rechecks_plugin_and_peer_provenance_rewrite() -> No
         )
 
     decision = asyncio.run(
-        response_review.final_dialogue_gate(
+        response_review.review_response_text(
             _review,
             candidate_text="我刚才查到的结果肯定靠谱。",
             raw_message_text="那结果靠谱吗？",
@@ -1399,12 +1399,11 @@ def test_review_keeps_single_canonical_self_claim_without_segments() -> None:
     assert decision.self_claims[0].fact_key == "homework.status"
 
 
-def test_final_dialogue_gate_returns_only_valid_segment_bound_self_claims() -> None:
+def test_final_dialogue_gate_returns_only_valid_claims_about_the_original() -> None:
     async def _fake_call(messages, **_kwargs):  # noqa: ANN001
-        assert "每次都额外输出 self_claims" in messages[0]["content"]
+        assert "仅为原文提供 self_claims" in messages[0]["content"]
         return (
-            '{"action":"accept","text":"","reason":"合理","flags":[],'
-            '"segments":["我已经写完作业。","晚点再聊。"],"self_claims":['
+            '{"action":"accept","reason":"合理","flags":[],"self_claims":['
             '{"segment_index":0,"subject":"self","category":"completion",'
             '"fact_key":"homework.status","summary":"我已经写完作业"},'
             '{"segment_index":1,"subject":"other","category":"activity",'
@@ -1418,12 +1417,13 @@ def test_final_dialogue_gate_returns_only_valid_segment_bound_self_claims() -> N
             raw_message_text="写完了吗",
         )
     )
+    assert decision.segments == ()
     assert len(decision.self_claims) == 1
     assert decision.self_claims[0].segment_index == 0
     assert decision.self_claims[0].fact_key == "homework.status"
 
 
-def test_final_dialogue_gate_requires_one_real_rewrite_for_required_duplicate() -> None:
+def test_review_response_text_requires_one_real_rewrite_for_required_duplicate() -> None:
     calls: list[list[dict]] = []
 
     async def _rewrite(messages):  # noqa: ANN001
@@ -1435,7 +1435,7 @@ def test_final_dialogue_gate_requires_one_real_rewrite_for_required_duplicate() 
         )
 
     decision = asyncio.run(
-        response_review.final_dialogue_gate(
+        response_review.review_response_text(
             _rewrite,
             candidate_text="下矿记得看路呀",
             raw_message_text="那火把呢",
@@ -1451,7 +1451,7 @@ def test_final_dialogue_gate_requires_one_real_rewrite_for_required_duplicate() 
     assert decision.text.startswith("火把多带")
 
 
-def test_final_dialogue_gate_silences_when_required_duplicate_rewrite_still_duplicates() -> None:
+def test_review_response_text_silences_when_required_duplicate_rewrite_still_duplicates() -> None:
     async def _bad_rewrite(_messages):  # noqa: ANN001
         return (
             '{"action":"rewrite","text":"下矿记得看路呀",'
@@ -1459,7 +1459,7 @@ def test_final_dialogue_gate_silences_when_required_duplicate_rewrite_still_dupl
         )
 
     decision = asyncio.run(
-        response_review.final_dialogue_gate(
+        response_review.review_response_text(
             _bad_rewrite,
             candidate_text="下矿记得看路呀",
             raw_message_text="[表情包]",
@@ -1514,7 +1514,7 @@ def test_final_dialogue_gate_blocks_explicit_relationship_score_when_reviewer_fa
     assert decision.flags == ("score_leak",)
 
 
-def test_final_dialogue_gate_rechecks_relationship_rewrite_once() -> None:
+def test_review_response_text_rechecks_relationship_rewrite_once() -> None:
     calls = 0
 
     async def _review(messages):  # noqa: ANN001
@@ -1530,7 +1530,7 @@ def test_final_dialogue_gate_rechecks_relationship_rewrite_once() -> None:
         return '{"action":"accept","text":"","reason":"边界成立","flags":[]}'
 
     decision = asyncio.run(
-        response_review.final_dialogue_gate(
+        response_review.review_response_text(
             _review,
             candidate_text="还记得我们上次一起去过那里。",
             raw_message_text="最近有点累",
@@ -1543,7 +1543,7 @@ def test_final_dialogue_gate_rechecks_relationship_rewrite_once() -> None:
     assert decision.text == "这件事我愿意继续听你说。"
 
 
-def test_final_dialogue_gate_silences_failed_relationship_rewrite() -> None:
+def test_review_response_text_silences_failed_relationship_rewrite() -> None:
     calls = 0
 
     async def _review(_messages):  # noqa: ANN001
@@ -1560,7 +1560,7 @@ def test_final_dialogue_gate_silences_failed_relationship_rewrite() -> None:
         )
 
     decision = asyncio.run(
-        response_review.final_dialogue_gate(
+        response_review.review_response_text(
             _review,
             candidate_text="我们一直是最好的朋友。",
             raw_message_text="在吗",

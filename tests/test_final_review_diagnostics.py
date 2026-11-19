@@ -66,26 +66,44 @@ def test_expired_review_does_not_start_provider_and_has_own_diagnosis(monkeypatc
     assert "review_budget_exhausted" in stages[-1]["detail"]
 
 
-def test_independent_rewrite_verification_failure_is_visible_and_silent(monkeypatch):
+def test_final_review_rejects_a_rewrite_without_follow_up_calls(monkeypatch):
     stages = []
     calls = []
     monkeypatch.setattr(trace, "record_stage", lambda **data: stages.append(data))
 
     async def provider(messages):
         calls.append(messages)
-        if len(calls) == 1:
-            return json.dumps({"action": "rewrite", "text": "改写后的正文", "persona_verdict": "rewrite"})
-        raise asyncio.TimeoutError("private provider response")
+        return json.dumps({"action": "rewrite", "text": "改写后的正文", "persona_verdict": "rewrite"})
 
     result = asyncio.run(review.final_dialogue_gate(
         provider, candidate_text="原来的正文", raw_message_text="问题", core_persona="同伴",
     ))
-    assert len(calls) == 2
+    assert len(calls) == 1
+    assert '"action":"accept|no_reply"' in calls[0][0]["content"]
+    assert "必须 rewrite" not in calls[0][0]["content"]
     assert result.action == "no_reply"
-    assert result.diagnosis_code == "review_timeout"
+    assert result.text == ""
+    assert result.diagnosis_code == "review_verification_rejected"
     call_stages = [s for s in stages if s["key"] == "final_review_call"]
     assert "source=initial" in call_stages[0]["detail"]
-    assert "source=verification" in call_stages[1]["detail"]
+    assert len(call_stages) == 1
+
+
+def test_final_review_accepts_only_the_original_candidate():
+    async def provider(_messages):
+        return json.dumps({
+            "action": "accept",
+            "persona_verdict": "consistent",
+            "text": "审阅器擅自填入的句子",
+            "segments": ["原句 第一句"],
+        })
+
+    decision = asyncio.run(review.final_dialogue_gate(
+        provider, candidate_text="原句第一句", raw_message_text="问题", core_persona="同伴",
+    ))
+    assert decision.action == "accept"
+    assert decision.text == "原句第一句"
+    assert decision.segments == ()
 
 
 def test_review_trace_dto_keeps_real_duration_budget_and_safe_diagnosis(monkeypatch):

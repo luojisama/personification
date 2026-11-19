@@ -257,10 +257,8 @@ def test_yaml_bot_history_attribution_review_fails_closed_without_sending(
     assert bot.sent == []
 
 
-def test_yaml_rewrite_uses_reviewed_text_not_mismatched_segments(monkeypatch) -> None:  # noqa: ANN001
+def test_yaml_rewrite_verdict_cannot_send_original_or_replacement(monkeypatch) -> None:  # noqa: ANN001
     async def _review(_messages, **_kwargs):  # noqa: ANN001
-        if "独立复核改写是否符合受信任核心人格" in str(_messages):
-            return '{"action":"accept","persona_verdict":"consistent","flags":[]}'
         return (
             '{"action":"rewrite","persona_verdict":"rewrite","text":"那就两组，洞里拐弯容易漏。",'
             '"reason":"answer current human",'
@@ -284,10 +282,9 @@ def test_yaml_rewrite_uses_reviewed_text_not_mismatched_segments(monkeypatch) ->
         final_gate_enabled=True,
     )
 
-    assert review_prompts
+    assert len(review_prompts) == 1
     assert any(stage.get("key") == "yaml_dialogue_provenance" for stage in stages)
-    assert bot.sent == ["那就两组，洞里拐弯容易漏"]
-    assert all("你刚才让大家带火把" not in str(payload) for payload in bot.sent)
+    assert bot.sent == []
 
 
 def test_yaml_real_user_quote_can_pass_attribution_review_and_send(monkeypatch) -> None:  # noqa: ANN001
@@ -359,11 +356,9 @@ def test_yaml_accept_projects_multi_messages_to_reviewed_text_once(monkeypatch) 
         parse_yaml_response=_parse,
     )
 
-    # Before projection the accepted review segments would have been replayed
-    # once for each YAML message.  The second record still exists for its
-    # sticker authorization, but it cannot carry stale text.
-    assert bot.sent == ["第一句", "第二句"]
-    assert " ".join(bot.sent) == "第一句 第二句"
+    # The final reviewer only approves the draft. The local sender owns
+    # segmentation and sends the canonical text exactly once.
+    assert bot.sent == ["第一句 第二句"]
 
 
 def test_yaml_final_local_sticker_uses_narrow_runtime(monkeypatch, tmp_path) -> None:

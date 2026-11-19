@@ -106,7 +106,6 @@ from ...core.response_review import (
     needs_uncertain_visible_reply_review,
     required_reply_needs_recovery,
     resolve_uncertain_visible_reply,
-    review_response_text,
 )
 from ...core.send_outcome import is_likely_delivered_send_timeout
 from ...core.target_inference import normalize_message_target_for_plan, normalize_message_target_for_review
@@ -2877,7 +2876,7 @@ async def process_yaml_response_logic(
             reason="review_disabled",
         )
     else:
-        review_decision = await review_response_text(
+        review_decision = await final_dialogue_gate(
             review_call_ai_api,
             candidate_text=assistant_text,
             raw_message_text=raw_message_text or history_last_text or trigger_reason,
@@ -2898,15 +2897,11 @@ async def process_yaml_response_logic(
             media_grounding_required=final_media_grounding_required,
             response_deadline=response_deadline,
         )
-    if review_decision.action == "no_reply":
+    if review_decision.action != "accept":
         review_code = getattr(review_decision, "diagnosis_code", "") or "review_verification_rejected"
         logger.info(f"拟人插件 (YAML)：最终回复审阅未放行，code={review_code} group={group_id} user={user_id}")
         _trace_no_reply(review_code, diagnosis_code=review_code, detail=f"action=no_reply reason={review_code}")
         return
-    if review_decision.action == "rewrite" and review_decision.text:
-        assistant_text = sanitize_history_text(review_decision.text.strip())
-        parsed = {"messages": [{"text": assistant_text, "sticker": ""}], "think": "", "status": "", "action": ""}
-
     assistant_text, reviewed_favorability_signals = extract_legacy_favorability_markers(assistant_text)
     favorability_signals.merge(reviewed_favorability_signals)
 
