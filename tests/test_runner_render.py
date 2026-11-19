@@ -1466,7 +1466,10 @@ def test_run_agent_skips_query_rewrite_for_direct_native_image_answer(monkeypatc
 
     result = asyncio.run(
         runner.run_agent(
-            messages=[{"role": "user", "content": "你翻译一下"}],
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": "你翻译一下"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+            ]}],
             registry=tool_registry.ToolRegistry(),
             tool_caller=caller,
             executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
@@ -1489,6 +1492,7 @@ def test_run_agent_skips_query_rewrite_for_direct_native_image_answer(monkeypatc
                 research_need="none",
                 output_mode="chat_answer",
                 tool_intent=["vision"],
+                vision_need="summary",
             ),
             time_budget_seconds=30,
             reply_required=True,

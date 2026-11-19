@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from ._loader import load_personification_module
 
 
@@ -93,6 +95,8 @@ def _run_normal_selected_referent_replay(
     review_call=None,
     yaml_mode: bool = True,
     send_behavior: str = "confirmed",
+    summary_timeout_seconds: float = 0.0,
+    candidate: str = "[NO_REPLY]",
 ) -> tuple[list[dict], dict, list[dict]]:  # noqa: ANN001
     """A text-only follow-up can activate exactly its selected historical image.
 
@@ -156,7 +160,7 @@ def _run_normal_selected_referent_replay(
 
     async def _call_ai_api(messages):  # noqa: ANN001
         model_messages.extend(messages)
-        return "[NO_REPLY]"
+        return candidate
 
     async def _run_yaml(bot, event, group_id, user_id, user_name, level_name, prompt, history, **kwargs):  # noqa: ANN001
         trigger_reason = kwargs.pop("trigger_reason", "")
@@ -216,7 +220,7 @@ def _run_normal_selected_referent_replay(
     monkeypatch.setattr(processor, "render_group_conversation_context", lambda *_a, **_k: "")
     monkeypatch.setattr(processor, "render_topic_state_trace_detail", lambda *_a, **_k: "")
     monkeypatch.setattr(processor, "render_plugin_episode_trace_detail", lambda *_a, **_k: "")
-    monkeypatch.setattr(processor, "media_summary_timeout_seconds", lambda *_a, **_k: 0.0)
+    monkeypatch.setattr(processor, "media_summary_timeout_seconds", lambda *_a, **_k: summary_timeout_seconds)
     monkeypatch.setattr(processor, "prepare_reply_semantics", lambda **_k: _prepared(prepared_semantics))
     monkeypatch.setattr(processor, "prepare_meme_turn_context", lambda **_k: {})
     monkeypatch.setattr(processor, "format_meme_turn_prompt", lambda _value: "")
@@ -346,6 +350,32 @@ def test_normal_processor_reprojects_selected_referent_into_yaml_provider_reques
     assert [item["owner_user_id"] for item in state["turn_media_context"]] == [
         "image-owner", "second-owner",
     ]
+
+
+@pytest.mark.parametrize("yaml_mode", [False, True])
+def test_native_image_reaches_model_and_final_verdict_without_summary(monkeypatch, yaml_mode) -> None:
+    review_images = []
+
+    async def unexpected_summary(**_kwargs):
+        raise AssertionError("native image mode should not request a summary")
+
+    async def review(messages):
+        review_images.extend(
+            part["image_url"]["url"]
+            for message in messages if message["role"] == "user" and isinstance(message["content"], list)
+            for part in message["content"] if part.get("type") == "image_url"
+        )
+        return '{"action":"accept","persona_verdict":"consistent","attribution_verdict":"current_human"}'
+
+    monkeypatch.setattr(processor, "_build_per_media_visual_summaries", unexpected_summary)
+    monkeypatch.setattr(yaml_processor, "_shared_build_per_media_visual_summaries", unexpected_summary)
+    image_parts, state, _messages = _run_normal_selected_referent_replay(
+        monkeypatch, image_input_mode="auto", yaml_mode=yaml_mode,
+        summary_timeout_seconds=1.0, review_call=review, candidate="画面上的字挺醒目。",
+    )
+    assert review_images == [part["image_url"]["url"] for part in image_parts]
+    assert len(review_images) == 1
+    assert len(state["_test_replay_sent"]) == 1
 
 
 def test_normal_to_yaml_disabled_mode_has_no_provider_image_input(monkeypatch) -> None:  # noqa: ANN001

@@ -15,6 +15,7 @@ from .llm_context import (
     use_single_attempt_retry_policy,
 )
 from .message_parts import normalize_message_parts
+from .image_input import native_image_required
 from .provider_types import (
     PROVIDER_TYPE_REMOVED,
     is_removed_provider_type,
@@ -1300,6 +1301,8 @@ async def _try_provider_chain(
     errors: List[str] = []
     route_attempts: List[Dict[str, Any]] = []
     contains_image_input = _contains_image_input(messages)
+    if native_image_required.get() and not contains_image_input:
+        return None, errors, route_attempts, True
     saw_vision_unavailable = False
     text_only_messages_cache: List[Dict[str, Any]] | None = None
     for provider in providers:
@@ -1313,6 +1316,9 @@ async def _try_provider_chain(
         if contains_image_input and not heuristic_supports_vision(
             provider.get("api_type"), provider.get("model")
         ):
+            if native_image_required.get():
+                saw_vision_unavailable = True
+                continue
             if text_only_messages_cache is None:
                 text_only_messages_cache = _strip_image_parts_for_text_only_provider(messages)
             provider_messages = text_only_messages_cache

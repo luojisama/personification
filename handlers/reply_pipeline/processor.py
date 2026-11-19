@@ -35,12 +35,13 @@ from ...core.favorability_turn import (
 from ...core.favorability import normalize_favorability_attitudes
 from ...core.image_input import (
     is_image_input_unsupported_error,
+    require_native_image_input,
     normalize_image_detail,
     normalize_image_input_mode,
 )
 from ...core.metrics import record_counter, record_timing
 from ...core.meme_reply_policy import format_meme_turn_prompt, prepare_meme_turn_context
-from ...core.message_parts import build_user_message_content, clone_messages_with_text_suffix
+from ...core.message_parts import build_user_message_content
 from ...core.history_projection import build_confirmed_outbound_history, is_confirmed_send_result, lookup_sticker_history_metadata
 from ...core.sticker_library import load_sticker_metadata, resolve_sticker_dir
 from ...core.expression_preparation import prepare_local_expression
@@ -207,7 +208,6 @@ from ...core.reply_length_policy import (
     resolve_reply_length_policy,
     truncate_reply_text,
 )
-from ...core.visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_PLAIN
 from ...skills.skillpacks.sticker_tool.scripts.impl import (
     reset_current_image_context,
     set_current_image_context,
@@ -263,7 +263,6 @@ from .pipeline_context import (
     fold_consecutive_sticker_placeholders as _fold_consecutive_sticker_placeholders,
     get_primary_provider_signature as _get_primary_provider_signature,
     looks_like_photo_message as _looks_like_photo_message,
-    primary_route_supports_vision as _primary_route_supports_vision,
     private_history_window_limit as _private_history_window_limit,
     restore_current_user_message_content as _restore_current_user_message_content,
     run_agent_if_enabled as _run_agent_if_enabled,
@@ -1518,8 +1517,6 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         for item in turn_media_context
         if item.kind == "audio" and str(item.ref or "").strip()
     ][:1]
-    # 分类为真实照片的 refs 继续用于 provider 图片输入不兼容时的旧 fallback。
-    photo_image_urls = list(image_urls)
     image_input_mode = normalize_image_input_mode(
         getattr(runtime.plugin_config, "personification_image_input_mode", "auto")
     )
@@ -1527,22 +1524,6 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         getattr(runtime.plugin_config, "personification_image_detail", "auto")
     )
     has_photo_input = _looks_like_photo_message(raw_message_text or message_content)
-    plain_route_vision = image_input_mode == "direct" or _primary_route_supports_vision(
-        runtime, VISUAL_ROUTE_REPLY_PLAIN
-    )
-    agent_route_vision = image_input_mode == "direct" or _primary_route_supports_vision(
-        runtime, VISUAL_ROUTE_AGENT
-    )
-    direct_image_input = bool(image_urls) and image_input_mode in {"auto", "direct"} and plain_route_vision
-    agent_direct_image_input = bool(image_urls) and image_input_mode in {"auto", "direct"} and agent_route_vision
-    image_summary_suffix = ""
-    image_urls_for_text_model = list(image_urls)
-    if image_urls:
-        if image_input_mode == "disabled":
-            image_urls_for_text_model = []
-        else:
-            if not direct_image_input:
-                image_urls_for_text_model = []
 
     # This value is consumed by hook construction as well as by the eventual
     # YAML/plain split below.  Some private/Satori paths do not visit the
@@ -1799,7 +1780,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
     # unrestricted direct-vision input.
     image_urls = _projected_transports(image_urls)
     tool_image_urls = list(image_urls)
-    if sticker_image_urls and image_input_mode in {"auto", "direct"} and (plain_route_vision or agent_route_vision):
+    if sticker_image_urls and image_input_mode in {"auto", "direct"}:
         sticker_vision_max = int(
             getattr(runtime.plugin_config, "personification_sticker_vision_max", 3) or 0
         )
@@ -1809,13 +1790,11 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         for sticker_transport in capped_stickers:
             if sticker_transport not in tool_image_urls:
                 tool_image_urls.append(sticker_transport)
-    photo_image_urls = list(image_urls)
     if image_input_mode == "disabled":
         # Disabled is a full visual-input boundary, including YAML/Agent handoff.
         tool_image_urls = []
-        photo_image_urls = []
-    direct_image_input = bool(tool_image_urls) and image_input_mode in {"auto", "direct"} and plain_route_vision
-    agent_direct_image_input = bool(tool_image_urls) and image_input_mode in {"auto", "direct"} and agent_route_vision
+    direct_image_input = bool(tool_image_urls) and image_input_mode in {"auto", "direct"}
+    agent_direct_image_input = direct_image_input
     image_urls_for_text_model = list(tool_image_urls) if direct_image_input else []
     yaml_visual_projection = replace(
         visual_projection,
@@ -1836,7 +1815,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 f"agent_direct={agent_direct_image_input} images={len(tool_image_urls)} "
                 f"stickers={len(sticker_image_urls)} elapsed_ms=0"
             ),
-            hint="" if (direct_image_input or agent_direct_image_input) else "将尝试视觉摘要 fallback 或文本占位",
+            hint="" if direct_image_input else "按图片输入模式处理摘要或占位",
         )
     if not is_private_session:
         peer_bot_capability_prompt = render_peer_bot_capability_catalog(
@@ -1964,7 +1943,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         now=time.monotonic(),
     )
     image_summary_suffix = ""
-    if summary_timeout > 0.05:
+    if image_input_mode == "summary" and summary_timeout > 0.05:
         try:
             image_summary_suffix = await asyncio.wait_for(
                 _image_summary_task(),
@@ -2560,7 +2539,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         else 0
     )
 
-    async def _call_text_model_with_retry(messages_to_use: List[Dict[str, Any]]) -> str:
+    async def _call_text_model(messages_to_use: List[Dict[str, Any]]) -> str:
         call_text_model = runtime.call_ai_api
         route_label = "main"
         if (
@@ -2570,33 +2549,8 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         ):
             call_text_model = runtime.lite_call_ai_api
             route_label = "lite"
-        try:
+        with require_native_image_input(direct_image_input):
             result = await call_text_model(messages_to_use)
-        except Exception as exc:
-            if not (
-                tool_image_urls
-                and direct_image_input
-                and image_input_mode in {"auto", "direct"}
-                and is_image_input_unsupported_error(exc)
-            ):
-                raise
-            runtime.logger.warning("拟人插件：模型不支持图片输入，改用视觉摘要重试...")
-            retry_suffix = image_summary_suffix or await _build_image_summary_suffix(
-                runtime=runtime,
-                image_urls=photo_image_urls,
-                sticker_like=False,
-            )
-            retry_messages = clone_messages_with_text_suffix(messages_to_use, retry_suffix)
-            result = await runtime.call_ai_api(retry_messages)
-        if not result and tool_image_urls and direct_image_input and image_input_mode in {"auto", "direct"}:
-            runtime.logger.warning("拟人插件：图片输入可能不被支持，改用视觉摘要重试...")
-            retry_suffix = image_summary_suffix or await _build_image_summary_suffix(
-                runtime=runtime,
-                image_urls=photo_image_urls,
-                sticker_like=False,
-            )
-            retry_messages = clone_messages_with_text_suffix(messages_to_use, retry_suffix)
-            result = await runtime.call_ai_api(retry_messages)
         reply_turn_trace.record_stage(
             key="text_model_route",
             label="文本模型路由",
@@ -2607,7 +2561,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
 
     async def _call_persona_responder_model(messages_to_use: List[Dict[str, Any]]) -> str:
         if not bool(getattr(runtime.plugin_config, "personification_persona_responder_json_enabled", False)):
-            return await _call_text_model_with_retry(messages_to_use)
+            return await _call_text_model(messages_to_use)
         json_messages = with_persona_responder_instruction(
             messages_to_use,
             semantic_frame=semantic_frame,
@@ -2627,7 +2581,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 )
             ),
         )
-        raw = await _call_text_model_with_retry(json_messages)
+        raw = await _call_text_model(json_messages)
         parsed = parse_persona_response(raw)
         if parsed is None:
             runtime.logger.warning("拟人插件：PersonaResponder JSON 解析失败，按普通文本处理。")
@@ -2893,7 +2847,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         and is_image_input_unsupported_error(exc)
                     ):
                         raise
-                    runtime.logger.warning("拟人插件：Agent 处理图片输入失败，改用基础模型摘要重试...")
+                    runtime.logger.warning("拟人插件：Agent 原图输入失败，尝试基础模型读取原图。")
                     reply_content = ""
                     used_agent = False
                     bypass_length_limits = False
@@ -2983,6 +2937,9 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
             bypass_length_limits = False
             if not reply_content:
                 runtime.logger.warning("拟人插件：未能获取到 AI 回复内容")
+                if direct_image_input:
+                    reply_turn_trace.finish_trace(outcome="no_reply", diagnosis_code="native_image_reply_unavailable", detail={"silent": True})
+                    return
                 if reply_required:
                     reply_content = await _resolve_operational_empty_reply("model_empty")
                     if not reply_content:
@@ -2997,7 +2954,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                     )
                     reply_turn_trace.finish_trace(outcome="no_reply", diagnosis_code="model_empty", detail={"reason": "empty_reply"})
                     return
-            if needs_uncertain_visible_reply_review(
+            if not direct_image_input and needs_uncertain_visible_reply_review(
                 ambiguity_level=getattr(intent_decision, "ambiguity_level", ""),
                 persona_response_info_added=getattr(
                     semantic_frame,
@@ -3070,7 +3027,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         if is_random_chat and _batch_has_newer_messages(state):
             runtime.logger.info(f"拟人插件：会话 {state.get('batch_session_key', group_id)} 已出现更新批次，本轮随机插话降级为静默。")
             return
-        if _should_regenerate_for_banter(
+        if not direct_image_input and _should_regenerate_for_banter(
             reply_content=reply_content,
             state=state,
             is_private_session=is_private_session,
@@ -3090,7 +3047,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         ),
                     }
                 ]
-                regenerated = await _call_text_model_with_retry(rewrite_messages)
+                regenerated = await _call_text_model(rewrite_messages)
                 if regenerated and not looks_like_explanatory_output(regenerated):
                     reply_content = regenerated.strip()
             except Exception as e:
@@ -3171,7 +3128,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                         ),
                     },
                 ]
-                return await _call_text_model_with_retry(rewrite_messages)
+                return await _call_text_model(rewrite_messages)
 
             reply_content, _repeat_follow_used = await maybe_follow_repeat_cluster(
                 reply_text=reply_content,
@@ -3203,7 +3160,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
         final_media_grounding_required = bool(
             used_agent and state.get("agent_media_delivery") == "complete"
         )
-        if final_gate_enabled or dialogue_context.requires_attribution_review or bool(base_prompt):
+        if direct_image_input or final_gate_enabled or dialogue_context.requires_attribution_review or bool(base_prompt):
             review_decision = await final_dialogue_gate(
                 runtime.review_call_ai_api or runtime.lite_call_ai_api or runtime.call_ai_api,
                 candidate_text=reply_content,
@@ -3223,6 +3180,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 plugin_episode=plugin_episode,
                 batched_events=batched_events,
                 media_evidence=final_media_evidence,
+                native_image_urls=image_urls_for_text_model,
                 media_grounding_required=final_media_grounding_required,
                 peer_bot_episodes=(
                     conversation_context.peer_bot_episodes
@@ -3273,6 +3231,7 @@ async def _process_response_logic_impl(bot: Any, event: Any, state: Dict[str, An
                 plugin_episode=plugin_episode,
                 dialogue_context=dialogue_context,
                 media_evidence=final_media_evidence,
+                native_image_urls=image_urls_for_text_model,
                 media_grounding_required=final_media_grounding_required,
                 response_deadline=response_deadline,
             )

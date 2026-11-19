@@ -830,6 +830,7 @@ async def handle_model_stop(
     user_text: str,
     user_images: list[str],
     has_media: bool = False,
+    native_still_images: bool = False,
     turn_plan: Any = None,
     reply_required: bool = False,
     rewritten_query: Any,
@@ -872,7 +873,14 @@ async def handle_model_stop(
             )
         )
     vision_need = str(getattr(turn_plan, "vision_need", "none") or "none").strip().lower()
-    media_evidence_required = bool(has_media and vision_need in {"summary", "native"})
+    if native_still_images and (response.vision_unavailable or not content_len and not response.tool_calls):
+        return StopFlowDecision.return_result(
+            AgentResult(
+                text="[SILENCE]", pending_actions=pending_actions, failure_code="agent_native_image_unavailable",
+                quality_context="evidence_unavailable", suppress_reply_recovery=True,
+            )
+        )
+    media_evidence_required = bool(has_media and not native_still_images and vision_need in {"summary", "native"})
     if media_evidence_required and not state.has_usable_evidence:
         if not state.media_evidence_gate_attempted:
             state.media_evidence_gate_attempted = True
@@ -1068,7 +1076,7 @@ async def handle_model_stop(
                 bypass_length_limits=False,
             )
         )
-    if content_len == 0:
+    if content_len == 0 and not native_still_images:
         injected = await _try_inject_vision_fallback(
             state=state,
             messages=messages,

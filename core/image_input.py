@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Sequence
 
 from .image_result_cache import build_image_cache_key, get_cached_image_result, set_cached_image_result
@@ -10,6 +12,16 @@ from .visual_capabilities import (
 
 _IMAGE_INPUT_MODES = {"auto", "direct", "summary", "disabled"}
 _IMAGE_DETAIL_MODES = {"auto", "low", "high"}
+native_image_required: ContextVar[bool] = ContextVar("personification_native_image_required", default=False)
+
+
+@contextmanager
+def require_native_image_input(required: bool):
+    token = native_image_required.set(required or native_image_required.get())
+    try:
+        yield
+    finally:
+        native_image_required.reset(token)
 
 
 def normalize_image_input_mode(value: Any) -> str:

@@ -6,9 +6,31 @@ provider（如 DeepSeek、Qwen 等第三方网关）会让上游返回 400
 """
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 from ._loader import load_personification_module
 
 provider_router = load_personification_module("plugin.personification.core.provider_router")
+image_input = load_personification_module("plugin.personification.core.image_input")
+
+
+def test_native_image_request_skips_text_only_provider(monkeypatch) -> None:
+    monkeypatch.setattr(provider_router, "heuristic_supports_vision", lambda *_: False)
+
+    async def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("a text-only route cannot approve a native image request")
+
+    monkeypatch.setattr(provider_router, "_call_provider_with_turn_deadline", unexpected_call)
+    messages = [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+    ]}]
+    with image_input.require_native_image_input(True):
+        response, _errors, _attempts, unavailable = asyncio.run(provider_router._try_provider_chain(
+            [{"name": "text-only", "api_type": "openai", "model": "text-only"}],
+            messages=messages, plugin_config=None, logger=SimpleNamespace(info=lambda *_: None),
+        ))
+    assert response is None and unavailable
 
 
 def test_provider_router_treats_mimo_v25_pro_as_multimodal() -> None:

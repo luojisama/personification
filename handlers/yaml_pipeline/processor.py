@@ -68,6 +68,7 @@ from ...core.dialogue_context import build_dialogue_context_for_turn
 from ...core.message_provenance import is_bot_self_message_event
 from ...core.image_input import (
     is_image_input_unsupported_error,
+    require_native_image_input,
     normalize_image_detail,
     normalize_image_input_mode,
 )
@@ -76,7 +77,7 @@ from ...core.sticker_library import (
     resolve_sticker_dir,
 )
 from ...core.expression_preparation import prepare_local_expression
-from ...core.message_parts import build_user_message_content, clone_messages_with_text_suffix
+from ...core.message_parts import build_user_message_content
 from ...core.history_projection import build_confirmed_outbound_history, build_group_batch_history, is_confirmed_send_result, lookup_sticker_history_metadata
 from ...core.context_policy import (
     ensure_prompt_injection_guard,
@@ -164,7 +165,6 @@ from ...core.turn_media import (
     summarize_media_resolution,
 )
 from ...core.forward_context import merge_forward_media
-from ...core.visual_capabilities import VISUAL_ROUTE_AGENT, VISUAL_ROUTE_REPLY_YAML
 from ...core.user_avatar_insight import (
     add_current_user_avatar_planner_metadata,
     register_current_user_avatar_tool,
@@ -207,7 +207,6 @@ from ..reply_pipeline.pipeline_context import (
     dispatch_reply_part as _dispatch_reply_part,
     guard_reply_ack_text as _guard_reply_ack_text,
     build_reply_operation_id as _build_reply_operation_id,
-    primary_route_supports_vision as _runtime_primary_route_supports_vision,
     _recall_agent_candidate_memories,
     should_use_agent_for_reply as _should_use_agent_for_reply,
     strip_injected_visual_summary as _strip_injected_visual_summary,
@@ -544,24 +543,6 @@ def _event_mentions_bot(event: Any, bot: Any) -> bool:
     return False
 
 
-def _primary_route_supports_vision(
-    *,
-    get_configured_api_providers: Callable[[], List[Dict[str, Any]]] | None,
-    plugin_config: Any,
-    route_name: str,
-) -> bool:
-    return _runtime_primary_route_supports_vision(
-        _build_yaml_runtime_proxy(
-            plugin_config=plugin_config,
-            agent_tool_caller=None,
-            get_configured_api_providers=get_configured_api_providers,
-            vision_caller=None,
-            logger=None,
-        ),
-        route_name,
-    )
-
-
 def _batch_ref_has_newer_messages(runtime_ref: Any) -> bool:
     return _shared_batch_has_newer_messages({"batch_runtime_ref": runtime_ref})
 
@@ -585,29 +566,6 @@ def _build_yaml_runtime_proxy(
             "get_configured_api_providers": staticmethod(get_configured_api_providers or (lambda: [])),
         },
     )()
-
-
-async def _build_image_summary_suffix(
-    *,
-    plugin_config: Any,
-    agent_tool_caller: Any,
-    get_configured_api_providers: Callable[[], List[Dict[str, Any]]] | None,
-    vision_caller: Any,
-    image_urls: List[str],
-    sticker_like: bool,
-    logger: Any,
-) -> str:
-    return await _shared_build_image_summary_suffix(
-        runtime=_build_yaml_runtime_proxy(
-            plugin_config=plugin_config,
-            agent_tool_caller=agent_tool_caller,
-            get_configured_api_providers=get_configured_api_providers,
-            vision_caller=vision_caller,
-            logger=logger,
-        ),
-        image_urls=image_urls,
-        sticker_like=sticker_like,
-    )
 
 
 async def process_yaml_response_logic(
@@ -1014,7 +972,7 @@ async def process_yaml_response_logic(
     if image_input_mode == "disabled":
         # Do not hand visual payloads to YAML's text model or Agent/tool path.
         last_images = []
-    image_summary_suffix = str(precomputed_image_summary_suffix or "").strip()
+    image_summary_suffix = str(precomputed_image_summary_suffix or "").strip() if image_input_mode == "summary" else ""
     per_media_visual_summaries: dict[str, str] = {
         str(item.media_id): str(item.safe_summary)
         for item in turn_media_refs
@@ -1022,7 +980,7 @@ async def process_yaml_response_logic(
         and str(item.safe_summary or "").strip()
         and str(item.summary_scope or "") == "single_media"
     }
-    if not image_summary_suffix and last_images and image_input_mode != "disabled":
+    if image_input_mode == "summary" and not image_summary_suffix and last_images:
         summary_timeout = media_summary_timeout_seconds(
             response_deadline if isinstance(response_deadline, (int, float)) else None,
             now=time.monotonic(),
@@ -1751,34 +1709,9 @@ async def process_yaml_response_logic(
     image_detail = normalize_image_detail(
         getattr(plugin_config, "personification_image_detail", "auto")
     )
-    sticker_like = (
-        "[图片·表情包]" in input_text
-        or "[表情id:" in input_text
-        or "[表情:" in input_text
-        or "[QQ表情" in input_text
-        or "[QQ超级表情" in input_text
-        or "[QQ收藏表情" in input_text
-        or "[QQ推荐表情" in input_text
-        or "[表情包]" in input_text
-        or "[多张表情]" in input_text
-    )
     photo_like = photo_like or "[图片·照片]" in input_text
-    direct_image_input = bool(last_images) and image_input_mode in {"auto", "direct"} and (
-        image_input_mode == "direct"
-        or _primary_route_supports_vision(
-            get_configured_api_providers=get_configured_api_providers,
-            plugin_config=plugin_config,
-            route_name=VISUAL_ROUTE_REPLY_YAML,
-        )
-    )
-    agent_direct_image_input = bool(last_images) and image_input_mode in {"auto", "direct"} and (
-        image_input_mode == "direct"
-        or _primary_route_supports_vision(
-            get_configured_api_providers=get_configured_api_providers,
-            plugin_config=plugin_config,
-            route_name=VISUAL_ROUTE_AGENT,
-        )
-    )
+    direct_image_input = bool(last_images) and image_input_mode in {"auto", "direct"}
+    agent_direct_image_input = direct_image_input
     text_model_images = list(last_images)
     if last_images:
         _trace_stage(
@@ -1871,43 +1804,9 @@ async def process_yaml_response_logic(
             detail=background_detail,
         )
 
-    async def _call_text_model_with_retry(messages_to_use: List[Dict[str, Any]]) -> str:
-        try:
-            result = await call_ai_api(messages_to_use)
-        except Exception as exc:
-            if not (
-                tool_image_urls
-                and direct_image_input
-                and image_input_mode in {"auto", "direct"}
-                and is_image_input_unsupported_error(exc)
-            ):
-                raise
-            logger.warning("拟人插件 (YAML)：模型不支持图片输入，改用视觉摘要重试...")
-            retry_suffix = image_summary_suffix or await _build_image_summary_suffix(
-                plugin_config=plugin_config,
-                agent_tool_caller=agent_tool_caller,
-                get_configured_api_providers=get_configured_api_providers,
-                vision_caller=vision_caller,
-                image_urls=tool_image_urls,
-                sticker_like=sticker_like,
-                logger=logger,
-            )
-            retry_messages = clone_messages_with_text_suffix(messages_to_use, retry_suffix)
-            result = await call_ai_api(retry_messages)
-        if not result and tool_image_urls and direct_image_input and image_input_mode in {"auto", "direct"}:
-            logger.warning("拟人插件 (YAML)：图片输入可能不被支持，改用视觉摘要重试...")
-            retry_suffix = image_summary_suffix or await _build_image_summary_suffix(
-                plugin_config=plugin_config,
-                agent_tool_caller=agent_tool_caller,
-                get_configured_api_providers=get_configured_api_providers,
-                vision_caller=vision_caller,
-                image_urls=tool_image_urls,
-                sticker_like=sticker_like,
-                logger=logger,
-            )
-            retry_messages = clone_messages_with_text_suffix(messages_to_use, retry_suffix)
-            result = await call_ai_api(retry_messages)
-        return result
+    async def _call_text_model(messages_to_use: List[Dict[str, Any]]) -> str:
+        with require_native_image_input(direct_image_input):
+            return await call_ai_api(messages_to_use)
 
     if _should_use_agent_for_reply(
         plugin_config=plugin_config,
@@ -2232,7 +2131,7 @@ async def process_yaml_response_logic(
                     and is_image_input_unsupported_error(exc)
                 ):
                     raise
-                logger.warning("拟人插件 (YAML)：Agent 处理图片输入失败，改用基础模型摘要重试...")
+                logger.warning("拟人插件 (YAML)：Agent 原图输入失败，尝试基础模型读取原图。")
                 agent_result = None
         finally:
             reset_current_image_context(image_ctx_token)
@@ -2528,7 +2427,7 @@ async def process_yaml_response_logic(
         return ""
 
     if not used_agent:
-        reply_content = await _call_text_model_with_retry(messages)
+        reply_content = await _call_text_model(messages)
         _trace_stage(
             key="yaml_model_result",
             label="YAML 模型结果",
@@ -2537,6 +2436,9 @@ async def process_yaml_response_logic(
         )
     if not reply_content:
         logger.warning("拟人插件 (YAML): 未能获取到 AI 回复内容")
+        if direct_image_input:
+            _trace_no_reply("native_image_reply_unavailable", diagnosis_code="native_image_reply_unavailable", detail="未取得可用的原图回复")
+            return
         if reply_required:
             reply_content = await _resolve_operational_empty_reply("model_empty")
             if not reply_content:
@@ -2544,7 +2446,7 @@ async def process_yaml_response_logic(
         else:
             _trace_no_reply("empty_model_reply", diagnosis_code="model_empty", detail="模型返回空内容")
             return
-    if not used_agent and needs_uncertain_visible_reply_review(
+    if not (used_agent or direct_image_input) and needs_uncertain_visible_reply_review(
         ambiguity_level=intent_ambiguity_level,
         persona_response_info_added=getattr(
             semantic_frame,
@@ -2727,7 +2629,7 @@ async def process_yaml_response_logic(
     assistant_text = re.sub(r"^(如果你需要|如果需要的话)[，,:：\s]*", "", assistant_text).strip()
     assistant_text = re.sub(r"(?:如果你需要|需要的话).*?$", "", assistant_text).strip()
     if (
-        not used_agent
+        not (used_agent or direct_image_input)
         and message_intent == "banter"
         and looks_like_explanatory_output(assistant_text)
     ):
@@ -2824,7 +2726,7 @@ async def process_yaml_response_logic(
     final_media_grounding_required = bool(
         used_agent and reply_commit_state.get("agent_media_delivery") == "complete"
     )
-    if final_gate_enabled or dialogue_context.requires_attribution_review or bool(prompt_config):
+    if direct_image_input or final_gate_enabled or dialogue_context.requires_attribution_review or bool(prompt_config):
         review_decision = await final_dialogue_gate(
             review_call_ai_api,
             candidate_text=assistant_text,
@@ -2844,6 +2746,7 @@ async def process_yaml_response_logic(
             plugin_episode=resolved_plugin_episode,
             batched_events=list(batched_events or []),
             media_evidence=final_media_evidence,
+            native_image_urls=tool_image_urls if direct_image_input else None,
             media_grounding_required=final_media_grounding_required,
             peer_bot_episodes=(
                 conversation_context.peer_bot_episodes
@@ -2894,6 +2797,7 @@ async def process_yaml_response_logic(
             plugin_episode=resolved_plugin_episode,
             dialogue_context=dialogue_context,
             media_evidence=final_media_evidence,
+            native_image_urls=tool_image_urls if direct_image_input else None,
             media_grounding_required=final_media_grounding_required,
             response_deadline=response_deadline,
         )

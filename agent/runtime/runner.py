@@ -16,6 +16,7 @@ from ..query_rewriter import (
 from ...core.chat_intent import metadata_fallback_turn_semantic_frame_for_session
 from ...core.metrics import record_counter, record_timing
 from ...core.media_evidence import capture_executed_vision_evidence, merge_media_evidence
+from ...core.image_input import require_native_image_input
 from ...core.turn_media import coerce_turn_media
 from ...core.time_ctx import get_configured_now
 from ...core.llm_context import current_llm_context, reset_llm_context, set_llm_purpose
@@ -529,6 +530,8 @@ async def run_agent(
         == "audio"
     )
     has_visual_media = bool(user_images or user_video_count or user_audio_count)
+    native_still_images = bool(direct_image_input and user_images and not (user_video_count or user_audio_count))
+    native_image_refs = set(user_images) if native_still_images else set()
     if execution_policy is None and precomputed_intent is not None:
         execution_policy = derive_turn_execution_policy(
             turn_plan=turn_plan, intent_decision=precomputed_intent, has_media=has_visual_media,
@@ -1089,6 +1092,8 @@ async def run_agent(
             speech_act=str(getattr(turn_plan, "speech_act", "") or ""),
             plugin_question_intent=plugin_query_intent,
         )
+        if native_still_images:
+            base_schemas = [schema for schema in base_schemas if _schema_tool_name(schema) != "vision_analyze"]
         if disclosure_mode == "native":
             active_schemas = base_schemas
             wire_schemas = tool_disclosure.native_payload(base_schemas)
@@ -1147,24 +1152,22 @@ async def run_agent(
             else phase_deadlines.synthesis_deadline
         )
         model_started_at = time.monotonic()
+        if native_still_images and not any(
+            native_image_refs.issubset(_extract_latest_user_images([message])) for message in messages
+        ):
+            return await _finalize_result(
+                AgentResult(text="[SILENCE]", pending_actions=pending_actions,
+                            failure_code="agent_native_image_unavailable", suppress_reply_recovery=True),
+                reason="native_image_not_projected",
+            )
         try:
             executed_steps += 1
-            if disclosure_mode == "native":
+            model_call = (
+                tool_caller.chat_with_deferred_tools if disclosure_mode == "native" else tool_caller.chat_with_tools
+            )
+            with require_native_image_input(direct_image_input):
                 response = await _await_with_deadline(
-                    lambda: tool_caller.chat_with_deferred_tools(
-                        messages,
-                        wire_schemas,
-                        use_builtin_search and not _research_lookup_complete(),
-                    ),
-                    model_deadline,
-                )
-            else:
-                response = await _await_with_deadline(
-                    lambda: tool_caller.chat_with_tools(
-                        messages,
-                        wire_schemas,
-                        use_builtin_search and not _research_lookup_complete(),
-                    ),
+                    lambda: model_call(messages, wire_schemas, use_builtin_search and not _research_lookup_complete()),
                     model_deadline,
                 )
         except asyncio.TimeoutError:
@@ -1216,6 +1219,7 @@ async def run_agent(
                         user_text=user_text,
                         user_images=user_images,
                         has_media=has_visual_media,
+                        native_still_images=native_still_images,
                         turn_plan=turn_plan,
                         reply_required=reply_required,
                         rewritten_query=rewritten_query,
@@ -1350,7 +1354,7 @@ async def run_agent(
                         f"discoveries={getattr(tool_disclosure, 'discovery_count', 0)} executed=false"
                     ),
                 )
-            elif not tool_disclosure.is_call_allowed(tool_call.name):
+            elif (native_still_images and tool_call.name == "vision_analyze") or not tool_disclosure.is_call_allowed(tool_call.name):
                 result = (
                     '{"status":"blocked","error_code":"tool_not_disclosed",'
                     '"message":"The tool schema was not disclosed for this model step."}'

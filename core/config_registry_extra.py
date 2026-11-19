@@ -374,7 +374,7 @@ EXTRA_CONFIG_SPECS: tuple[dict[str, Any], ...] = (
 
     # ──────────── 视觉理解 ────────────
     _s("personification_image_input_mode", "str", "auto", "图片输入模式",
-       "auto=支持视觉时直传否则转摘要；direct=强制直传；summary=强制视觉摘要；disabled=忽略图片。",
+       "auto 或 direct 直传原图；summary 显式使用视觉摘要；disabled 忽略图片。",
        group="视觉理解", choices=("auto", "direct", "summary", "disabled")),
     _s("personification_image_detail", "str", "auto", "图片细节等级",
        "传给视觉模型的图片 detail 参数；low 更省 token，high 识别更准。",
