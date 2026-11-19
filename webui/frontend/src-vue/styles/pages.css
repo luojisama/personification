@@ -1508,6 +1508,27 @@ dd {
 }
 
 /* 配置中心、设置与日志管理 */
+.config-save-bar {
+  position: sticky;
+  top: 5.5rem;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  color: var(--color-ink);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+}
+
+.config-save-bar small {
+  display: block;
+  color: var(--color-ink-muted);
+}
+
 .config-save-actions {
   display: flex;
   align-items: center;
@@ -1517,8 +1538,27 @@ dd {
 
 .config-layout {
   display: grid;
-  grid-template-columns: 16rem 1fr;
+  grid-template-columns: 13rem minmax(0, 1fr);
   gap: var(--space-4);
+}
+
+.config-layout.config-model-layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.config-extra-tools {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+}
+
+.config-extra-tools > summary {
+  cursor: pointer;
+  padding: var(--space-1) 0;
+}
+
+.config-extra-tools[open] > :not(summary) {
+  margin-top: var(--space-3);
 }
 
 .config-category-rail {
@@ -1599,9 +1639,16 @@ dd {
 
 .config-entry-header {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: var(--space-2);
+}
+
+.config-entry-header code {
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
 }
 
 .config-badges {
@@ -1611,8 +1658,14 @@ dd {
 
 .config-editor-control {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: var(--space-3);
+  min-width: 0;
+}
+
+.config-editor-control > button {
+  align-self: flex-start;
 }
 
 .config-editor-control input[type="text"],

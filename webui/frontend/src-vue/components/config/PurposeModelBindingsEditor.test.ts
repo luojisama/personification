@@ -54,19 +54,37 @@ describe("PurposeModelBindingsEditor", () => {
   });
 
   it("用途状态以遗留阶段覆盖优先，并将画像旧字段标为回退设置而非确定路由", async () => {
-    vi.mocked(resources.config).mockImplementation(async (_page, _size, filters) => ({
-      items: filters?.search === "personification_model_overrides"
-        ? [{ field_name: "personification_model_overrides", value: { agent: "override-agent" } }]
-        : filters?.search === "personification_persona_model"
-          ? [{ field_name: "personification_persona_model", value: "legacy-persona" }]
-          : filters?.search === "personification_api_pools"
-            ? [{ field_name: "personification_api_pools", value: [{ provider_id: "p", default_model_id: "m", models: [{ model_id: "m" }] }] }]
-            : [], page: 1, page_size: 10, total: 1, total_pages: 1,
-    } as never));
+    vi.mocked(resources.config).mockResolvedValue({
+      items: [
+        { field_name: "personification_model_overrides", value: { agent: "override-agent" } },
+        { field_name: "personification_persona_model", value: "legacy-persona" },
+        { field_name: "personification_api_pools", value: [{ provider_id: "p", default_model_id: "m", models: [{ model_id: "m" }] }] },
+      ], page: 1, page_size: 10, total: 3, total_pages: 1,
+    } as never);
     const wrapper = mount(PurposeModelBindingsEditor, { props: { id: "bindings", label: "用途模型绑定", modelValue: { labeler: { provider_id: "p", model_id: "m" } } } });
     await flushPromises();
     expect(wrapper.text()).toContain("沿用遗留阶段覆盖 “override-agent”");
     expect(wrapper.text()).toContain("已配置旧项 “legacy-persona”；实际仍继承已有路由／回退设置");
     expect(wrapper.text()).toContain("图片输入能力尚未经验证");
+  });
+
+  it("可以绑定尚未保存的同页供应商模型", async () => {
+    const wrapper = mount(PurposeModelBindingsEditor, {
+      props: {
+        id: "bindings", label: "用途模型绑定", modelValue: {},
+        routeValues: { personification_api_pools: [] },
+        draftValues: { personification_api_pools: [
+          { provider_id: "p", name: "Gemini", models: [{ model_id: "gemini-4-hydrogen-xhigh" }] },
+        ] },
+      },
+    });
+    expect(resources.config).not.toHaveBeenCalled();
+    const input = wrapper.get("#bindings-main");
+    await input.trigger("focus");
+    await input.setValue("gemini-4-hydrogen-xhigh");
+    await input.trigger("keydown", { key: "Enter" });
+    expect(wrapper.emitted("update:modelValue")?.at(-1)?.[0]).toEqual({
+      main: { provider_id: "p", model_id: "gemini-4-hydrogen-xhigh" },
+    });
   });
 });

@@ -350,7 +350,7 @@ export const resources = {
   rebuildStickerIndex(): Promise<OperationDiagnostic> {
     return api.post("/stickers/index/rebuild");
   },
-  config(page = 1, pageSize = 20, filters: { search?: string; group?: string; modified?: boolean; restart_required?: boolean; hot_reloadable?: boolean; advanced?: boolean; secret?: boolean; invalid?: boolean } = {}, signal?: AbortSignal): Promise<ConfigPage> {
+  config(page = 1, pageSize = 20, filters: { search?: string; group?: string; fields?: string; modified?: boolean; restart_required?: boolean; hot_reloadable?: boolean; advanced?: boolean; secret?: boolean; invalid?: boolean } = {}, signal?: AbortSignal): Promise<ConfigPage> {
     return api.get("/config", { page, page_size: pageSize, ...filters }, signal);
   },
   configMetadata(signal?: AbortSignal): Promise<ConfigMetadata> {

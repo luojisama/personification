@@ -4,27 +4,32 @@
     <template v-if="activeMode === 'config'">
       <PageHeader
         index="24"
-        title="配置中心"
-        description="按注册表分类浏览、分词搜索和类型化编辑。草稿使用 revision 一次原子保存；秘密原值不会发送到浏览器。"
-      >
-        <template #actions>
-          <div class="config-save-actions">
-            <span>{{ draftCount }} 项草稿</span>
-            <button
-              class="button"
-              type="button"
-              :disabled="
-                draftCount === 0 ||
-                hasEditorErrors ||
-                saveMutation.isPending.value
-              "
-              @click="requestConfirmation('save')"
-            >
-              {{ saveMutation.isPending.value ? "保存中…" : "原子保存" }}
-            </button>
-          </div>
-        </template>
-      </PageHeader>
+        :title="modelWorkspace ? '模型与供应商' : '配置中心'"
+        :description="modelWorkspace ? '在同一页添加模型、调整用途绑定和核对回退。' : '按分类查看设置，或搜索配置名称、配置键与当前值。'"
+      />
+
+      <div class="config-save-bar">
+        <div role="status">
+          <span v-if="draftCount">{{ draftCount }} 项未保存</span>
+          <span v-else>{{ saveNotice || "没有未保存的更改" }}</span>
+          <small v-if="hasEditorErrors">请修正有错误的草稿。</small>
+        </div>
+        <div class="config-save-actions">
+          <button
+            v-if="draftCount"
+            type="button"
+            class="button button-quiet"
+            :disabled="saveMutation.isPending.value"
+            @click="requestConfirmation('discard')"
+          >放弃草稿</button>
+          <button
+            class="button"
+            type="button"
+            :disabled="!draftCount || hasEditorErrors || saveMutation.isPending.value"
+            @click="requestConfirmation('save')"
+          >{{ saveMutation.isPending.value ? "保存中…" : "保存更改" }}</button>
+        </div>
+      </div>
 
       <DiagnosticPanel
         v-if="operationError"
@@ -38,8 +43,8 @@
         :default-open="idx === 0"
       />
 
-      <div class="config-layout">
-        <aside class="config-category-rail" aria-label="配置分类">
+      <div class="config-layout" :class="{ 'config-model-layout': modelWorkspace }" :inert="saveMutation.isPending.value">
+        <aside v-if="!modelWorkspace" class="config-category-rail" aria-label="配置分类">
           <button
             type="button"
             :class="{ active: !selectedGroup }"
@@ -64,7 +69,7 @@
         </aside>
 
         <div class="config-main">
-          <Panel eyebrow="FILTER / CONFIG REGISTRY" title="快速筛选">
+          <Panel :title="modelWorkspace ? '查找模型配置' : '快速筛选'">
             <div
               v-for="warning in configQuery.data.value
                 ?.compatibility_warnings ?? []"
@@ -83,7 +88,7 @@
                 type="search"
                 placeholder="配置键、中文名称、说明、供应商、模型或别名"
               />
-              <div class="filter-chips" role="group" aria-label="配置状态筛选">
+              <div v-if="!modelWorkspace" class="filter-chips" role="group" aria-label="配置状态筛选">
                 <button
                   v-for="item in FILTERS"
                   :key="item.key"
@@ -95,10 +100,20 @@
                   {{ item.label }}
                 </button>
               </div>
+              <div v-else class="dossier-actions">
+                <button
+                  class="button button-secondary"
+                  type="button"
+                  :aria-pressed="showRouteOverrides"
+                  @click="showRouteOverrides = !showRouteOverrides"
+                >{{ showRouteOverrides ? "收起覆盖与回退" : "查看覆盖与回退" }}</button>
+                <RouterLink class="button button-quiet" to="/runtime/routes/capabilities">核对运行路由</RouterLink>
+              </div>
             </div>
           </Panel>
 
-          <Panel eyebrow="MODEL / MEDIA TOOLS" title="模型与媒体配置工具">
+          <details class="config-extra-tools">
+            <summary>配置工具与 Token 价格</summary>
             <div class="dossier-actions">
               <RouterLink
                 class="button button-secondary"
@@ -127,26 +142,21 @@
                 应用推荐配置
               </button>
             </div>
-          </Panel>
-
-          <Panel
-            id="token-prices"
-            eyebrow="TOKEN PRICING / VERSIONED"
-            title="Token 自定义价格"
-          >
-            <TokenPriceEditor />
-          </Panel>
+            <Panel id="token-prices" title="Token 自定义价格">
+              <TokenPriceEditor />
+            </Panel>
+          </details>
 
           <div ref="configResultsRef" class="config-results" tabindex="-1">
             <QueryBoundary
               :pending="configQuery.isPending.value"
               :error="configQuery.error.value"
-              :empty="!configQuery.data.value?.items?.length"
+              :empty="!visibleConfigItems.length"
               empty-text="没有符合当前分类与筛选条件的配置。"
             >
               <div class="config-entry-list">
                 <article
-                  v-for="item in configQuery.data.value?.items ?? []"
+                  v-for="item in visibleConfigItems"
                   :key="item.field_name"
                   :class="[
                     'config-entry',
@@ -154,19 +164,7 @@
                   ]"
                 >
                   <header class="config-entry-header">
-                    <div>
-                      <label
-                        :for="`config-${item.field_name}`"
-                        class="config-title"
-                      >
-                        <span
-                          v-html="
-                            highlightText(item.display_name, debouncedSearch)
-                          "
-                        />
-                      </label>
-                      <code>{{ item.field_name }}</code>
-                    </div>
+                    <code>{{ item.field_name }}</code>
                     <div class="config-badges">
                       <StateBadge v-if="item.secret" tone="warn"
                         >秘密</StateBadge
@@ -180,10 +178,6 @@
                     </div>
                   </header>
 
-                  <p
-                    class="config-description"
-                    v-html="highlightText(item.description, debouncedSearch)"
-                  />
                   <p
                     v-if="
                       item.field_name ===
@@ -202,7 +196,9 @@
                       :item="item"
                       :model-value="getResolvedValue(item)"
                       :error="editorErrors[item.field_name]"
-                      @update:model-value="updateDraft(item.field_name, $event)"
+                      :draft-values="draft"
+                      :route-values="modelRouteValues"
+                      @update:model-value="updateDraft(item, $event)"
                       @update:error="setEditorError(item.field_name, $event)"
                     />
 
@@ -235,7 +231,7 @@
             </QueryBoundary>
 
             <Pagination
-              v-if="configQuery.data.value"
+              v-if="configQuery.data.value && !modelWorkspace"
               :page="currentPage"
               :total-pages="configQuery.data.value.total_pages"
               :total="configQuery.data.value.total"
@@ -496,7 +492,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
   keepPreviousData,
@@ -523,6 +519,7 @@ import DiagnosticPanel from "@vue-app/components/DiagnosticPanel.vue";
 import ConfirmDialog from "@vue-app/components/ConfirmDialog.vue";
 import ThemeSwitcher from "@vue-app/components/ThemeSwitcher.vue";
 import ConfigSchemaField from "@vue-app/components/config/ConfigSchemaField.vue";
+import { BINDINGS_FIELD, MODEL_CONFIG_FIELDS, POOL_FIELD } from "@vue-app/components/config/modelConfigFields";
 import TextField from "@vue-app/components/forms/TextField.vue";
 import TokenPriceEditor from "@vue-app/components/TokenPriceEditor.vue";
 
@@ -567,6 +564,8 @@ const FILTERS: Array<{ key: FilterKey; label: string }> = [
 const currentPage = computed(() =>
   Math.max(1, Number(route.query.page ?? 1) || 1),
 );
+const modelWorkspace = computed(() => route.params.section === "models");
+const showRouteOverrides = ref(false);
 const searchInput = ref(String(route.query.search ?? ""));
 const debouncedSearch = ref(searchInput.value);
 const selectedGroup = computed(() => String(route.query.group ?? ""));
@@ -582,13 +581,25 @@ const activeFilters = computed<Record<FilterKey, boolean>>(() => ({
 let searchTimer: number | null = null;
 watch(searchInput, (val) => {
   if (searchTimer) clearTimeout(searchTimer);
+  if (val === debouncedSearch.value) return;
   searchTimer = window.setTimeout(() => {
     debouncedSearch.value = val;
     setQueryParam("search", val || undefined);
   }, 300);
 });
+watch(() => route.query.search, (value) => {
+  if (searchTimer) clearTimeout(searchTimer);
+  debouncedSearch.value = String(value ?? "");
+  searchInput.value = debouncedSearch.value;
+});
+onBeforeUnmount(() => {
+  if (searchTimer) clearTimeout(searchTimer);
+});
 
 const draft = ref<Record<string, unknown>>({});
+const draftLabels = ref<Record<string, string>>({});
+const draftRevision = ref("");
+const saveNotice = ref("");
 const editorErrors = ref<Record<string, string>>({});
 const hasEditorErrors = computed(
   () => Object.keys(editorErrors.value).length > 0,
@@ -641,7 +652,7 @@ const metaQuery = useQuery({
 });
 
 const configQuery = useQuery({
-  queryKey: computed(() => [
+  queryKey: computed(() => modelWorkspace.value ? ["config-center", "models"] : [
     "config-center",
     currentPage.value,
     debouncedSearch.value,
@@ -649,7 +660,9 @@ const configQuery = useQuery({
     activeFilters.value,
   ]),
   queryFn: ({ signal }) =>
-    resources.config(
+    modelWorkspace.value ? resources.config(1, MODEL_CONFIG_FIELDS.length, {
+      fields: MODEL_CONFIG_FIELDS.join(","),
+    }, signal) : resources.config(
       currentPage.value,
       20,
       {
@@ -663,13 +676,35 @@ const configQuery = useQuery({
   enabled: computed(() => activeMode.value === "config"),
 });
 
+const modelRouteValues = computed(() => modelWorkspace.value && !configQuery.isPlaceholderData.value
+  ? Object.fromEntries((configQuery.data.value?.items ?? []).map(item => [item.field_name, item.value]))
+  : undefined);
+
+const visibleConfigItems = computed(() => {
+  const items = configQuery.data.value?.items ?? [];
+  if (!modelWorkspace.value) return items;
+  const tokens = debouncedSearch.value.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  return MODEL_CONFIG_FIELDS
+    .map(field => items.find(item => item.field_name === field))
+    .filter((item): item is ConfigListItem => Boolean(item))
+    .filter(item => {
+      if (!tokens.length) return showRouteOverrides.value || [BINDINGS_FIELD, POOL_FIELD].includes(item.field_name) || item.field_name in draft.value;
+      const text = [item.field_name, item.display_name, item.description, ...item.aliases, JSON.stringify(item.value), JSON.stringify(draft.value[item.field_name])].join(" ").toLowerCase();
+      return tokens.every(token => text.includes(token));
+    });
+});
+
 function getResolvedValue(item: ConfigListItem) {
   return item.field_name in draft.value
     ? draft.value[item.field_name]
     : item.value;
 }
-function updateDraft(field: string, val: unknown) {
-  draft.value = { ...draft.value, [field]: val };
+function updateDraft(item: ConfigListItem, val: unknown) {
+  if (saveMutation.isPending.value) return;
+  if (!draftCount.value) draftRevision.value = configQuery.data.value?.revision ?? "";
+  draft.value = { ...draft.value, [item.field_name]: val };
+  draftLabels.value = { ...draftLabels.value, [item.field_name]: item.display_name };
+  saveNotice.value = "";
 }
 function setEditorError(field: string, message: string) {
   const next = { ...editorErrors.value };
@@ -681,23 +716,26 @@ function resetDraft(field: string) {
   const next = { ...draft.value };
   delete next[field];
   draft.value = next;
+  delete draftLabels.value[field];
   const nextErrors = { ...editorErrors.value };
   delete nextErrors[field];
   editorErrors.value = nextErrors;
 }
 
 const saveMutation = useMutation({
-  mutationFn: () => {
-    const revision =
-      configQuery.data.value?.revision ?? metaQuery.data.value?.revision ?? "";
-    return resources.patchConfig(revision, draft.value);
-  },
-  onSuccess: () => {
+  mutationFn: () => resources.patchConfig(draftRevision.value, draft.value),
+  onSuccess: async (result) => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["config-center"] }),
+      queryClient.invalidateQueries({ queryKey: ["config-meta"] }),
+    ]);
     draft.value = {};
+    draftLabels.value = {};
     editorErrors.value = {};
     operationError.value = null;
-    void queryClient.invalidateQueries({ queryKey: ["config-center"] });
-    void queryClient.invalidateQueries({ queryKey: ["config-meta"] });
+    const reloadNotice = result.warnings.length ? "，运行时重载未完成" : "";
+    const restartNotice = result.restart_required_keys.length ? `，${result.restart_required_keys.length} 项需重启` : "";
+    saveNotice.value = `已保存 ${result.updated_keys.length} 项${reloadNotice}${restartNotice}`;
   },
   onError: (err) => {
     operationError.value = err;
@@ -717,7 +755,7 @@ async function executeConfigTool(kind: "speed" | "recommended") {
   }
 }
 
-type ConfirmationAction = "save" | "speed" | "recommended" | "clear-logs";
+type ConfirmationAction = "save" | "discard" | "speed" | "recommended" | "clear-logs";
 const pendingConfirmation = ref<ConfirmationAction | null>(null);
 const confirmationOpen = computed({
   get: () => pendingConfirmation.value !== null,
@@ -730,9 +768,15 @@ const confirmationDetails = computed(() => {
     case "save":
       return {
         title: "原子保存配置草稿",
-        description:
-          "确认将当前草稿原子写入服务端配置？包含需重启项时需重启服务生效。",
+        description: `将一起保存 ${draftCount.value} 项设置（${Object.values(draftLabels.value).join("、")}）。`,
         confirmLabel: "确认保存",
+        dangerous: true,
+      };
+    case "discard":
+      return {
+        title: "放弃未保存的更改",
+        description: `清除本页的 ${draftCount.value} 项草稿，恢复为已保存值。`,
+        confirmLabel: "放弃草稿",
         dangerous: true,
       };
     case "recommended":
@@ -790,6 +834,11 @@ function confirmPendingAction() {
     saveMutation.mutate();
     return;
   }
+  if (action === "discard") {
+    for (const field of Object.keys(draft.value)) resetDraft(field);
+    operationError.value = null;
+    return;
+  }
   if (action === "clear-logs") {
     clearLogsMutation.mutate();
     return;
@@ -797,17 +846,6 @@ function confirmPendingAction() {
   if (action === "speed" || action === "recommended") {
     void executeConfigTool(action);
   }
-}
-
-function highlightText(text: string, needle: string): string {
-  if (!needle || !text) return text || "";
-  const tokens = needle.trim().split(/\s+/).filter(Boolean);
-  if (!tokens.length) return text;
-  const exp = new RegExp(
-    `(${tokens.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`,
-    "gi",
-  );
-  return text.replace(exp, "<mark>$1</mark>");
 }
 
 /* ==========================================================================

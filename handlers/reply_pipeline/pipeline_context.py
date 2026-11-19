@@ -17,6 +17,7 @@ from ...agent.tool_registry import ToolRegistry
 from ...core.context_policy import ensure_prompt_injection_guard
 from ...core.history_projection import is_confirmed_send_result
 from ...core.current_group_context_tool import register_current_group_context_tool
+from ...core.own_group_card_tool import register_own_group_card_tool
 from ...core.error_utils import log_exception
 from ...core.image_input import provider_supports_vision
 from ...core.image_result_cache import image_fingerprint
@@ -873,6 +874,10 @@ async def run_agent_if_enabled(
     else:
         runtime_registry = clone_tool_registry(runtime.tool_registry)
         if not is_restricted_transport_context(event):
+            register_own_group_card_tool(
+                runtime_registry, bot=bot, event=event,
+                plugin_config=runtime.plugin_config, logger=runtime.logger,
+            )
             register_moderation_for_turn(runtime_registry, executor=executor, state=commit_state,
                                          ordered_context=ordered_context, semantic_frame=semantic_frame)
             register_qq_recall_tool(

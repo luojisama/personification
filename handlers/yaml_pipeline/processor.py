@@ -28,6 +28,7 @@ from ...core.bot_self_continuity import (
 )
 from ...core.command_runtime_context import render_command_runtime_prompt
 from ...core.current_group_context_tool import register_current_group_context_tool
+from ...core.own_group_card_tool import register_own_group_card_tool
 from ...core.peer_bot_runtime import (
     build_peer_bot_capability_catalog,
     build_peer_bot_context_episodes,
@@ -2032,6 +2033,10 @@ async def process_yaml_response_logic(
                         if user_policy_gate is not None
                         else None
                     ),
+                )
+                register_own_group_card_tool(
+                    agent_tool_registry, bot=bot, event=event,
+                    plugin_config=plugin_config, logger=logger,
                 )
                 register_current_group_context_tool(
                     agent_tool_registry,

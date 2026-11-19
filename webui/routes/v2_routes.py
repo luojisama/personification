@@ -3242,6 +3242,7 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
         page_size: int = Query(default=20, ge=1, le=100),
         search: str = Query(default="", max_length=120),
         group: str = Query(default="", max_length=80),
+        fields: str = Query(default="", max_length=2400),
         modified: bool = Query(default=False),
         restart_required: bool = Query(default=False),
         hot_reloadable: bool = Query(default=False),
@@ -3253,8 +3254,11 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
         params = normalize_pagination(page=page, page_size=page_size)
         revision, snapshot = await run_in_threadpool(_config_snapshot, runtime)
         needle_tokens = [token for token in str(search or "").strip().casefold().split() if token]
+        selected_fields = {field.strip() for field in fields.split(",") if field.strip()}
         rows: list[dict[str, Any]] = []
         for item in snapshot:
+            if selected_fields and item["field_name"] not in selected_fields:
+                continue
             if group and str(item.get("group") or "") != group:
                 continue
             haystack = " ".join(

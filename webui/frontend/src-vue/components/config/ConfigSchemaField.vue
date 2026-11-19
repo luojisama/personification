@@ -110,6 +110,8 @@
       :label="item.display_name"
       :description="item.description"
       :error="error"
+      :draft-values="draftValues"
+      :route-values="routeValues"
       @update:model-value="emitValue"
       @update:error="emit('update:error', $event)"
     />
@@ -300,6 +302,8 @@ type StructuredRow = Record<string, unknown>;
 const props = withDefaults(defineProps<{
   item: ConfigListItem;
   modelValue: unknown;
+  draftValues?: Record<string, unknown>;
+  routeValues?: Record<string, unknown>;
   error?: string;
 }>(), {
   error: "",

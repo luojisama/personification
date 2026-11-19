@@ -76,7 +76,7 @@ describe("ConfigSchemaField.vue", () => {
         modelValue: [{ provider_id: "shared", name: "共享连接", models: [{ model_id: "fast" }], purpose_models: { main: "fast" } }],
       },
     });
-    expect(wrapper.text()).toContain("按用途快捷选择");
+    expect(wrapper.text()).toContain("此供应商的用途覆盖");
     expect(wrapper.text()).toContain("主回复");
     expect(wrapper.text()).not.toContain("添加一项");
   });
@@ -85,7 +85,7 @@ describe("ConfigSchemaField.vue", () => {
     const wrapper = mount(ConfigSchemaField, {
       props: { item: configItem({ ui_schema: { control_kind: "purpose_binding" } }), modelValue: {} },
     });
-    expect(wrapper.text()).toContain("每个用途选择");
+    expect(wrapper.text()).toContain("留空即继承现有路由");
     expect(wrapper.find(".purpose-bindings").exists()).toBe(true);
   });
 });

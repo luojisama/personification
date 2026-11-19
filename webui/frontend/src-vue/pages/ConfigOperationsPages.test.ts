@@ -207,7 +207,7 @@ describe("ConfigOperationsPages.vue", () => {
 
     await wrapper.get("#config-bot_name").setValue("新的昵称");
     expect(
-      wrapper.get(".config-save-actions button").attributes("disabled"),
+      wrapper.get(".config-save-actions button:last-child").attributes("disabled"),
     ).toBeUndefined();
 
     await wrapper.get("#config-unknown_metadata").trigger("click");
@@ -223,7 +223,7 @@ describe("ConfigOperationsPages.vue", () => {
     );
     expect(textarea.attributes("aria-invalid")).toBe("true");
     expect(
-      wrapper.get(".config-save-actions button").attributes("disabled"),
+      wrapper.get(".config-save-actions button:last-child").attributes("disabled"),
     ).toBeDefined();
   });
 
@@ -232,7 +232,7 @@ describe("ConfigOperationsPages.vue", () => {
     await flushPromises();
 
     await wrapper.get("#config-bot_name").setValue("新的昵称");
-    await wrapper.get(".config-save-actions button").trigger("click");
+    await wrapper.get(".config-save-actions button:last-child").trigger("click");
 
     expect(wrapper.get("[role=dialog]").text()).toContain("原子保存配置草稿");
     const confirmButton = wrapper

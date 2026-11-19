@@ -6,9 +6,14 @@
         <ol v-if="providers.length" class="provider-list">
           <li v-for="(provider, index) in providers" :key="providerKey(provider, index)" class="provider-card">
             <header class="provider-card-head">
-              <strong>{{ providerName(provider, index) }}</strong>
+              <div>
+                <strong>{{ providerName(provider, index) }}</strong>
+                <p v-if="text(provider.default_model_id)" class="muted-copy">默认模型 <code>{{ text(provider.default_model_id) }}</code></p>
+              </div>
               <button class="button button-secondary" type="button" :aria-label="`删除供应商 ${providerName(provider, index)}`" @click="removeProvider(index)">删除供应商</button>
             </header>
+            <details class="provider-details" :open="!models(provider).length">
+              <summary>连接设置</summary>
             <div class="provider-grid">
               <TextField :id="fieldId(index, 'provider-id')" :model-value="text(provider.provider_id)" label="供应商 ID" description="稳定 ID；用于模型用途绑定，创建后请勿随意改动。" required @update:model-value="updateProvider(index, 'provider_id', $event)" />
               <TextField :id="fieldId(index, 'name')" :model-value="text(provider.name)" label="显示名称" required @update:model-value="updateProvider(index, 'name', $event)" />
@@ -21,6 +26,7 @@
               <TextField v-if="usesAuthPath(provider)" :id="fieldId(index, 'auth-path')" :model-value="text(provider.auth_path)" label="认证文件路径" type="password" autocomplete="new-password" placeholder="留空保留服务端已保存路径" @update:model-value="updateProvider(index, 'auth_path', $event)" />
               <TextField v-if="usesProject(provider)" :id="fieldId(index, 'project')" :model-value="text(provider.project)" label="项目 ID（可选）" @update:model-value="updateProvider(index, 'project', $event)" />
             </div>
+            </details>
             <div class="provider-model-toolbar">
               <h4>已添加模型</h4>
               <button class="button button-secondary" type="button" :disabled="probing[providerKey(provider, index)]" @click="discoverModels(index)">{{ probing[providerKey(provider, index)] ? '正在获取…' : '获取可用模型' }}</button>
@@ -42,15 +48,18 @@
               </ul>
             </section>
             <ol v-if="models(provider).length" class="model-list">
-              <li v-for="(model, modelIndex) in models(provider)" :key="modelKey(model, modelIndex)" class="model-card">
+              <li v-for="(model, modelIndex) in models(provider)" :key="modelIndex" class="model-card">
                 <div class="model-grid">
-                  <TextField :id="fieldId(index, `model-${modelIndex}-id`)" :model-value="text(model.model_id)" label="模型 ID" required placeholder="例如 gemini-2.5-flash" @update:model-value="updateModel(index, modelIndex, 'model_id', $event)" />
+                  <TextField :id="fieldId(index, `model-${modelIndex}-id`)" :model-value="text(model.model_id)" label="模型 ID" required placeholder="填写供应商提供的模型 ID" @update:model-value="updateModel(index, modelIndex, 'model_id', $event)" />
                   <TextField :id="fieldId(index, `model-${modelIndex}-display`)" :model-value="text(model.display_name)" label="显示名称" placeholder="留空使用模型 ID" @update:model-value="updateModel(index, modelIndex, 'display_name', $event)" />
+                </div>
+                <details class="provider-details">
+                  <summary>容量与模型能力</summary>
+                <div class="model-grid">
                   <NumberField :id="fieldId(index, `model-${modelIndex}-context`)" :model-value="number(model.context_window_tokens)" label="上下文 Token" :min="1" :step="1" placeholder="未配置时保守窗口 32,768" @update:model-value="updateModel(index, modelIndex, 'context_window_tokens', $event)" />
                   <NumberField :id="fieldId(index, `model-${modelIndex}-input`)" :model-value="number(model.max_input_tokens)" label="最大输入 Token" :min="1" :step="1" placeholder="可选" @update:model-value="updateModel(index, modelIndex, 'max_input_tokens', $event)" />
                   <NumberField :id="fieldId(index, `model-${modelIndex}-output`)" :model-value="number(model.max_output_tokens)" label="每次输出预留 Token" :min="1" :step="1" placeholder="可选" @update:model-value="updateModel(index, modelIndex, 'max_output_tokens', $event)" />
                   <NumberField :id="fieldId(index, `model-${modelIndex}-limit`)" :model-value="number(model.input_token_limit)" label="输入 Token 硬上限" :min="1" :step="1" placeholder="可选" @update:model-value="updateModel(index, modelIndex, 'input_token_limit', $event)" />
-                  <SwitchField :id="fieldId(index, `model-${modelIndex}-enabled`)" :model-value="model.enabled !== false" label="启用模型" @update:model-value="updateModel(index, modelIndex, 'enabled', $event)" />
                   <SwitchField :id="fieldId(index, `model-${modelIndex}-tools`)" :model-value="capability(model, 'function_call')" label="工具调用（声明）" @update:model-value="setCapability(index, modelIndex, 'function_call', $event)" />
                   <SwitchField :id="fieldId(index, `model-${modelIndex}-vision`)" :model-value="capability(model, 'image_input')" label="图片输入（声明）" @update:model-value="setCapability(index, modelIndex, 'image_input', $event)" />
                 </div>
@@ -58,21 +67,22 @@
                 <p v-if="number(reportedModel(provider, index, model).reported_input_token_limit) || number(reportedModel(provider, index, model).reported_output_token_limit)" class="muted-copy">服务元数据：输入能力 {{ number(reportedModel(provider, index, model).reported_input_token_limit) || '未知' }}；输出能力 {{ number(reportedModel(provider, index, model).reported_output_token_limit) || '未知' }}。采纳会将输入能力作为未配置模型的保守窗口和输入容量；生效输入仍受分配比例与预留约束。输出能力上限不作为每次输出预留。</p>
                 <button v-if="number(reportedModel(provider, index, model).reported_input_token_limit)" class="button button-secondary" type="button" @click="adoptCapacity(index, modelIndex)">采纳为保守窗口和输入容量</button>
                 <p class="muted-copy model-capability-note">能力声明会随模型保存，用于路由能力展示；未经过实际探测前仍是“未知”，不会把列表发现当成已验证能力。</p>
+                </details>
                 <div class="model-actions">
+                  <SwitchField :id="fieldId(index, `model-${modelIndex}-enabled`)" :model-value="model.enabled !== false" label="启用模型" @update:model-value="updateModel(index, modelIndex, 'enabled', $event)" />
                   <button class="button button-secondary" type="button" :disabled="text(provider.default_model_id) === text(model.model_id)" @click="setDefaultModel(index, text(model.model_id))">设为默认</button>
                   <button class="button button-secondary" type="button" @click="removeModel(index, modelIndex)">删除模型</button>
                 </div>
               </li>
             </ol>
             <p v-else class="structured-list-editor-empty">尚未添加模型。可以获取列表，或直接手动填写模型 ID。</p>
-            <div class="purpose-panel">
-              <h4>按用途快捷选择</h4>
+            <details class="provider-details purpose-panel" :open="Object.keys(purposeModels(provider)).length > 0">
+              <summary>此供应商的用途覆盖</summary>
               <p class="muted-copy">留空即继承该供应商默认模型；严格主模型模式仍由服务端优先处理。</p>
               <div class="purpose-grid">
                 <SearchableSelect v-for="purpose in purposes" :key="purpose.key" :id="fieldId(index, `purpose-${purpose.key}`)" :model-value="text(purposeModels(provider)[purpose.key])" :label="purpose.label" :options="modelOptions(provider)" placeholder="继承默认模型" @update:model-value="setPurpose(index, purpose.key, $event)" />
               </div>
-              <p v-if="text(provider.default_model_id)" class="muted-copy">默认模型：<code>{{ text(provider.default_model_id) }}</code></p>
-            </div>
+            </details>
           </li>
         </ol>
         <p v-else class="structured-list-editor-empty">暂未添加供应商。</p>
@@ -124,7 +134,6 @@ function text(value: unknown, fallback = ""): string { return typeof value === "
 function number(value: unknown): number | null { return typeof value === "number" && Number.isFinite(value) ? value : null; }
 function providerKey(provider: Row, index: number): string { return text(provider.provider_id) || `new-${index}`; }
 function providerName(provider: Row, index: number): string { return text(provider.name) || `供应商 ${index + 1}`; }
-function modelKey(model: Row, index: number): string { return text(model.model_id) || `new-model-${index}`; }
 function models(provider: Row): Row[] { return Array.isArray(provider.models) ? provider.models.filter(record).map(clone) : []; }
 function purposeModels(provider: Row): Row { return record(provider.purpose_models) ? clone(provider.purpose_models) : {}; }
 function normalizedType(provider: Row): string { return text(provider.api_type).toLowerCase().replaceAll("-", "_"); }
@@ -219,4 +228,17 @@ function validate(rows: Row[]): string {
 
 <style scoped>
 .provider-pool,.provider-list,.model-list{display:grid;gap:.85rem}.provider-list,.model-list,.candidate-list{list-style:none;margin:0;padding:0}.provider-card,.model-card,.candidate-panel{display:grid;gap:.8rem;padding:.9rem;border:1px solid var(--border-subtle,rgba(128,128,128,.35));border-radius:.7rem}.provider-card-head,.provider-model-toolbar,.model-actions,.candidate-toolbar{display:flex;align-items:center;gap:.55rem;justify-content:space-between;flex-wrap:wrap}.provider-grid,.model-grid,.purpose-grid{display:grid;gap:.65rem;grid-template-columns:repeat(auto-fit,minmax(12rem,1fr))}.candidate-toolbar h5{margin:0}.candidate-toolbar input{min-width:min(100%,16rem);flex:1 1 14rem}.candidate-list{display:grid;gap:.35rem}.candidate-list label{display:flex;align-items:center;gap:.45rem;cursor:pointer}.candidate-list input[type="checkbox"]{inline-size:auto;block-size:auto;flex:0 0 auto;margin:0}.candidate-list code{overflow-wrap:anywhere}.purpose-panel{display:grid;gap:.55rem;padding-top:.2rem}.purpose-panel h4,.provider-model-toolbar h4{margin:0}.form-error{color:var(--danger,#b42318);margin:0}
+.provider-details > summary {
+  color: var(--color-ink);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.provider-details[open] > :not(summary) {
+  margin-top: .7rem;
+}
+
+.provider-grid, .model-grid, .purpose-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+}
 </style>

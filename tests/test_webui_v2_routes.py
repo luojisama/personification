@@ -108,6 +108,26 @@ def test_v2_trace_projection_recovers_safe_message_io_and_real_timing() -> None:
     assert summary["elapsed_ms"] == 3000
 
 
+def test_config_fields_filter_matches_exact_keys(monkeypatch) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    rows = [
+        {"field_name": "personification_model", "group": "模型路由"},
+        {"field_name": "personification_model_purpose_bindings", "group": "模型路由"},
+    ]
+    monkeypatch.setattr(v2_routes, "_config_snapshot", lambda _runtime: ("test-revision", rows))
+    app = FastAPI()
+    app.include_router(v2_routes.build_v2_router(runtime=SimpleNamespace(plugin_config=SimpleNamespace())))
+    app.dependency_overrides[v2_routes.require_admin] = lambda: None
+
+    response = TestClient(app).get("/api/v2/config", params={"fields": "personification_model"})
+
+    assert response.status_code == 200
+    assert response.json()["items"] == rows[:1]
+    assert response.json()["group_counts"] == {"模型路由": 2}
+
+
 def test_v2_trace_projection_sanitizes_legacy_message_and_bad_timestamp() -> None:
     trace = {
         "trace_id": "trace-legacy-sensitive",

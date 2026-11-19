@@ -361,7 +361,7 @@ async def run_full_path_case(case: dict[str, Any], *, caller: Any, isolated_dir:
     original_yaml_topic, original_yaml_recent = yaml_mod.get_group_topic_summary, yaml_mod.get_recent_group_msgs
     original_qzone_register = yaml_mod.register_groupmate_qzone_agent_tools
     original_sticker_feedback = yaml_mod.load_sticker_feedback
-    tool_registrars = ("register_qq_recall_tool", "register_current_user_avatar_tool", "register_peer_bot_tools", "register_current_group_context_tool", "register_send_qq_expression_tools", "register_group_user_avatar_pair_insight_tool", "register_group_member_avatar_insight_tool", "register_moderation_for_turn")
+    tool_registrars = ("register_qq_recall_tool", "register_current_user_avatar_tool", "register_peer_bot_tools", "register_current_group_context_tool", "register_send_qq_expression_tools", "register_group_user_avatar_pair_insight_tool", "register_group_member_avatar_insight_tool", "register_moderation_for_turn", "register_own_group_card_tool")
     original_registrars = {name: getattr(yaml_mod, name) for name in tool_registrars}
     # Both pipelines build turn-local registries even when the injected base
     # registry is empty. Disable registration *before* those helpers can read

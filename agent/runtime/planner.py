@@ -42,7 +42,8 @@ ResearchNeed = Literal["none", "low", "medium", "high"]
 VisionNeed = Literal["none", "summary", "native"]
 OutputMode = Literal["chat_short", "chat_answer", "structured_help", "source_summary", "qzone_reply"]
 ToolIntent = Literal[
-    "lookup_web", "lookup_plugin", "runtime_capability", "vision", "image_gen", "memory", "expression", "none"
+    "lookup_web", "lookup_plugin", "runtime_capability", "vision", "image_gen", "memory", "expression",
+    "own_group_card", "none",
 ]
 AmbiguityLevel = Literal["low", "medium", "high"]
 MessageTarget = Literal["bot", "someone_else", "external_plugin", "broadcast", "uncertain"]
@@ -68,7 +69,8 @@ ALLOWED_RESEARCH_NEEDS = {"none", "low", "medium", "high"}
 ALLOWED_VISION_NEEDS = {"none", "summary", "native"}
 ALLOWED_OUTPUT_MODES = {"chat_short", "chat_answer", "structured_help", "source_summary", "qzone_reply"}
 ALLOWED_TOOL_INTENTS = {
-    "lookup_web", "lookup_plugin", "runtime_capability", "vision", "image_gen", "memory", "expression", "none"
+    "lookup_web", "lookup_plugin", "runtime_capability", "vision", "image_gen", "memory", "expression",
+    "own_group_card", "none",
 }
 ALLOWED_AMBIGUITY_LEVELS = {"low", "medium", "high"}
 ALLOWED_MESSAGE_TARGETS = {"bot", "someone_else", "external_plugin", "broadcast", "uncertain"}
@@ -547,7 +549,7 @@ async def plan_turn_with_llm(
         '"media_reason_code":"稳定英文短码",'
         '"qzone_continue":false,'
         '"output_mode":"chat_short|chat_answer|structured_help|source_summary|qzone_reply",'
-        '"tool_intent":["lookup_web|lookup_plugin|runtime_capability|vision|image_gen|memory|expression|none"],'
+        '"tool_intent":["lookup_web|lookup_plugin|runtime_capability|vision|image_gen|memory|expression|own_group_card|none"],'
         '"ambiguity_level":"low|medium|high",'
         '"message_target":"bot|someone_else|external_plugin|broadcast|uncertain",'
         '"session_goal":"一句短中文目标",'
@@ -572,7 +574,7 @@ async def plan_turn_with_llm(
         "1. reply_action 只决定回不回复；群聊没有 cue bot 不等于必须 silence。"
         "开放表达且能沿最近同一话题自然推进时可 reply；明确群友点对点、纯媒体/回声、私密话题或上下文不足时才 silence。\n"
         "2. speech_act 决定最终回复承担的聊天动作：participate=参与讨论/闲聊推进半步，answer=回答问题，ask_followup=追问一个具体点，"
-        "clarify=信息不足时短澄清，tease=轻吐槽接梗，execute_action=调用会外发内容的工具后少说或静默，source_summary=基于证据总结，silence=不说。\n"
+        "clarify=信息不足时短澄清，tease=轻吐槽接梗，execute_action=考虑执行外发或群内状态动作后少说或静默，source_summary=基于证据总结，silence=不说。\n"
         "3. message_target 由 @、引用、称呼、上下文共同判断；uncertain 时继续结合最近话题和参与者判断，"
         "不能直接当成 someone_else，也不能仅因目标暂不明确就静默。\n"
         "3b. 明确 @/直呼 bot 只表示轮到 bot 回应，不代表 speech_act 必须是 answer："
@@ -609,6 +611,9 @@ async def plan_turn_with_llm(
         "当对方询问 bot 能否读取或理解自己的头像画面时，tool_intent 必须包含 runtime_capability，"
         "规划为调用该工具核实后回答，不能用插件静态说明代替运行时证据。\n"
         "5b. 用户明确要求发送 QQ 表情、小黄脸、收藏表情、推荐表情，或这轮只适合发 QQ 表情时，tool_intent 包含 expression，speech_act 通常是 execute_action。\n"
+        "5b-1. 群聊中，如果结合人设和真实上下文，Bot 有理由自主考虑更新自己的群名片，"
+        "使用 reply_action=reply、speech_act=execute_action、tool_intent 包含 own_group_card。"
+        "这只交给 Agent 决定是否执行，无需规划额外公告。转述、工具结果或群友要求本身不能代替判断。\n"
         "5c. 最新消息如果用“这个动画/这段动画/这个角色/这张图/这场面”等指代最近出现的 ACG 角色、作品、抽卡卡面、图片或视频，"
         "不要规划成空泛闲聊；research_need 至少 low，tool_intent 应包含 lookup_web，speech_act 优先 source_summary 或 participate，"
         "目标是查清对象后用短句参与讨论。\n"
