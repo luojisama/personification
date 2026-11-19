@@ -600,6 +600,18 @@ DEFAULT_FREE_SEARCH_ENGINES: tuple[str, ...] = (
 )
 
 
+async def collect_search_tasks(tasks: list[asyncio.Task[Any]], *, timeout: float | None) -> list[Any]:
+    """Keep completed results in input order and cancel unfinished searches."""
+    try:
+        done, _ = await asyncio.wait(tasks, timeout=timeout)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    return [result if task in done else None for task, result in zip(tasks, results)]
+
+
 async def free_search(
     query: str,
     *,
@@ -608,6 +620,7 @@ async def free_search(
     proxy: Optional[str] = None,
     searxng_instances: Optional[List[str]] = None,
     logger: Any = None,
+    timeout: float | None = None,
 ) -> List[SearchResult]:
     """按 engines 顺序并行调用各免 key 引擎，并按优先级合并去重。"""
     query = (query or "").strip()
@@ -644,7 +657,8 @@ async def free_search(
     if not tasks_map:
         return []
 
-    await asyncio.gather(*tasks_map.values(), return_exceptions=True)
+    completed = await collect_search_tasks(list(tasks_map.values()), timeout=timeout)
+    results = dict(zip(tasks_map, completed))
 
     flat: List[SearchResult] = []
     seen_urls: set[str] = set()
@@ -656,17 +670,12 @@ async def free_search(
                 )
             )
         )
-        task = tasks_map.get(alias)
-        if task and task.done() and not task.cancelled():
-            try:
-                res = task.result()
-                if isinstance(res, list):
-                    for item in res:
-                        if item.url not in seen_urls:
-                            seen_urls.add(item.url)
-                            flat.append(item)
-            except Exception:
-                pass
+        found = results.get(alias)
+        if isinstance(found, list):
+            for item in found:
+                if item.url not in seen_urls:
+                    seen_urls.add(item.url)
+                    flat.append(item)
     return flat[: max(1, max_results * 2)]
 
 

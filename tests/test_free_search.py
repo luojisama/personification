@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from ._loader import load_personification_module
 
 fs = load_personification_module("plugin.personification.core.free_search")
+grounding = load_personification_module("plugin.personification.core.web_grounding")
 
 
 class _FakeResponse:
@@ -321,7 +323,12 @@ def test_free_search_empty_engines_uses_default(monkeypatch) -> None:
     async def fake_moe(q, **kw):
         return [fs.SearchResult(title="M", url="https://m.com", domain="m.com", snippet="m", source="moegirl", score=0.9)]
 
+    async def empty(q, **kw):
+        return []
+
     monkeypatch.setattr(fs, "moegirl_search", fake_moe)
+    for engine in ("bing", "duckduckgo", "searxng", "wikipedia"):
+        monkeypatch.setattr(fs, f"{engine}_search", empty)
     out = asyncio.run(fs.free_search("q", engines=[]))
     # 默认空或缺省时使用 DEFAULT_FREE_SEARCH_ENGINES，包含 moegirl
     assert len(out) >= 1
@@ -331,6 +338,73 @@ def test_free_search_empty_engines_uses_default(monkeypatch) -> None:
 def test_free_search_empty_query_returns_empty() -> None:
     out = asyncio.run(fs.free_search("   ", engines=["wikipedia"]))
     assert out == []
+
+
+def test_free_search_keeps_fast_source_when_another_times_out(monkeypatch) -> None:
+    cancelled = False
+    hit = fs.SearchResult(title="Wiki", url="https://wiki.test", domain="wiki.test", snippet="事实", source="wikipedia")
+
+    async def fast(*args, **kwargs):
+        return [hit]
+
+    async def slow(*args, **kwargs):
+        nonlocal cancelled
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled = True
+
+    monkeypatch.setattr(fs, "wikipedia_search", fast)
+    monkeypatch.setattr(fs, "bing_search", slow)
+    assert asyncio.run(fs.free_search("示例", engines=["bing", "wikipedia"], timeout=0.02)) == [hit]
+    assert cancelled
+
+
+@pytest.mark.parametrize(("fact_check", "search_depth"), [(False, "basic"), (True, "advanced")])
+def test_web_search_returns_eight_distinct_pages_when_baike_is_slow(monkeypatch, fact_check, search_depth) -> None:
+    cancelled = False
+    collect = fs.collect_search_tasks
+    depths: list[str] = []
+
+    async def collect_with_short_timeout(tasks, *, timeout):
+        assert timeout == 8.0
+        return await collect(tasks, timeout=0.02)
+
+    async def tavily(*args, **kwargs):
+        depths.append(kwargs["search_depth"])
+        return [fs.SearchResult("重复页", "https://docs.test/0", "docs.test", "低分摘要", "tavily", 0.1)]
+
+    async def free(*args, max_results, timeout, **kwargs):
+        assert max_results == 8
+        assert timeout == 6.0
+        return [
+            fs.SearchResult(f"页面{index}", f"https://docs.test/{index}", "docs.test", "说明", "bing", 0.9)
+            for index in range(8)
+        ]
+
+    async def slow_baike(*args, **kwargs):
+        nonlocal cancelled
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled = True
+
+    monkeypatch.setattr(fs, "collect_search_tasks", collect_with_short_timeout)
+    monkeypatch.setattr(fs, "free_search", free)
+    monkeypatch.setattr(grounding, "fetch_tavily_results", tavily)
+    monkeypatch.setattr(grounding, "fetch_baike_summary", slow_baike)
+    monkeypatch.setattr(grounding, "infer_grounding_intent", lambda _query: "knowledge")
+    monkeypatch.setattr(grounding, "should_force_fact_check", lambda _query: fact_check)
+    result = asyncio.run(grounding.do_web_search(
+        "示例", get_now=lambda: None, logger=None,
+        plugin_config=SimpleNamespace(personification_web_search_max_results=8),
+    ))
+
+    assert cancelled
+    assert depths == [search_depth]
+    assert "命中=8" in result
+    assert result.count("https://docs.test/0") == 1
+    assert "低分摘要" not in result
 
 
 # ──────────── 测速与延迟探测 ────────────

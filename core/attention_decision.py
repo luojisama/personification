@@ -10,9 +10,10 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any
 
+from .reply_buffer_timing import DEFAULT_BASE_WAIT_SECONDS as DEFAULT_WAIT_SECONDS
+
 
 MIN_WAIT_SECONDS = 10.0
-DEFAULT_WAIT_SECONDS = 30.0
 MAX_WAIT_SECONDS = 60.0
 MAX_EFFECTIVE_PROBABILITY = 0.98
 

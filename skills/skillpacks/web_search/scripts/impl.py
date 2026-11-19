@@ -10,6 +10,7 @@ from plugin.personification.core.web_grounding import do_web_search as do_web_se
 WEB_SEARCH_DESCRIPTION = """快速搜索互联网并返回已整理的摘要文本。
 适合使用的场景：需要实时信息（天气除外）、近期事件、事实查证、补充背景知识。
 不适合使用的场景：查结构化链接列表、GitHub 仓库、官网入口、图片资源，这些应优先使用更专门的搜索工具。
+一次查询会聚合多个来源。已有足够证据时直接回答，需要补查时针对缺失的事实使用更具体的关键词。
 搜索后，将结果消化为自然语言，用角色口吻说出，不要暴露"我搜索了"。"""
 
 SEARCH_RESULT_FORMAT_PROMPT = """以下是搜索结果，请从中提取关键信息，用角色口吻自然地表达出来。
@@ -90,6 +91,7 @@ def build_web_search_tool(
             final_query,
             get_now=get_now,
             logger=logger,
+            plugin_config=plugin_config,
         )
 
     return AgentTool(

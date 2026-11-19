@@ -92,6 +92,7 @@ from .tool_loop import (
     trace_tool_result,
 )
 from .tool_args import (
+    GENERAL_WEB_SEARCH_TOOLS,
     _query_variants_for_tool,
     _rewrite_tool_args,
     _sanitize_tool_args_for_schema,
@@ -101,7 +102,7 @@ from .tool_args import (
 from .budgeting import apply_agent_budget_profile, derive_agent_budget_profile, render_agent_budget_trace_detail
 from .background_learning import start_active_learning_task
 from .final_synthesis import AgentResult, direct_tool_result_agent_result, synthesize_max_steps_result
-from .tool_catalog import tool_runtime_metadata
+from .tool_catalog import is_retryable_evidence_tool, tool_runtime_metadata
 from .tool_contracts import recommended_tools_for_chat_intent
 from .tool_discovery import (
     TOOL_SEARCH_NAME,
@@ -119,9 +120,12 @@ from .wrappers import (
     _wrap_tool_result_in_persona,
 )
 from .fallbacks import (
+    TOOL_RESULT_USABLE_EVIDENCE,
     _cancel_task_safely,
     _parse_json_tool_result,
     _select_semantic_fallback_tool,
+    _tool_result_outcome,
+    tool_signature,
 )
 
 _TIME_SENSITIVE_SEARCH_TOOLS = frozenset({"web_search", "search_web"})
@@ -296,6 +300,7 @@ async def run_agent(
     context_only = bool(getattr(execution_policy, "is_context_only", False))
     executed_steps = 0
     tool_calls_executed = 0
+    search_results_by_call: dict[str, str] = {}
     if cancel_background_social_video_research(executor):
         _record_reply_trace_stage(
             key="background_media_research_cancelled",
@@ -1324,6 +1329,16 @@ async def run_agent(
                 continue
             tool_started_at = time.monotonic()
             did_execute = False
+            search_key = ""
+            if (
+                tool_call.name in GENERAL_WEB_SEARCH_TOOLS
+                and tool_args.get("query")
+                and is_retryable_evidence_tool(registry, tool_call.name)
+            ):
+                search_args = _sanitize_tool_args_for_schema(
+                    registry=registry, tool_name=tool_call.name, tool_args=tool_args,
+                )
+                search_key = tool_signature(tool_call.name, search_args)
             if str(tool_call.name or "").strip() == TOOL_SEARCH_NAME and disclosure_mode != "native":
                 result = tool_disclosure.search(**tool_args)
                 _record_reply_trace_stage(
@@ -1342,6 +1357,14 @@ async def run_agent(
                 )
             elif tool is None:
                 result = f"工具 {tool_call.name} 不存在"
+            elif search_key in search_results_by_call:
+                result = search_results_by_call[search_key]
+                _record_reply_trace_stage(
+                    key="agent_search_reused",
+                    label="复用本轮搜索结果",
+                    status="info",
+                    detail=f"step={_step + 1} tool={tool_call.name}",
+                )
             else:
                 # Directory discovery and blocked/unknown calls are model
                 # protocol events, not executed business tools or evidence.
@@ -1363,6 +1386,8 @@ async def run_agent(
                     minimum_start_seconds=_AGENT_TOOL_MIN_START_SECONDS,
                     safe_failures=True,
                 )
+                if search_key and _tool_result_outcome(result) == TOOL_RESULT_USABLE_EVIDENCE:
+                    search_results_by_call[search_key] = result
             tool_elapsed_ms = int((time.monotonic() - tool_started_at) * 1000)
             _record_reply_trace_stage(
                 key="agent_tool_budget",

@@ -391,8 +391,9 @@ async def fetch_tavily_results(
     get_now: Callable[[], Any],
     logger: Any,
     max_results: int = 6,
+    search_depth: str = "advanced",
 ) -> "List[Any]":
-    """Tavily advanced 模式 → 结构化 SearchResult 列表。无 key 返回 []。"""
+    """把 Tavily 结果转换为结构化 SearchResult。无 key 返回空列表。"""
     from .free_search import SearchResult, _clip_snippet, _domain_of  # 避免循环 import
 
     api_key = _get_tavily_api_key()
@@ -415,7 +416,7 @@ async def fetch_tavily_results(
     payload = {
         "api_key": api_key,
         "query": query,
-        "search_depth": "advanced",
+        "search_depth": search_depth,
         "include_answer": True,
         "max_results": max(3, min(int(max_results or 6), 10)),
     }
@@ -658,40 +659,50 @@ def should_avoid_interrupting(
     return random.random() > pass_rate
 
 
-def _get_web_search_config() -> dict:
+def _get_web_search_config(plugin_config: Any = None) -> dict:
     """读取 web_search 相关运行时配置，缺省值兜底。"""
-    try:
-        from nonebot import get_driver
-        cfg = get_driver().config
-    except Exception:
-        cfg = None
+    from .generation_fence import active_config
+
+    cfg = active_config(plugin_config)
+    if cfg is None:
+        try:
+            from nonebot import get_driver
+            cfg = get_driver().config
+        except Exception:
+            cfg = None
+
     def g(name, default):
         return getattr(cfg, name, default) if cfg is not None else default
+
     return {
         "engines": list(g("personification_free_search_engines", ["moegirl", "bing", "duckduckgo", "searxng", "wikipedia"]) or []),
         "instances": list(g("personification_searxng_instances", []) or []),
-        "max_results": int(g("personification_web_search_max_results", 6) or 6),
+        "max_results": int(g("personification_web_search_max_results", 8) or 8),
         "snippet_chars": int(g("personification_web_search_snippet_chars", 400) or 400),
         "proxy": (str(g("personification_web_proxy", "") or "").strip() or None),
     }
 
 
 def _dedup_and_rank(results: list, *, max_results: int) -> list:
-    """同 URL 折合；同 domain 取 score 最高那条；按 score 倒序。"""
+    """先保留各域名的最佳结果，再用不同页面补足剩余名额。"""
+    ranked = sorted(results, key=lambda item: -(getattr(item, "score", 0) or 0))
     seen_url: set[str] = set()
-    by_domain: dict[str, Any] = {}
-    for r in results:
+    seen_domain: set[str] = set()
+    diverse: list = []
+    extra: list = []
+    for r in ranked:
         if not getattr(r, "url", None) or not getattr(r, "title", None):
             continue
         if r.url in seen_url:
             continue
         seen_url.add(r.url)
         dom = r.domain or _domain_of_safe(r.url)
-        cur = by_domain.get(dom)
-        if cur is None or (getattr(r, "score", 0) or 0) > (getattr(cur, "score", 0) or 0):
-            by_domain[dom] = r
-    ranked = sorted(by_domain.values(), key=lambda x: -(getattr(x, "score", 0) or 0))
-    return ranked[:max_results]
+        if dom in seen_domain:
+            extra.append(r)
+        else:
+            seen_domain.add(dom)
+            diverse.append(r)
+    return (diverse + extra)[:max_results]
 
 
 def _domain_of_safe(url: str) -> str:
@@ -744,19 +755,20 @@ async def do_web_search(
     context_hint: str = "",
     get_now: Callable[[], Any],
     logger: Any,
+    plugin_config: Any = None,
 ) -> str:
     """聚合 Tavily（可选）+ 百度百科 + 免 key 引擎链（Wikipedia/SearXNG/DDG）。
 
     返回对 LLM 友好的结构化字符串，含来源 URL；失败时返回明确的"未检索到"提示
     供不确定性护栏接住。
     """
-    from .free_search import SearchResult, free_search
+    from .free_search import SearchResult, collect_search_tasks, free_search
 
     try:
         topic = merge_grounding_topic(query, context_hint)
         intent = infer_grounding_intent(topic)
         force_fact_check = should_force_fact_check(query) or should_force_fact_check(topic)
-        cfg = _get_web_search_config()
+        cfg = _get_web_search_config(plugin_config)
         max_results = max(3, min(cfg["max_results"], 10))
 
         # ──── 1) 主路径并行：Tavily（有 key 时）+ 免 key 引擎链 ────
@@ -770,6 +782,7 @@ async def do_web_search(
                     get_now=get_now,
                     logger=logger,
                     max_results=max_results,
+                    search_depth="advanced" if force_fact_check else "basic",
                 )
             )
         )
@@ -782,44 +795,26 @@ async def do_web_search(
                     proxy=cfg["proxy"],
                     searxng_instances=cfg["instances"] or None,
                     logger=logger,
+                    timeout=6.0,
                 )
             )
         )
 
         # 知识 / 推荐意图：额外塞一份百度百科作为高密度中文事实层
-        baike_task: Optional[asyncio.Task] = None
         if intent in {"knowledge", "recommend"}:
-            baike_task = asyncio.create_task(fetch_baike_summary(topic, logger=logger))
+            tasks.append(asyncio.create_task(fetch_baike_summary(topic, logger=logger)))
 
-        try:
-            results_lists = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=8.0)
-        except asyncio.TimeoutError:
-            results_lists = []
-            for t in tasks:
-                if t.done() and not t.cancelled():
-                    try:
-                        r = t.result()
-                        if isinstance(r, list):
-                            results_lists.append(r)
-                    except Exception:
-                        pass
         merged: list = []
-        for res in results_lists:
+        for res in await collect_search_tasks(tasks, timeout=8.0):
             if isinstance(res, list):
                 merged.extend(res)
-
-        if baike_task is not None:
-            try:
-                baike_text = await baike_task
-            except Exception:
-                baike_text = ""
-            if baike_text:
+            elif isinstance(res, str) and res:
                 merged.append(
                     SearchResult(
                         title=f"{topic} - 百度百科",
                         url=f"https://baike.baidu.com/item/{quote(topic)}",
                         domain="baike.baidu.com",
-                        snippet=str(baike_text)[: cfg["snippet_chars"]],
+                        snippet=res[: cfg["snippet_chars"]],
                         source="baidu_baike",
                         score=0.85,
                     )

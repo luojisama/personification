@@ -8,6 +8,9 @@ from ..tool_registry import ToolRegistry
 from .intent import compact_lookup_query
 
 
+GENERAL_WEB_SEARCH_TOOLS = frozenset({"web_search", "multi_search_engine"})
+
+
 def _parse_json_tool_result(text: str) -> dict[str, Any] | None:
     raw = str(text or "").strip()
     if not raw or not raw.startswith("{"):
@@ -60,11 +63,13 @@ def query_variants_for_tool(
     max_variants: int = 1,
 ) -> list[str]:
     candidates: list[str] = []
+    provided_query = compact_lookup_query(str((tool_args or {}).get("query", "") or ""))
+    if provided_query and tool_name in GENERAL_WEB_SEARCH_TOOLS:
+        candidates.append(provided_query)
     if rewritten_query is not None:
         primary_query = compact_lookup_query(rewritten_query.primary_query)
-        if primary_query:
+        if primary_query and primary_query not in candidates:
             candidates.append(primary_query)
-    provided_query = compact_lookup_query(str((tool_args or {}).get("query", "") or ""))
     if provided_query and provided_query not in candidates:
         candidates.append(provided_query)
     if rewritten_query is not None:

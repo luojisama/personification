@@ -1303,7 +1303,7 @@ def _build_entries() -> list[ConfigEntry]:
             field_name="personification_web_search_max_results",
             display_name="搜索结果上限",
             value_type="int",
-            default=6,
+            default=8,
             scope=GLOBAL_SCOPE,
             description="web_search 返回给 LLM 的最大结果条数（合并去重后）。",
             category="config",

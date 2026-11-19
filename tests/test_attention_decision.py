@@ -298,7 +298,7 @@ def test_service_failure_continuation_falls_back_to_tier_two() -> None:
 
     assert decision.action is attention.AttentionAction.REPLY_CANDIDATE
     assert decision.tier == 2
-    assert decision.wait_seconds == 30.0
+    assert decision.wait_seconds == 18.0
     assert decision.reason_code is attention.AttentionReasonCode.FALLBACK_CONTINUATION
 
 

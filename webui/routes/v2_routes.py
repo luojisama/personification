@@ -18,6 +18,7 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from ...core.pagination import build_page, normalize_pagination, resolve_sort
+from ...core.reply_buffer_timing import DEFAULT_BASE_WAIT_SECONDS
 from ...core.webui_admin_identity import webui_identity_metadata
 from ...core.diagnostic_media_samples import (
     diagnostic_media_catalog_metadata,
@@ -4319,7 +4320,10 @@ def build_v2_router(*, runtime: Any) -> APIRouter:
             ),
             "reply_wait_contract": {
                 "min_seconds": float(getattr(config, "personification_batch_min_wait_seconds", 10.0) or 10.0),
-                "base_seconds": float(getattr(config, "personification_batch_base_wait_seconds", 30.0) or 30.0),
+                "base_seconds": float(
+                    getattr(config, "personification_batch_base_wait_seconds", DEFAULT_BASE_WAIT_SECONDS)
+                    or DEFAULT_BASE_WAIT_SECONDS
+                ),
                 "max_seconds": float(getattr(config, "personification_batch_max_wait_seconds", 60.0) or 60.0),
             },
             "whole_backup": {

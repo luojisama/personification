@@ -239,6 +239,45 @@ def test_execute_tool_with_retries_skips_failed_signatures_and_uses_new_query() 
     assert fallbacks.tool_signature("search_web", {"query": "新问题"}) in unavailable
 
 
+def test_run_agent_reuses_identical_search_and_executes_distinct_followup(monkeypatch) -> None:
+    handled: list[str] = []
+    stages: list[dict] = []
+
+    async def search(query: str) -> str:
+        handled.append(query)
+        return json.dumps({"results": [{"title": query}]}, ensure_ascii=False)
+
+    registry = tool_registry.ToolRegistry()
+    registry.register(tool_registry.AgentTool(
+        name="web_search", description="联网搜索", handler=search,
+        parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+    ))
+    monkeypatch.setattr(runner, "_record_reply_trace_stage", lambda **stage: stages.append(stage))
+    queries = ["首次查询", "首次查询", "补查发布日期"]
+    calls = [tool_impl.ToolCall(id=f"call-{i}", name="web_search", arguments={"query": query})
+             for i, query in enumerate(queries)]
+    caller = _FakeToolCaller([
+        tool_impl.ToolCallerResponse(finish_reason="tool_calls", content="", tool_calls=calls[:1], raw={}),
+        tool_impl.ToolCallerResponse(finish_reason="tool_calls", content="", tool_calls=calls[1:], raw={}),
+        tool_impl.ToolCallerResponse(finish_reason="stop", content="找到发布日期了。", tool_calls=[], raw={}),
+    ])
+
+    result = asyncio.run(runner.run_agent(
+        messages=[{"role": "user", "content": "帮我查一下发布时间"}],
+        registry=registry, tool_caller=caller,
+        executor=SimpleNamespace(execute=lambda *_args, **_kwargs: None),
+        plugin_config=SimpleNamespace(personification_agent_max_steps=4, personification_fallback_enabled=False),
+        logger=_FakeLogger(),
+        precomputed_intent=SimpleNamespace(chat_intent="banter", ambiguity_level="low"),
+    ))
+
+    assert result.text == "找到发布日期了。"
+    assert handled == ["首次查询", "补查发布日期"]
+    assert sum(stage["key"] == "agent_search_reused" for stage in stages) == 1
+    assert any(stage["key"] == "agent_execution_summary" and "tool_calls_executed=2" in stage["detail"]
+               for stage in stages)
+
+
 def test_execute_tool_with_retries_respects_single_query_attempt_metadata() -> None:
     calls: list[str] = []
 

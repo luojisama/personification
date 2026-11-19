@@ -8,9 +8,9 @@ from ._loader import load_personification_module
 timing_module = load_personification_module("plugin.personification.core.reply_buffer_timing")
 
 
-def test_fresh_config_uses_30_10_60_contract() -> None:
+def test_fresh_config_uses_18_10_60_contract() -> None:
     timing = timing_module.resolve_reply_buffer_timing(SimpleNamespace())
-    assert timing.base_wait_seconds == 30.0
+    assert timing.base_wait_seconds == 18.0
     assert timing.min_wait_seconds == 10.0
     assert timing.max_wait_seconds == 60.0
     assert timing.legacy_debounce_seconds is None

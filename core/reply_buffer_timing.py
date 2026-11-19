@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-DEFAULT_BASE_WAIT_SECONDS = 30.0
+DEFAULT_BASE_WAIT_SECONDS = 18.0
 DEFAULT_MIN_WAIT_SECONDS = 10.0
 DEFAULT_MAX_WAIT_SECONDS = 60.0
 HARD_MIN_WAIT_SECONDS = 10.0
@@ -34,7 +34,7 @@ def _optional_non_negative(value: Any) -> float | None:
 
 
 def resolve_reply_buffer_timing(config: Any) -> ReplyBufferTiming:
-    """Resolve the 30/10/60 contract and explicit legacy overrides.
+    """Resolve dynamic buffer timing and explicit legacy overrides.
 
     Legacy fields intentionally default to ``None``. Therefore an old value can
     only affect the contract when it was actually supplied by runtime config;

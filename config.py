@@ -31,6 +31,7 @@ from .core.favorability import (
     DEFAULT_FAVORABILITY_LEVELS,
     DEFAULT_FAVORABILITY_QUALITY_DELTAS,
 )
+from .core.reply_buffer_timing import DEFAULT_BASE_WAIT_SECONDS
 
 
 class Config(BaseModel):
@@ -154,7 +155,7 @@ class Config(BaseModel):
     # SearXNG 公共实例池，留空则用 core/free_search.py:DEFAULT_SEARXNG_INSTANCES。
     personification_searxng_instances: List[str] = []
     # web_search 返回给 LLM 的结果上限（top-N 渲染）与单条 snippet 字符上限。
-    personification_web_search_max_results: int = 6
+    personification_web_search_max_results: int = 8
     personification_web_search_snippet_chars: int = 400
     # web_fetch / web_search 走哪个 HTTP 代理（http://host:port）。
     # 国内服务器抓取被 DNS 污染/墙的站点（如 Cloudflare 前置站点、海外 API）时，
@@ -702,7 +703,7 @@ class Config(BaseModel):
     personification_humanize_typing_cps: float = 7.0
     personification_humanize_typing_max_delay: float = 5.0
     # ──────────── 回复缓冲（动态等待合同）────────────
-    personification_batch_base_wait_seconds: float = 30.0
+    personification_batch_base_wait_seconds: float = DEFAULT_BASE_WAIT_SECONDS
     personification_supplement_enabled: bool = True
     personification_supplement_window_seconds: float = 30.0
     personification_supplement_relation_batch_seconds: float = 0.5

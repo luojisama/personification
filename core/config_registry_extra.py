@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .reply_buffer_timing import DEFAULT_BASE_WAIT_SECONDS
+
 from .favorability import (
     DEFAULT_FAVORABILITY_ATTITUDES,
     DEFAULT_FAVORABILITY_BEHAVIOR_BANDS,
@@ -858,7 +860,7 @@ EXTRA_CONFIG_SPECS: tuple[dict[str, Any], ...] = (
        "模拟打字速度，越小延迟越长。", group="拟人行为", min=1, max=50, advanced=True),
     _s("personification_humanize_typing_max_delay", "float", 5.0, "打字延迟上限（秒）",
        "单条消息模拟延迟的最大值。", group="拟人行为", min=0, max=30, advanced=True),
-    _s("personification_batch_base_wait_seconds", "float", 30.0, "回复缓冲基线（秒）",
+    _s("personification_batch_base_wait_seconds", "float", DEFAULT_BASE_WAIT_SECONDS, "回复缓冲基线（秒）",
        "普通批次默认等待时间；运行时动态等待会限制在 10–60 秒。",
        group="拟人行为", min=10, max=60, advanced=True),
     _s("personification_batch_min_wait_seconds", "float", 10.0, "回复缓冲下限（秒）",

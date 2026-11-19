@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict
 
 from ..core import metrics, reply_turn_trace
+from ..core.reply_buffer_timing import DEFAULT_BASE_WAIT_SECONDS as _BATCH_BASE_WAIT_SECONDS
 from ..core.generation_fence import invalidate_generation, safe_to_supersede
 from ..core.context_cleanup import release_message_buffer_entry_resources
 from ..core.message_relations import extract_mentioned_ids, extract_reply_message_id, extract_reply_sender_id
@@ -42,7 +43,6 @@ _RECOVERY_FAILURE_LAST_LOG: float | None = None
 
 _GROUP_BATCH_DELAY_SECONDS = 1.2
 _PRIVATE_BATCH_DELAY_SECONDS = 0.8
-_BATCH_BASE_WAIT_SECONDS = 30.0
 _BATCH_MIN_WAIT_SECONDS = 10.0
 _BATCH_MAX_WAIT_SECONDS = 60.0
 _MAX_BATCH_EVENTS = 8
@@ -1101,7 +1101,7 @@ def _compute_batch_fire_at(
 
     每次新消息都从最后一条重新计算动态等待，同时以首条消息后的
     ``max_wait_seconds`` 为硬截止。生产配置会把等待限制在 10–60 秒；
-    测试可注入同比缩短后的数值，不需要真实等待 30 秒。
+    测试可注入缩短后的数值。
 
     ``legacy_reply_backoff_seconds`` 只兼容旧配置中显式提供的值，新安装
     不再继承旧版 15 秒默认值。
